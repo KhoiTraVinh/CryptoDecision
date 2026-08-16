@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>CS8602;CS8604</NoWarn>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <RootNamespace>CryptoDecision.BotService</RootNamespace>
+    <AssemblyName>CryptoDecision.BotService</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql"                                   Version="9.*" />
+    <PackageReference Include="Serilog.Extensions.Hosting"               Version="8.*" />
+    <PackageReference Include="Serilog.Settings.Configuration"           Version="8.*" />
+    <PackageReference Include="Serilog.Sinks.Console"                    Version="6.*" />
+    <PackageReference Include="Serilog.Formatting.Compact"               Version="3.*" />
+    <PackageReference Include="Serilog.Enrichers.Environment"            Version="3.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting"             Version="9.*" />
+    <PackageReference Include="Microsoft.Extensions.Http"                Version="9.*" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.*" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql"           Version="8.*" />
+    <!-- OpenTelemetry: distributed tracing (→ Grafana Tempo) -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting"               Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"   Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http"             Version="1.*" />
+
+    <ProjectReference Include="..\CryptoDecision.Shared\CryptoDecision.Shared.csproj" />
+  </ItemGroup>
+</Project>

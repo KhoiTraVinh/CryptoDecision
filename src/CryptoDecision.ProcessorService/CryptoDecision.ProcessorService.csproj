@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <RootNamespace>CryptoDecision.ProcessorService</RootNamespace>
+    <AssemblyName>CryptoDecision.ProcessorService</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Confluent.Kafka"             Version="2.*" />
+    <PackageReference Include="Npgsql"                      Version="9.*" />
+    <PackageReference Include="Serilog.Extensions.Hosting"  Version="8.*" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="8.*" />
+    <PackageReference Include="Serilog.Sinks.Console"       Version="6.*" />
+    <PackageReference Include="Serilog.Formatting.Compact"  Version="3.*" />
+    <PackageReference Include="Serilog.Enrichers.Environment" Version="3.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting"                  Version="9.*" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.*" />
+    <!-- OpenTelemetry: distributed tracing (→ Grafana Tempo) + metrics (→ Prometheus) -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting"               Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"   Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"          Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.HttpListener" Version="1.9.0-rc.1" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,6 @@
+# Exclude local build artifacts so Docker restore is authoritative
+**/obj/
+**/bin/
+**/*.user
+**/*.suo
+**/.vs/

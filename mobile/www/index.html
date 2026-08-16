@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#060a10" />
+  <title>CryptoDecision</title>
+  <style>
+    #welcome-overlay {
+      display: none
+    }
+  </style>
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+
+  <div id="welcome-overlay" class="welcome-overlay">
+    <div class="welcome-card">
+      <div class="welcome-logo-container">
+        <img src="logo.png" alt="CryptoDecision Logo" class="welcome-logo" />
+      </div>
+      <h2 class="welcome-title">CryptoDecision</h2>
+      <p class="welcome-sub">AI Signals • Whale Tracker • Live Analytics</p>
+      <div class="welcome-divider"></div>
+      <p class="welcome-prompt">Your identity?</p>
+      <input id="welcome-name" class="welcome-input" type="text" placeholder="Enter your name..." maxlength="50"
+        autocomplete="off" autocorrect="off" autocapitalize="words" />
+      <div id="welcome-error" class="welcome-err"></div>
+      <button id="welcome-btn" class="welcome-btn">Get Started →</button>
+      <p class="welcome-legal">Your name is only used for session statistics.</p>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div id="error-banner"></div>
+
+  <header>
+    <div class="header-top">
+      <h1>
+        <span class="status-dot" id="status-dot"></span>
+        CryptoDecision
+      </h1>
+      <div class="header-actions">
+        <span id="notif-bell" class="notif-bell" title="Notifications">🔔</span>
+        <span class="refresh-badge" id="last-refresh">—</span>
+      </div>
+    </div>
+    <div class="tab-group">
+      <button class="tab-btn active" data-symbol="BTCUSDT">BTC / USDT</button>
+      <button class="tab-btn" data-symbol="ETHUSDT">ETH / USDT</button>
+    </div>
+  </header>
+
+  <!-- ── Tab: RADAR ── -->
+  <main id="tab-home" class="container tab-content active">
+
+    <!-- AI Signal Card -->
+    <div class="card signal-card" id="signal-card">
+      <div class="card-title">AI Prediction Engine</div>
+      <div class="signal-body">
+        <div class="signal-left">
+          <div class="signal-direction NEUTRAL" id="sig-direction">—</div>
+          <div class="signal-confidence" id="sig-confidence">—</div>
+          <span class="signal-badge badge-NEUTRAL" id="sig-badge">—</span>
+          <div class="signal-model" id="sig-model">v1.2.0-stable</div>
+        </div>
+
+        <div class="signal-right">
+          <div class="mini-tile">
+            <span class="label">Return 24h</span>
+            <span class="value" id="today-return">—</span>
+          </div>
+          <div class="mini-tile">
+            <span class="label">Volatility</span>
+            <span class="value" id="today-vol">—</span>
+          </div>
+          <div class="mini-tile">
+            <span class="label">Volume Δ</span>
+            <span class="value" id="today-volchg">—</span>
+          </div>
+          <div class="mini-tile">
+            <span class="label">VWAP</span>
+            <span class="value" id="today-vwap">—</span>
+          </div>
+          <div class="mini-tile mini-tile--wide"
+            style="flex-direction: row; justify-content: space-between; align-items: center;">
+            <span class="label">Whale Alerts</span>
+            <span class="value green" id="today-whale">—</span>
+          </div>
+        </div>
+      </div>
+      <div id="sig-rationale"
+        style="margin-top: 12px; font-size: 11px; color: var(--muted); line-height: 1.4; padding-top: 10px; border-top: 1px solid var(--border);">
+        Waiting for AI rationale...
+      </div>
+    </div>
+
+    <!-- Sentiment Card -->
+    <div class="card" id="momentum-card">
+      <div class="card-title">Sentiment Gauge (24h)</div>
+      <div class="momentum-card">
+        <div class="gauge-wrap">
+          <canvas id="gauge-chart"></canvas>
+          <div class="gauge-center">
+            <span class="gauge-val" id="gauge-val">—</span>
+            <div class="momentum-signal badge-NEUTRAL" id="mom-signal">NEUTRAL</div>
+          </div>
+        </div>
+        <div class="momentum-stats">
+          <div class="stat-row">
+            <span class="label">Sentiment Score</span>
+            <span class="value" id="mom-score">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="label">Total Flows</span>
+            <span class="value" id="mom-total">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="label">Buy / Sell Pressure</span>
+            <span>
+              <span class="green" id="mom-buy">—</span> <span style="color:var(--border2);margin:0 4px;">/</span> <span
+                class="red" id="mom-sell">—</span>
+            </span>
+          </div>
+          <div class="stat-row">
+            <span class="label">Whale Intensity</span>
+            <span class="value" id="mom-whale">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Volume Card -->
+    <div class="card" id="volume-card">
+      <div class="vol-card-header">
+        <span>Volume Distribution</span>
+        <select id="vol-period-select" class="vol-period-select">
+          <option value="1h">1H</option>
+          <option value="24h" selected>24H</option>
+          <option value="7d">7D</option>
+          <option value="30d">30D</option>
+        </select>
+      </div>
+      <div class="vol-bars">
+        <div class="vol-bar-row">
+          <span class="vol-bar-label green">Buy</span>
+          <div class="vol-bar-track">
+            <div class="vol-bar-fill green" id="vol-buy-bar" style="width:50%"></div>
+          </div>
+          <span class="value green" id="vol-buy-pct">—</span>
+        </div>
+        <div class="vol-bar-row">
+          <span class="vol-bar-label red">Sell</span>
+          <div class="vol-bar-track">
+            <div class="vol-bar-fill red" id="vol-sell-bar" style="width:50%"></div>
+          </div>
+          <span class="value red" id="vol-sell-pct">—</span>
+        </div>
+      </div>
+      <div class="vol-details">
+        <div class="stat-row"><span class="label">Total Trades</span><span class="value" id="vol-trades">—</span></div>
+        <div class="stat-row"><span class="label">Net Delta (USD)</span><span class="value" id="vol-net">—</span></div>
+      </div>
+    </div>
+
+    <!-- Price Timeline Card -->
+    <div class="card chart-card">
+      <div class="card-title" id="kline-combined-title">Price Aggregation (60m)</div>
+      <div class="chart-canvas-wrap">
+        <canvas id="kline-combined-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Whale Feed -->
+    <div class="card whale-feed-card">
+      <div class="card-title">Whale Order Log</div>
+      <div class="whale-feed-container" id="whale-feed-home">
+        <span class="users-placeholder">Monitoring order book...</span>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Tab: BOT AI ── -->
+  <main id="tab-bot" class="container tab-content">
+    <div class="card bot-card">
+      <div class="bot-header">
+        <div class="bot-header-left">
+          <h2 id="bot-header-symbol">BTCUSDT</h2>
+          <span class="badge-status" id="bot-status-badge">STOPPED</span>
+        </div>
+        <button id="bot-toggle-btn" class="btn-bot btn-bot-start" onclick="toggleBot()">
+          Start Bot
+        </button>
+      </div>
+
+      <!-- Bot Config Panel (visible when stopped) -->
+      <div class="m-bot-config-panel" id="m-bot-config-panel">
+        <div class="m-bot-config-title">Configuration</div>
+        <div class="m-bot-config-grid">
+          <div class="m-bot-cfg-group">
+            <label>Capital $</label>
+            <input type="number" id="m-cfg-capital" class="m-bot-cfg-input" value="100" min="10" step="10" inputmode="decimal" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>Position %</label>
+            <input type="number" id="m-cfg-position-pct" class="m-bot-cfg-input" value="10" min="1" max="100" step="1" inputmode="decimal" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>TP %</label>
+            <input type="number" id="m-cfg-tp" class="m-bot-cfg-input" value="0.3" min="0.1" step="0.1" inputmode="decimal" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>SL %</label>
+            <input type="number" id="m-cfg-sl" class="m-bot-cfg-input" value="5" min="0.5" step="0.5" inputmode="decimal" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>Grid Step %</label>
+            <input type="number" id="m-cfg-grid-step" class="m-bot-cfg-input" value="0.5" min="0.1" step="0.1" inputmode="decimal" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>Cooldown (s)</label>
+            <input type="number" id="m-cfg-cooldown" class="m-bot-cfg-input" value="120" min="10" step="10" inputmode="numeric" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>Slots/Strat</label>
+            <input type="number" id="m-cfg-max-slots" class="m-bot-cfg-input" value="5" min="1" max="20" step="1" inputmode="numeric" />
+          </div>
+          <div class="m-bot-cfg-group">
+            <label>Trail Stop %</label>
+            <input type="number" id="m-cfg-trailing-pct" class="m-bot-cfg-input" value="1.5" min="0.1" step="0.1" inputmode="decimal" />
+          </div>
+        </div>
+
+        <div class="m-bot-cfg-strats">
+          <label class="m-bot-cfg-label">Strategies</label>
+          <div class="m-bot-strat-btns">
+            <button class="m-bot-strat-btn active" data-strat="GRID" onclick="mToggleStrat(this)">GRID</button>
+            <button class="m-bot-strat-btn active" data-strat="MOMENTUM" onclick="mToggleStrat(this)">MOMENTUM</button>
+            <button class="m-bot-strat-btn" data-strat="RSI" onclick="mToggleStrat(this)">RSI</button>
+            <button class="m-bot-strat-btn" data-strat="ALWAYS_BUY" onclick="mToggleStrat(this)">ALWAYS</button>
+          </div>
+        </div>
+
+        <div class="m-bot-cfg-toggles">
+          <label class="m-toggle"><input type="checkbox" id="m-cfg-trailing" checked /><span class="m-toggle-track"></span> Trailing</label>
+          <label class="m-toggle"><input type="checkbox" id="m-cfg-breakeven" checked /><span class="m-toggle-track"></span> Breakeven</label>
+          <label class="m-toggle"><input type="checkbox" id="m-cfg-dynamic" /><span class="m-toggle-track"></span> Dynamic TP/SL</label>
+        </div>
+      </div>
+
+      <div class="bot-status-section">
+        <div class="bot-stat-row">
+          <span>Total P&L</span>
+          <span id="bot-pnl-usd">$0.00</span>
+        </div>
+        <div class="bot-stat-row">
+          <span>Win Rate</span>
+          <span id="bot-winrate">—</span>
+        </div>
+        <div class="bot-stat-row">
+          <span>Closed Trades</span>
+          <span id="bot-trades-count">0</span>
+        </div>
+        <div class="bot-stat-row">
+          <span>Open Positions</span>
+          <span id="bot-open-trade">0</span>
+        </div>
+      </div>
+
+      <!-- Strategy Performance Breakdown -->
+      <div class="m-strat-perf" id="m-strat-perf"></div>
+
+      <div class="bot-conditions-wrap">
+        <div class="bot-conditions-label">Strategy Engines & Slots</div>
+        <div id="bot-conditions-list" class="bot-conditions-box">
+          <span style="color:var(--muted); font-size:12px;">Waiting for engine activation...</span>
+        </div>
+        <div id="bot-will-enter" class="bot-will-enter"></div>
+      </div>
+
+      <div class="bot-trades-section">
+        <div class="bot-trades-label">Order History</div>
+        <div class="bot-trades-wrap">
+          <table class="bot-table">
+            <thead>
+              <tr>
+                <th>Time / Strategy</th>
+                <th style="text-align:right;">Entry</th>
+                <th style="text-align:right;">Exit</th>
+                <th style="text-align:right;">PnL</th>
+                <th style="text-align:center;">Result</th>
+              </tr>
+            </thead>
+            <tbody id="bot-trade-rows">
+              <tr>
+                <td colspan="5" style="text-align:center;padding:16px;color:var(--muted);">No trades found</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ── Tab: WHALE ── -->
+  <main id="tab-whale" class="container tab-content">
+
+    <div class="card signal-card">
+      <div class="card-title">Whale Activity Summary</div>
+      <div class="whale-summary-grid">
+        <div class="whale-summary-item">
+          <span class="whale-summary-label">Total Alerts</span>
+          <span class="whale-summary-val" id="whale-total-count">—</span>
+        </div>
+        <div class="whale-summary-item">
+          <span class="whale-summary-label">Buy Volume</span>
+          <span class="whale-summary-val green" id="whale-buy-vol">—</span>
+        </div>
+        <div class="whale-summary-item">
+          <span class="whale-summary-label">Sell Volume</span>
+          <span class="whale-summary-val red" id="whale-sell-vol">—</span>
+        </div>
+        <div class="whale-summary-item">
+          <span class="whale-summary-label">Net Flow</span>
+          <span class="whale-summary-val" id="whale-net-flow">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card whale-feed-card">
+      <div class="card-title">Live Whale Feed</div>
+      <div class="whale-feed-container" id="whale-feed-container">
+        <span class="users-placeholder">Monitoring order book...</span>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Tab: ALERTS ── -->
+  <main id="tab-alerts" class="container tab-content">
+
+    <!-- Create Alert Card -->
+    <div class="card signal-card">
+      <div class="card-title">Create Price Alert</div>
+      <div class="alert-create-form">
+        <div class="alert-form-grid">
+          <div class="alert-field">
+            <label class="alert-field-label">Condition</label>
+            <div class="alert-condition-toggle">
+              <button class="alert-cond-btn active" data-cond="ABOVE" onclick="selectAlertCond(this)">
+                <span class="alert-cond-icon">&#8593;</span> Above
+              </button>
+              <button class="alert-cond-btn" data-cond="BELOW" onclick="selectAlertCond(this)">
+                <span class="alert-cond-icon">&#8595;</span> Below
+              </button>
+            </div>
+          </div>
+          <div class="alert-field">
+            <label class="alert-field-label">Target Price (USD)</label>
+            <input type="number" id="m-alert-target" class="alert-price-input" placeholder="0.00" step="0.01" inputmode="decimal" />
+          </div>
+        </div>
+        <div class="alert-field">
+          <label class="alert-field-label">Note (optional)</label>
+          <input type="text" id="m-alert-note" class="alert-note-input" placeholder="Reminder for yourself..." maxlength="100" />
+        </div>
+        <button id="m-alert-create-btn" class="alert-submit-btn" onclick="mobileCreateAlert()">
+          Create Alert
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Alerts -->
+    <div class="card">
+      <div class="card-title">
+        Active Alerts
+        <span class="alert-count-badge" id="m-alert-count">0</span>
+      </div>
+      <div class="alert-active-list" id="m-alert-active-list">
+        <div class="alert-empty-state">
+          <div class="alert-empty-icon">&#128276;</div>
+          <span>No active alerts</span>
+          <span class="alert-empty-hint">Create one above to get notified when price crosses your target</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alert History -->
+    <div class="card">
+      <div class="card-title">Triggered History</div>
+      <div class="alert-history-list" id="m-alert-history-list">
+        <div class="alert-empty-state">
+          <div class="alert-empty-icon">&#9203;</div>
+          <span>No triggered alerts yet</span>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Tab: SETTINGS ── -->
+  <main id="tab-settings" class="container tab-content">
+
+    <div class="card">
+      <div class="card-title">Connection</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <span class="settings-label">Status</span>
+          <span class="settings-val" id="settings-conn-status">Checking...</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Server</span>
+          <span class="settings-val mono" id="settings-server-url">—</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Symbol</span>
+          <span class="settings-val" id="settings-symbol">BTCUSDT</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Profile</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <span class="settings-label">User</span>
+          <span class="settings-val" id="settings-username">—</span>
+        </div>
+        <div class="settings-row clickable" id="settings-logout">
+          <span class="settings-label red">Reset Identity</span>
+          <span class="settings-val">→</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">About</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <span class="settings-label">Version</span>
+          <span class="settings-val mono">1.1.0</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Engine</span>
+          <span class="settings-val mono">Capacitor 6</span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Stack</span>
+          <span class="settings-val mono">.NET 9 + Kafka + PG</span>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Bottom Navigation ── -->
+  <nav class="bottom-nav">
+    <div class="nav-item active" onclick="switchTab('home', this)">
+      <div class="nav-icon">📊</div>
+      <span>Radar</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('bot', this)">
+      <div class="nav-icon">🤖</div>
+      <span>Bot AI</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('alerts', this)">
+      <div class="nav-icon">🔔</div>
+      <span>Alerts</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('whale', this)">
+      <div class="nav-icon">🐋</div>
+      <span>Whale</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('settings', this)">
+      <div class="nav-icon">⚙️</div>
+      <span>Settings</span>
+    </div>
+  </nav>
+
+  <!-- Scripts -->
+  <script src="config.js?v=6"></script>
+  <script src="signalr.min.js"></script>
+  <script src="chart.min.js"></script>
+  <script src="app.js?v=6"></script>
+</body>
+
+</html>

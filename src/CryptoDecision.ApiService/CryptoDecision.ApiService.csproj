@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>CS8602;CS8604</NoWarn>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CryptoDecision.ApiService</RootNamespace>
+    <AssemblyName>CryptoDecision.ApiService</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MediatR"                                  Version="12.*" />
+    <PackageReference Include="FluentValidation.AspNetCore"              Version="11.*" />
+    <PackageReference Include="Confluent.Kafka"                            Version="2.*" />
+    <PackageReference Include="Npgsql"                                   Version="9.*" />
+    <PackageReference Include="Serilog.AspNetCore"                       Version="8.*" />
+    <PackageReference Include="Serilog.Formatting.Compact"               Version="3.*" />
+    <PackageReference Include="Serilog.Enrichers.Environment"            Version="3.*" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql"           Version="8.*" />
+    <PackageReference Include="Swashbuckle.AspNetCore"                   Version="7.*" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.*" />
+    <!-- OpenTelemetry: distributed tracing (→ Grafana Tempo) + metrics (→ Prometheus) -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting"             Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"        Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore"     Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http"           Version="1.*" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.*-*" />
+
+    <ProjectReference Include="..\CryptoDecision.Shared\CryptoDecision.Shared.csproj" />
+  </ItemGroup>
+</Project>

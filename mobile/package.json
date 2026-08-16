@@ -1,0 +1,21 @@
+{
+  "name": "cryptodecision-mobile",
+  "version": "1.0.0",
+  "description": "CryptoDecision Mobile — Capacitor Android app",
+  "private": true,
+  "scripts": {
+    "sync": "npx cap sync android",
+    "build": "npx cap build android",
+    "open": "npx cap open android",
+    "sync:ios": "npx cap sync ios",
+    "build:ios": "npx cap build ios",
+    "open:ios": "npx cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/ios": "^8.1.0",
+    "@capacitor/local-notifications": "^6.0.0"
+  }
+}

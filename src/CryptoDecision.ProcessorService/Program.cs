@@ -1,0 +1,102 @@
+using System.Diagnostics;
+using CryptoDecision.ProcessorService.Health;
+using CryptoDecision.ProcessorService.Kafka;
+using CryptoDecision.ProcessorService.Models;
+using CryptoDecision.ProcessorService.Persistence;
+using CryptoDecision.ProcessorService.Telemetry;
+using CryptoDecision.ProcessorService.Workers;
+using Microsoft.Extensions.Hosting;
+using Npgsql;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
+
+try
+{
+    var builder = Host.CreateApplicationBuilder(args);
+
+    var tempoEndpoint = builder.Configuration["Telemetry:TempoEndpoint"] ?? "http://tempo:4317";
+
+    // ─── Serilog ─────────────────────────────────────────────────────────────
+    builder.Services.AddSerilog((svc, cfg) =>
+        cfg.ReadFrom.Configuration(builder.Configuration)
+           .ReadFrom.Services(svc)
+           .Enrich.FromLogContext()
+           .Enrich.WithMachineName());
+
+    // ─── Settings ─────────────────────────────────────────────────────────────
+    builder.Services.Configure<ConsumerSettings>(
+        builder.Configuration.GetSection(ConsumerSettings.Section));
+    builder.Services.Configure<FeatureSettings>(
+        builder.Configuration.GetSection(FeatureSettings.Section));
+
+    // ─── PostgreSQL ───────────────────────────────────────────────────────────
+    var pgConnStr = builder.Configuration.GetConnectionString("Postgres")
+        ?? throw new InvalidOperationException("ConnectionStrings:Postgres required");
+
+    var ds = new NpgsqlDataSourceBuilder(pgConnStr).Build();
+    builder.Services.AddSingleton(ds);
+    builder.Services.AddSingleton<NpgsqlDataSource>(ds);
+
+    // ─── ActivitySource (distributed tracing) ────────────────────────────────
+    builder.Services.AddSingleton(new ActivitySource("CryptoDecision.Processor"));
+
+    // ─── Custom Metrics ───────────────────────────────────────────────────────
+    builder.Services.AddSingleton<ProcessorMetrics>();
+
+    // ─── OpenTelemetry ────────────────────────────────────────────────────────
+    var resource = ResourceBuilder.CreateDefault().AddService("processor-service");
+    builder.Services.AddOpenTelemetry()
+        .WithTracing(t => t
+            .SetResourceBuilder(resource)
+            .AddSource("CryptoDecision.Processor")
+            .AddOtlpExporter(o => o.Endpoint = new Uri(tempoEndpoint)))
+        .WithMetrics(m => m
+            .SetResourceBuilder(resource)
+            .AddMeter(ProcessorMetrics.MeterName)
+            .AddRuntimeInstrumentation()
+            .AddPrometheusHttpListener(o => o.UriPrefixes = ["http://+:9090/"]));
+
+    // ─── Repositories ─────────────────────────────────────────────────────────
+    builder.Services.AddSingleton<DatabaseInitializer>();
+    builder.Services.AddSingleton<TradeRepository>();
+    builder.Services.AddSingleton<FeatureRepository>();
+
+    // ─── Health checks ─────────────────────────────────────────────────────────
+    builder.Services.AddHealthChecks()
+        .AddCheck<PostgresHealthCheck>("postgres");
+
+    // ─── Message Deserializers (OCP — pluggable deserialization) ──────────────
+    builder.Services.AddSingleton<IMessageDeserializer<TradeBatch>, TradeBatchDeserializer>();
+    builder.Services.AddSingleton<IMessageDeserializer<KlineBatch>, KlineBatchDeserializer>();
+
+    // ─── Workers ─────────────────────────────────────────────────────────────
+    builder.Services.AddHostedService<TradeProcessorWorker>();
+    builder.Services.AddHostedService<KlineProcessorWorker>();
+    builder.Services.AddHostedService<FeatureAggregationWorker>();
+    builder.Services.AddHostedService<HealthCheckHttpServer>();
+
+    var host = builder.Build();
+
+    // Run schema initialization before workers start consuming
+    using (var scope = host.Services.CreateScope())
+    {
+        var init = scope.ServiceProvider.GetRequiredService<DatabaseInitializer>();
+        await init.InitializeAsync();
+    }
+
+    await host.RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "ProcessorService crashed on startup");
+}
+finally
+{
+    await Log.CloseAndFlushAsync();
+}

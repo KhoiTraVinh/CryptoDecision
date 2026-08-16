@@ -1,0 +1,12 @@
+psycopg2-binary==2.9.9
+confluent-kafka==2.4.0
+schedule==1.2.2
+structlog==24.4.0
+# ML model
+scikit-learn>=1.4
+xgboost>=2.0
+optuna>=3.6.0
+joblib>=1.3
+numpy>=1.26
+# Prometheus metrics
+prometheus-client>=0.20
