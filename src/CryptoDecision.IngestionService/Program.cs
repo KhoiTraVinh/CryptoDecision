@@ -2,6 +2,7 @@ using System.Diagnostics;
 using CryptoDecision.IngestionService.Binance;
 using CryptoDecision.IngestionService.Bybit;
 using CryptoDecision.IngestionService.Channels;
+using CryptoDecision.IngestionService.Configuration;
 using CryptoDecision.IngestionService.Health;
 using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.OKX;
@@ -33,6 +34,8 @@ try
         builder.Configuration.GetSection(BinanceSettings.Section));
     builder.Services.Configure<KafkaProducerSettings>(
         builder.Configuration.GetSection(KafkaProducerSettings.Section));
+    builder.Services.Configure<MarketSubscriptionSettings>(
+        builder.Configuration.GetSection(MarketSubscriptionSettings.Section));
     builder.Services.Configure<BatchSettings>(
         builder.Configuration.GetSection(BatchSettings.Section));
 

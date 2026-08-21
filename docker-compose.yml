@@ -56,34 +56,19 @@ services:
     command:
       - >-
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic binance.trade.btcusdt --partitions 3 --replication-factor 1
+        --topic binance.trade.solusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic binance.trade.ethusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic binance.kline.1m.btcusdt --partitions 1 --replication-factor 1
+        --topic binance.kline.1m.solusdt --partitions 1 --replication-factor 1
         --config retention.ms=604800000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic binance.kline.1m.ethusdt --partitions 1 --replication-factor 1
+        --topic predictions.solusdt --partitions 1 --replication-factor 1
         --config retention.ms=604800000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic predictions.btcusdt --partitions 1 --replication-factor 1
-        --config retention.ms=604800000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic predictions.ethusdt --partitions 1 --replication-factor 1
-        --config retention.ms=604800000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic okx.trade.btcusdt --partitions 3 --replication-factor 1
+        --topic okx.trade.solusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic okx.trade.ethusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic bybit.trade.btcusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic bybit.trade.ethusdt --partitions 3 --replication-factor 1
+        --topic bybit.trade.solusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
         echo All Kafka topics created successfully
     restart: "no"
@@ -318,7 +303,7 @@ services:
     environment:
       POSTGRES_URL:             "postgresql://crypto:crypto@postgres:5432/crypto"
       KAFKA_BOOTSTRAP_SERVERS:  "kafka:9092"
-      SYMBOLS:                  "BTCUSDT,ETHUSDT"
+      SYMBOLS:                  "SOLUSDT"
       PREDICTION_INTERVAL_SECONDS: "300"
       CONTEXT_HISTORY_DAYS:     "7"
 

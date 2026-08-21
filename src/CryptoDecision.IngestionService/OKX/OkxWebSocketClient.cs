@@ -2,9 +2,11 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using CryptoDecision.IngestionService.Channels;
+using CryptoDecision.IngestionService.Configuration;
 using CryptoDecision.IngestionService.OKX.Models;
 using CryptoDecision.IngestionService.WebSocket;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.OKX;
 
@@ -20,11 +22,9 @@ namespace CryptoDecision.IngestionService.OKX;
 public sealed class OkxWebSocketClient(
     OkxTradeChannel tradeChannel,
     OkxNormalizer normalizer,
+    IOptions<MarketSubscriptionSettings> subscription,
     ILogger<OkxWebSocketClient> logger) : ExchangeWebSocketClient(logger)
 {
-    private static readonly byte[] SubscribeMsg = Encoding.UTF8.GetBytes("""
-        {"op":"subscribe","args":[{"channel":"trades","instId":"BTC-USDT"},{"channel":"trades","instId":"ETH-USDT"}]}
-        """);
     private static readonly byte[] PingMsg  = Encoding.UTF8.GetBytes("ping");
     private static readonly byte[] PongMsg  = Encoding.UTF8.GetBytes("pong");
 
@@ -45,7 +45,17 @@ public sealed class OkxWebSocketClient(
 
     protected override async Task OnConnectedAsync(ClientWebSocket ws, CancellationToken ct)
     {
-        await ws.SendAsync(SubscribeMsg, WebSocketMessageType.Text, endOfMessage: true, ct);
+        // Built per connection rather than cached: a reconnect after a config
+        // reload then subscribes to what is configured now, not at process start.
+        var args = string.Join(",", subscription.Value.OkxInstIds
+            .Select(id => $"{{\"channel\":\"trades\",\"instId\":\"{id}\"}}"));
+
+        var payload = Encoding.UTF8.GetBytes($"{{\"op\":\"subscribe\",\"args\":[{args}]}}");
+
+        logger.LogInformation("[OKX] Subscribing to trades: {InstIds}",
+            string.Join(", ", subscription.Value.OkxInstIds));
+
+        await ws.SendAsync(payload, WebSocketMessageType.Text, endOfMessage: true, ct);
     }
 
     protected override bool UsesAppLevelPing => true;

@@ -3,8 +3,10 @@ using System.Text;
 using System.Text.Json;
 using CryptoDecision.IngestionService.Bybit.Models;
 using CryptoDecision.IngestionService.Channels;
+using CryptoDecision.IngestionService.Configuration;
 using CryptoDecision.IngestionService.WebSocket;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Bybit;
 
@@ -17,11 +19,9 @@ namespace CryptoDecision.IngestionService.Bybit;
 public sealed class BybitWebSocketClient(
     BybitTradeChannel tradeChannel,
     BybitNormalizer normalizer,
+    IOptions<MarketSubscriptionSettings> subscription,
     ILogger<BybitWebSocketClient> logger) : ExchangeWebSocketClient(logger)
 {
-    private static readonly byte[] SubscribeMsg = Encoding.UTF8.GetBytes("""
-        {"op":"subscribe","args":["publicTrade.BTCUSDT","publicTrade.ETHUSDT"]}
-        """);
     private static readonly byte[] PingMsg = Encoding.UTF8.GetBytes("""{"op":"ping"}""");
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -41,7 +41,16 @@ public sealed class BybitWebSocketClient(
 
     protected override async Task OnConnectedAsync(ClientWebSocket ws, CancellationToken ct)
     {
-        await ws.SendAsync(SubscribeMsg, WebSocketMessageType.Text, endOfMessage: true, ct);
+        // Bybit takes the undashed symbol form, which is the configured pair with
+        // its dash removed — see MarketSubscriptionSettings for why the dashed form
+        // is the one that gets configured.
+        var symbols = subscription.Value.BybitSymbols.ToArray();
+        var args    = string.Join(",", symbols.Select(s => $"\"publicTrade.{s}\""));
+        var payload = Encoding.UTF8.GetBytes($"{{\"op\":\"subscribe\",\"args\":[{args}]}}");
+
+        logger.LogInformation("[Bybit] Subscribing to trades: {Symbols}", string.Join(", ", symbols));
+
+        await ws.SendAsync(payload, WebSocketMessageType.Text, endOfMessage: true, ct);
     }
 
     protected override bool UsesAppLevelPing => true;
