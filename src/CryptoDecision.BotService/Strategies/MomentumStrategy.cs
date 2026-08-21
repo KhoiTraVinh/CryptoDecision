@@ -45,6 +45,14 @@ public sealed class MomentumStrategy(
     private const decimal ShortThreshold = 38m;    // composite score <= 38 → SHORT
     private const int     MinTrades5m    = 5;      // minimum trades in 5m to have signal
 
+    /// <summary>
+    /// Whale trades needed in the hour before their buy/sell split is treated as a
+    /// signal rather than as noise. Below this the component is dropped and its
+    /// weight redistributed, which is the honest handling of a sample too small to
+    /// read.
+    /// </summary>
+    private const int     MinWhaleTrades = 3;
+
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
     {
         var opts = ctx.Options;
@@ -91,11 +99,23 @@ public sealed class MomentumStrategy(
             // MomentumRepository.GetMultiTimeframeAsync. Recency is already
             // expressed through the separate 5m/15m/1h flow weights; layering an
             // implicit second recency bias into the whale term would double it.
+            // A ratio over one or two trades is not a reading, it is a coin flip that
+            // lands on 0 or 100 — the most extreme value the component can take, at
+            // full weight. Observed live on SOL: a single whale buy moved the
+            // composite from 52.6 to 60.9 while the flow components were leaning
+            // *sell*, which is most of the distance to a real-money entry on the
+            // evidence of one trade. The flow term has had MinTrades5m guarding it
+            // for the same reason; this is that rule applied where it was missing.
             var totalWhales = mtf.M1h.WhaleBuyCount + mtf.M1h.WhaleSellCount;
             var whaleBuys   = mtf.M1h.WhaleBuyCount;
 
-            if (totalWhales > 0)
+            if (totalWhales >= MinWhaleTrades)
                 components.Add(("whale", ((decimal)whaleBuys / totalWhales) * 100m, W_Whale));
+            else if (totalWhales > 0)
+                log.LogDebug(
+                    "[MomentumV2] Ignoring whale flow: only {Count} whale trade(s) in the hour, " +
+                    "below the {Min} needed for a ratio to mean anything.",
+                    totalWhales, MinWhaleTrades);
 
             // ── 3. AI prediction ────────────────────────────────────────────
             //
