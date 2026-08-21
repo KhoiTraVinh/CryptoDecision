@@ -14,27 +14,7 @@ public sealed record DailyFeature(
     DateTime ComputedAt
 );
 
-public sealed record MomentumData(
-    string  Symbol,
-    int     TotalTrades,
-    int     BuyCount,
-    int     SellCount,
-    int     WhaleBuyCount,
-    int     WhaleSellCount,
-    decimal VolumeUsd
-);
 
-public sealed record VolumeWindowData(
-    string  Window,         // "1h" | "24h" | "7d" | "30d"
-    int     TotalTrades,
-    int     BuyCount,
-    int     SellCount,
-    decimal BuyVolumeUsd,
-    decimal SellVolumeUsd,
-    int     WhaleBuyCount,
-    int     WhaleSellCount,
-    decimal WhaleVolumeUsd
-);
 
 // ── Multi-timeframe momentum for enhanced MomentumStrategy ───────────────────
 

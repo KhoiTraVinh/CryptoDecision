@@ -29,25 +29,9 @@ public interface IVolumeRepository
     Task<IReadOnlyList<VolumeWindowData>> GetWindowsAsync(string symbol, string exchange = "BINANCE", CancellationToken ct = default);
 }
 
-public interface IUserRepository
-{
-    /// <summary>Upsert user: insert new or update last_seen. Returns the user id.</summary>
-    Task<int> UpsertAsync(string name, string deviceId, CancellationToken ct = default);
-
-    Task<(int Total, int TodayActive, IReadOnlyList<string> RecentNames)>
-        GetStatsAsync(CancellationToken ct = default);
-}
-
 public interface ITradeQueryRepository
 {
     Task<IReadOnlyList<WhaleTradeData>> GetRecentWhalesAsync(DateTime since, CancellationToken ct = default);
     Task<IReadOnlyList<WhaleTradeData>> GetLatestWhalesAsync(string symbol, string exchange, int limit = 50, CancellationToken ct = default);
 }
 
-public interface IAlertRepository
-{
-    Task<PriceAlertDto> CreateAsync(string symbol, string condition, decimal targetPrice, string? userId, string? note, CancellationToken ct);
-    Task<IReadOnlyList<PriceAlertDto>> GetActiveAlertsAsync(string? symbol, CancellationToken ct);
-    Task<IReadOnlyList<AlertNotificationDto>> GetNotificationsAsync(string? symbol, int limit, CancellationToken ct);
-    Task<bool> DeactivateAsync(long id, CancellationToken ct);
-}

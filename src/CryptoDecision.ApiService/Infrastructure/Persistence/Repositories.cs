@@ -153,61 +153,6 @@ public sealed class MomentumRepository(NpgsqlDataSource dataSource) : IMomentumR
     }
 }
 
-public sealed class UserRepository(NpgsqlDataSource dataSource) : IUserRepository
-{
-    public async Task<int> UpsertAsync(string name, string deviceId, CancellationToken ct = default)
-    {
-        const string sql = """
-            INSERT INTO app_users (name, device_id, registered_at, last_seen)
-            VALUES (@name, @deviceId, NOW(), NOW())
-            ON CONFLICT (device_id) DO UPDATE
-                SET last_seen = NOW(),
-                    name      = EXCLUDED.name
-            RETURNING id
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("name",     name);
-        cmd.Parameters.AddWithValue("deviceId", deviceId);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return (int)(result ?? 0);
-    }
-
-    public async Task<(int Total, int TodayActive, IReadOnlyList<string> RecentNames)>
-        GetStatsAsync(CancellationToken ct = default)
-    {
-        const string totalSql = """
-            SELECT
-                COUNT(*)                                                              AS total,
-                COUNT(*) FILTER (WHERE last_seen >= NOW() - INTERVAL '24 hours')     AS today_active
-            FROM app_users
-            """;
-        const string namesSql = """
-            SELECT name FROM app_users ORDER BY registered_at DESC LIMIT 10
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-
-        await using var cmd1 = new NpgsqlCommand(totalSql, conn);
-        await using var r1   = await cmd1.ExecuteReaderAsync(ct);
-        int total = 0, todayActive = 0;
-        if (await r1.ReadAsync(ct))
-        {
-            total       = (int)r1.GetInt64(0);
-            todayActive = (int)r1.GetInt64(1);
-        }
-        await r1.CloseAsync();
-
-        await using var cmd2 = new NpgsqlCommand(namesSql, conn);
-        await using var r2   = await cmd2.ExecuteReaderAsync(ct);
-        var names = new List<string>();
-        while (await r2.ReadAsync(ct)) names.Add(r2.GetString(0));
-
-        return (total, todayActive, names);
-    }
-}
-
 public sealed class KlineRepository(NpgsqlDataSource dataSource) : IKlineRepository
 {
     public async Task<IReadOnlyList<KlineData>> GetRecentAsync(

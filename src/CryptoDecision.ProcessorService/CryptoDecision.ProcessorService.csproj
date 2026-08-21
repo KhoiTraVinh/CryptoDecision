@@ -17,10 +17,5 @@
     <PackageReference Include="Serilog.Enrichers.Environment" Version="3.*" />
     <PackageReference Include="Microsoft.Extensions.Hosting"                  Version="9.*" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.*" />
-    <!-- OpenTelemetry: distributed tracing (→ Grafana Tempo) + metrics (→ Prometheus) -->
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting"               Version="1.*" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"   Version="1.*" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime"          Version="1.*" />
-    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.HttpListener" Version="1.9.0-rc.1" />
   </ItemGroup>
 </Project>

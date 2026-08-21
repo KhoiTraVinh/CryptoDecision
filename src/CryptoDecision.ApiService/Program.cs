@@ -8,17 +8,11 @@ using CryptoDecision.ApiService.Infrastructure.Services;
 using CryptoDecision.ApiService.Middleware;
 // Note: Bot engine (TradingBotService, StrategyEvaluator, PaperOrderEngine, BotStateService)
 // has been moved to CryptoDecision.BotService (separate Worker container).
-using FluentValidation;
-using MediatR;
 using Npgsql;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var tempoEndpoint = builder.Configuration["Telemetry:TempoEndpoint"] ?? "http://tempo:4317";
 
 // ─── Serilog ─────────────────────────────────────────────────────────────────
 builder.Host.UseSerilog((ctx, cfg) =>
@@ -39,47 +33,23 @@ builder.Services.AddSingleton<IFeatureRepository, FeatureRepository>();
 builder.Services.AddSingleton<IPredictionRepository, PredictionRepository>();
 builder.Services.AddSingleton<IMomentumRepository, MomentumRepository>();
 builder.Services.AddSingleton<IKlineRepository, KlineRepository>();
-builder.Services.AddSingleton<IUserRepository, UserRepository>();
 builder.Services.AddSingleton<IVolumeRepository, VolumeRepository>();
 builder.Services.AddSingleton<ITradeQueryRepository, TradeQueryRepository>();
-builder.Services.AddSingleton<IAlertRepository, AlertRepository>();
 
-// ─── MediatR ─────────────────────────────────────────────────────────────────
-builder.Services.AddMediatR(cfg =>
-{
-    cfg.RegisterServicesFromAssemblyContaining<GetMarketStatusQuery>();
-    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
-    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
-});
-
-// ─── FluentValidation ─────────────────────────────────────────────────────────
-builder.Services.AddValidatorsFromAssemblyContaining<GetMarketStatusValidator>();
+// ─── Queries ─────────────────────────────────────────────────────────────────
+// Scoped so the SignalR broadcasters can resolve it per-tick from a scope.
+builder.Services.AddScoped<MarketQueries>();
 
 // ─── SignalR ──────────────────────────────────────────────────────────────────
 builder.Services.AddSignalR();
-builder.Services.AddHostedService<MomentumBroadcastService>();
 builder.Services.AddHostedService<VolumeAnalysisBroadcastService>();
 builder.Services.AddHostedService<WhaleAlertBroadcastService>();
 builder.Services.AddHostedService<DashboardBroadcastService>();
-builder.Services.AddHostedService<AlertBroadcastService>();
 
 // ─── Trading Bot (API-side: read/write config via DB, engine runs in BotService) ──
 builder.Services.AddSingleton<BotRepository>();
 builder.Services.AddSingleton<BotConfigRepository>();
 
-// ─── OpenTelemetry ────────────────────────────────────────────────────────────
-var resource = ResourceBuilder.CreateDefault().AddService("api-service");
-builder.Services.AddOpenTelemetry()
-    .WithTracing(t => t
-        .SetResourceBuilder(resource)
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddOtlpExporter(o => o.Endpoint = new Uri(tempoEndpoint)))
-    .WithMetrics(m => m
-        .SetResourceBuilder(resource)
-        .AddAspNetCoreInstrumentation()
-        .AddRuntimeInstrumentation()
-        .AddPrometheusExporter());           // exposes /metrics on Kestrel
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 builder.Services.AddControllers();
@@ -120,7 +90,6 @@ app.UseCors("dashboard");
 app.UseResponseCaching();
 app.MapControllers();
 app.MapHub<MarketHub>("/hubs/market");
-app.MapPrometheusScrapingEndpoint();  // /metrics — scraped by Prometheus every 15s
 
 app.MapHealthChecks("/health", new()
 {

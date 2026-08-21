@@ -4,311 +4,164 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CryptoDecision Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=6" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>CryptoDecision</title>
+  <link rel="stylesheet" href="style.css?v=23" />
 </head>
 
 <body>
 
-  <!-- ── Header ─────────────────────────────────────────────────── -->
   <header>
-    <div class="header-left">
-      <h1>CryptoDecision</h1>
-      <div class="tab-group">
-        <button class="tab-btn active" data-symbol="BTCUSDT">BTC</button>
-        <button class="tab-btn" data-symbol="ETHUSDT">ETH</button>
-      </div>
+    <h1>CryptoDecision</h1>
+    <div class="tabs" id="symbol-tabs">
+      <button class="tab active" data-symbol="BTCUSDT">BTC</button>
+      <button class="tab" data-symbol="ETHUSDT">ETH</button>
     </div>
-    <div class="header-right">
-      <a href="/docs.html" class="docs-link">Docs</a>
-      <span class="refresh-badge" id="last-refresh"></span>
-    </div>
+    <span class="live" id="live-dot" title="Connection status"></span>
   </header>
 
   <main>
 
-    <!-- ── Row 1: AI + Momentum + Today ──────────────────── -->
-    <section class="grid-3">
-
-      <div class="card card-ai">
-        <div class="card-label">AI Prediction</div>
-        <div class="ai-body">
-          <div class="ai-direction NEUTRAL" id="sig-direction">NEUTRAL</div>
-          <div class="ai-confidence" id="sig-confidence">--</div>
-          <span class="badge badge-NEUTRAL" id="sig-badge">NEUTRAL</span>
-          <div class="ai-model" id="sig-model"></div>
-          <p class="ai-rationale" id="sig-rationale">Waiting for data...</p>
-          <div class="ai-signals" id="ai-signals">
-            <!-- Rendered by JS: signal component bars -->
-          </div>
+    <!-- ── The only question that matters ────────────────────────────────── -->
+    <section class="card pnl-card">
+      <div class="pnl-total" id="pnl-total">--</div>
+      <div class="pnl-sub" id="pnl-pct">on $0 capital</div>
+      <div class="pnl-grid">
+        <div class="stat">
+          <span class="stat-value" id="stat-winrate">--</span>
+          <span class="stat-label">Win rate</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="stat-trades">--</span>
+          <span class="stat-label">Closed</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="stat-open">--</span>
+          <span class="stat-label">Open</span>
         </div>
       </div>
-
-      <div class="card">
-        <div class="card-label">Momentum</div>
-        <div class="momentum-body">
-          <div class="gauge-wrap">
-            <canvas id="gauge-chart"></canvas>
-            <div class="gauge-center">
-              <span class="gauge-val" id="gauge-val">--</span>
-              <span class="badge badge-NEUTRAL" id="mom-signal">--</span>
-            </div>
-          </div>
-          <div class="mom-stats">
-            <div class="kv"><span>Score</span><span id="mom-score">--</span></div>
-            <div class="kv"><span>Trades</span><span id="mom-total">--</span></div>
-            <div class="kv"><span>Buy / Sell</span><span><em class="green" id="mom-buy">--</em> / <em class="red" id="mom-sell">--</em></span></div>
-            <div class="kv"><span>Whale B/S</span><span id="mom-whale">--</span></div>
-            <div class="kv"><span>Volume</span><span id="mom-vol">--</span></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Today's Metrics</div>
-        <div class="metrics-list">
-          <div class="metric"><span class="metric-label">Return 24h</span><span class="metric-value" id="today-return">--</span></div>
-          <div class="metric"><span class="metric-label">Volatility</span><span class="metric-value" id="today-vol">--</span></div>
-          <div class="metric"><span class="metric-label">Vol Change</span><span class="metric-value" id="today-volchg">--</span></div>
-          <div class="metric"><span class="metric-label">VWAP</span><span class="metric-value" id="today-vwap">--</span></div>
-          <div class="metric"><span class="metric-label">Whale Trades</span><span class="metric-value" id="today-whale">--</span></div>
-        </div>
-      </div>
-
+      <!-- Equity curve, drawn as inline SVG. A charting library is a lot of
+           weight for one sparkline. -->
+      <svg class="equity" id="equity" viewBox="0 0 300 60" preserveAspectRatio="none"
+           role="img" aria-label="Cumulative profit and loss over recent trades"></svg>
     </section>
 
-    <!-- ── Row 2: Trading Bot ─────────────────────────────── -->
-    <div class="card card-bot" id="bot-card">
-      <div class="bot-header">
-        <div class="card-label">Paper Trading Bot</div>
-        <div class="bot-controls">
-          <span id="bot-status-badge" class="badge badge-NEUTRAL">STOPPED</span>
-          <button id="bot-toggle-btn" class="btn btn-primary" onclick="toggleBot()">Start</button>
+    <!-- ── Control ───────────────────────────────────────────────────────── -->
+    <section class="card">
+      <div class="row">
+        <div>
+          <span class="badge" id="bot-badge">STOPPED</span>
+          <span class="muted small" id="bot-heartbeat"></span>
+        </div>
+        <button class="btn" id="bot-btn">Start</button>
+      </div>
+
+      <!-- The trade maths, stated plainly. A configuration that needs an
+           impossible win rate is the single most expensive mistake here, and the
+           bot refuses to start on one — so it belongs on screen, not in a log. -->
+      <p class="risk-line" id="risk-line"></p>
+
+      <details class="config" id="config">
+        <summary>Configuration</summary>
+        <div class="config-grid">
+          <label>Capital (USD)<input type="number" id="cfg-capital" value="1000" min="10" step="10" /></label>
+          <label>Position size %<input type="number" id="cfg-position-pct" value="10" min="1" max="100" step="1" /></label>
+          <label>Take profit %<input type="number" id="cfg-tp" value="2" min="0.5" step="0.1" /></label>
+          <label>Stop loss %<input type="number" id="cfg-sl" value="1.5" min="0.5" step="0.1" /></label>
+          <label>Trailing stop %<input type="number" id="cfg-trailing-pct" value="1.2" min="0.1" step="0.1" /></label>
+          <label>Max positions<input type="number" id="cfg-max-slots" value="3" min="1" max="20" step="1" /></label>
+          <label>Cooldown (s)<input type="number" id="cfg-cooldown" value="120" min="0" step="10" /></label>
+        </div>
+        <div class="toggles">
+          <label><input type="checkbox" id="cfg-trailing" checked /> Trailing stop</label>
+          <label><input type="checkbox" id="cfg-breakeven" checked /> Breakeven stop</label>
+          <label><input type="checkbox" id="cfg-ai-agent" /> Autonomous AI agent</label>
+        </div>
+        <p class="muted small">
+          The agent decides entries only. Stop loss, take profit and trailing exits
+          stay automatic, and every order it proposes is checked against the risk
+          limits before it reaches the market.
+        </p>
+      </details>
+    </section>
+
+    <!-- ── What is at risk right now ─────────────────────────────────────── -->
+    <section class="card">
+      <h2>Open positions</h2>
+      <div id="positions"><p class="muted small">None.</p></div>
+    </section>
+
+    <!-- ── Where the money is flowing ────────────────────────────────────── -->
+    <section class="card">
+      <div class="row" style="margin-bottom:12px">
+        <h2 style="margin:0">Volume flow</h2>
+        <div class="tabs" id="vol-tabs">
+          <button class="tab tab-sm active" data-window="1h">1h</button>
+          <button class="tab tab-sm" data-window="24h">24h</button>
+          <button class="tab tab-sm" data-window="7d">7d</button>
         </div>
       </div>
 
-      <!-- Bot Config Panel (visible when stopped) -->
-      <div class="bot-config-panel" id="bot-config-panel">
-        <div class="bot-config-title">Configuration</div>
-        <div class="bot-config-grid">
-          <div class="bot-config-group">
-            <label class="bot-config-label">Capital (USD)</label>
-            <input type="number" id="cfg-capital" class="bot-config-input" value="100" min="10" step="10" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Position Size %</label>
-            <input type="number" id="cfg-position-pct" class="bot-config-input" value="10" min="1" max="100" step="1" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Take Profit %</label>
-            <input type="number" id="cfg-tp" class="bot-config-input" value="0.3" min="0.1" step="0.1" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Stop Loss %</label>
-            <input type="number" id="cfg-sl" class="bot-config-input" value="5" min="0.5" step="0.5" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Grid Step %</label>
-            <input type="number" id="cfg-grid-step" class="bot-config-input" value="0.5" min="0.1" step="0.1" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Cooldown (s)</label>
-            <input type="number" id="cfg-cooldown" class="bot-config-input" value="120" min="10" step="10" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Max Slots/Strategy</label>
-            <input type="number" id="cfg-max-slots" class="bot-config-input" value="5" min="1" max="20" step="1" />
-          </div>
-          <div class="bot-config-group">
-            <label class="bot-config-label">Trailing Stop %</label>
-            <input type="number" id="cfg-trailing-pct" class="bot-config-input" value="1.5" min="0.1" step="0.1" />
-          </div>
-        </div>
-
-        <div class="bot-config-strategies">
-          <label class="bot-config-label">Strategies</label>
-          <div class="bot-config-strat-btns">
-            <button class="bot-strat-btn active" data-strat="GRID" onclick="toggleStratBtn(this)">GRID</button>
-            <button class="bot-strat-btn active" data-strat="MOMENTUM" onclick="toggleStratBtn(this)">MOMENTUM</button>
-            <button class="bot-strat-btn" data-strat="RSI" onclick="toggleStratBtn(this)">RSI</button>
-            <button class="bot-strat-btn" data-strat="ALWAYS_BUY" onclick="toggleStratBtn(this)">ALWAYS_BUY</button>
-          </div>
-        </div>
-
-        <div class="bot-config-toggles">
-          <label class="bot-toggle-switch"><input type="checkbox" id="cfg-trailing" checked /><span class="bot-toggle-slider"></span> Trailing Stop</label>
-          <label class="bot-toggle-switch"><input type="checkbox" id="cfg-breakeven" checked /><span class="bot-toggle-slider"></span> Breakeven Stop</label>
-          <label class="bot-toggle-switch"><input type="checkbox" id="cfg-dynamic-tpsl" /><span class="bot-toggle-slider"></span> Dynamic TP/SL</label>
-        </div>
-
-        <div class="bot-config-section-label">AI Integration</div>
-        <div class="bot-config-toggles">
-          <label class="bot-toggle-switch"><input type="checkbox" id="cfg-ai-filter" /><span class="bot-toggle-slider"></span> AI Direction Filter</label>
-          <label class="bot-toggle-switch"><input type="checkbox" id="cfg-ai-sizing" /><span class="bot-toggle-slider"></span> AI Confidence Sizing</label>
-        </div>
+      <!-- Buy vs sell notional as a single proportional bar. The split is the
+           whole point, so it reads better than two numbers side by side. -->
+      <div class="flow-bar" id="flow-bar">
+        <div class="flow-buy" id="flow-buy"></div>
+        <div class="flow-sell" id="flow-sell"></div>
+      </div>
+      <div class="flow-legend">
+        <span class="up" id="flow-buy-label">--</span>
+        <span class="muted small" id="flow-ratio">--</span>
+        <span class="down" id="flow-sell-label">--</span>
       </div>
 
-      <div class="bot-stats-row">
-        <div class="bot-stat">
-          <div class="bot-stat-label">Total P&L</div>
-          <div class="bot-stat-value" id="bot-pnl-usd">$0.00</div>
+      <div class="pnl-grid" style="margin-top:14px">
+        <div class="stat">
+          <span class="stat-value" id="vol-net">--</span>
+          <span class="stat-label">Net flow</span>
         </div>
-        <div class="bot-stat">
-          <div class="bot-stat-label">Win Rate</div>
-          <div class="bot-stat-value" id="bot-winrate">--</div>
+        <div class="stat">
+          <span class="stat-value" id="vol-trades">--</span>
+          <span class="stat-label">Trades</span>
         </div>
-        <div class="bot-stat">
-          <div class="bot-stat-label">Trades</div>
-          <div class="bot-stat-value" id="bot-trades-count">0</div>
-        </div>
-        <div class="bot-stat">
-          <div class="bot-stat-label">Open</div>
-          <div class="bot-stat-value" id="bot-open-trade">--</div>
+        <div class="stat">
+          <span class="stat-value" id="vol-whales">--</span>
+          <span class="stat-label">Whales B/S</span>
         </div>
       </div>
+    </section>
 
-      <!-- Equity Curve Chart -->
-      <div class="bot-equity-wrap" id="bot-equity-wrap" style="display:none;">
-        <div class="card-label" style="margin-bottom:6px;">Equity Curve</div>
-        <div style="height:120px;"><canvas id="equity-chart"></canvas></div>
+    <!-- ── Why the bot is acting ─────────────────────────────────────────── -->
+    <section class="card">
+      <h2>Signal</h2>
+      <div class="signal-head">
+        <span class="direction NEUTRAL" id="sig-direction">--</span>
+        <span class="muted" id="sig-confidence"></span>
       </div>
+      <p class="rationale" id="sig-rationale">Waiting for a prediction...</p>
+      <p class="muted small" id="sig-model"></p>
+    </section>
 
-      <!-- Strategy Performance Breakdown -->
-      <div class="bot-strat-perf" id="bot-strat-perf">
-        <!-- Rendered by JS when PnL data available -->
-      </div>
-
-      <div class="bot-conditions" id="bot-conditions-panel">
-        <div class="card-label" style="margin-bottom:8px;">Signal Conditions</div>
-        <div id="bot-conditions-list">
-          <span class="text-muted text-sm">Start bot to see live conditions...</span>
-        </div>
-        <div id="bot-will-enter"></div>
-      </div>
-
-      <div class="bot-trades-wrap">
-        <table class="bot-table">
+    <!-- ── What actually happened ────────────────────────────────────────── -->
+    <section class="card wide">
+      <h2>Recent trades</h2>
+      <div class="table-wrap">
+        <table id="trades-table">
           <thead>
-            <tr>
-              <th>Time</th>
-              <th class="text-right">Entry</th>
-              <th class="text-right">Exit</th>
-              <th class="text-right">P&L</th>
-              <th class="text-center">Reason</th>
-            </tr>
+            <tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Why</th></tr>
           </thead>
-          <tbody id="bot-trade-rows">
-            <tr><td colspan="5" class="text-center text-muted" style="padding:20px;">No trades yet</td></tr>
-          </tbody>
+          <tbody><tr><td colspan="6" class="muted small">No trades yet.</td></tr></tbody>
         </table>
       </div>
-    </div>
-
-    <!-- ── Row 3: Volume Report ───────────────────────────── -->
-    <div class="card" id="volume-card">
-      <div class="volume-header">
-        <div class="card-label">Trade Report</div>
-        <div class="vol-tabs">
-          <button class="vol-tab" data-window="1h">1h</button>
-          <button class="vol-tab active" data-window="24h">24h</button>
-          <button class="vol-tab" data-window="7d">7d</button>
-          <button class="vol-tab" data-window="30d">30d</button>
-          <button class="vol-tab" data-window="3m">3m</button>
-          <button class="vol-tab" data-window="6m">6m</button>
-          <button class="vol-tab" data-window="1y">1y</button>
-        </div>
-      </div>
-      <div class="volume-body">
-        <div class="volume-chart-wrap">
-          <canvas id="volume-chart"></canvas>
-        </div>
-        <div class="volume-stats">
-          <div class="vol-stat"><span class="vol-stat-label">Trades</span><span class="vol-stat-value" id="vol-trades">--</span></div>
-          <div class="vol-stat"><span class="vol-stat-label">Volume</span><span class="vol-stat-value" id="vol-net">--</span></div>
-          <div class="vol-stat"><span class="vol-stat-label">Whale Buy</span><span class="vol-stat-value" id="vol-whale-buy">--</span></div>
-          <div class="vol-stat"><span class="vol-stat-label">Whale Sell</span><span class="vol-stat-value" id="vol-whale-sell">--</span></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Row 4: Whale Feed + Users ──────────────────────── -->
-    <section class="grid-2">
-
-      <div class="card">
-        <div class="card-label">Whale Trades</div>
-        <div class="whale-feed" id="whale-feed-container">
-          <span class="text-muted text-sm">Loading...</span>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Users</div>
-        <div class="users-counters">
-          <div class="user-counter">
-            <div class="user-counter-val" id="users-total">--</div>
-            <div class="user-counter-label">Total</div>
-          </div>
-          <div class="user-counter">
-            <div class="user-counter-val accent" id="users-today">--</div>
-            <div class="user-counter-label">Today</div>
-          </div>
-        </div>
-        <div class="card-label" style="margin-top:12px;">Recent</div>
-        <div class="users-recent" id="users-recent">
-          <span class="text-muted text-sm">Loading...</span>
-        </div>
-      </div>
-
     </section>
-
-    <!-- ── Row 5: Price Alerts ──────────────────────────────── -->
-    <section class="grid-2">
-
-      <div class="card">
-        <div class="card-label">Create Price Alert</div>
-        <div class="alert-form">
-          <div class="alert-form-row">
-            <select id="alert-condition" class="alert-input">
-              <option value="ABOVE">Price Above</option>
-              <option value="BELOW">Price Below</option>
-            </select>
-            <input type="number" id="alert-target" class="alert-input" placeholder="Target price (USD)" step="0.01" />
-          </div>
-          <div class="alert-form-row">
-            <input type="text" id="alert-note" class="alert-input alert-note-input" placeholder="Note (optional)" />
-            <button id="alert-create-btn" class="alert-btn" onclick="createAlert()">Create Alert</button>
-          </div>
-        </div>
-        <div class="card-label" style="margin-top:12px;">Active Alerts</div>
-        <div class="alert-list" id="alert-active-list">
-          <span class="text-muted text-sm">No alerts</span>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Alert History</div>
-        <div class="alert-history" id="alert-history-list">
-          <span class="text-muted text-sm">No triggered alerts</span>
-        </div>
-      </div>
-
-    </section>
-
-    <!-- ── Row 6: Kline chart ─────────────────────────────── -->
-    <div class="card card-chart">
-      <div class="card-label" id="kline-combined-title">Price -- last 60 min</div>
-      <canvas id="kline-combined-chart"></canvas>
-    </div>
 
   </main>
 
-  <script src="config.js?v=6" onerror="void 0"></script>
+  <!-- Whale alerts. Large trades are the closest thing here to a real-time
+       signal worth interrupting for, so they get a toast; nothing else does. -->
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
   <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@8.0.7/dist/browser/signalr.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=23"></script>
 </body>
 
 </html>

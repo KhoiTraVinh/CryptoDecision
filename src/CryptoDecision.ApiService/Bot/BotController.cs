@@ -43,23 +43,31 @@ public sealed class BotController(
             Enabled                  = true,
             PaperMode                = req.PaperMode,
             Symbol                   = req.Symbol?.ToUpperInvariant() ?? "BTCUSDT",
-            ActiveStrategies         = req.ActiveStrategies ?? new List<string> { "GRID", "MOMENTUM" },
-            GridStepPct              = req.GridStepPct > 0 ? req.GridStepPct : 0.005m,
+            // Defaults to BINANCE, the price feed the strategies read. Live trading
+            // requires setting this to OKX explicitly — the only venue with an order
+            // engine — so going live is never something a default does for you. The
+            // bot worker refuses to start on any other live combination rather than
+            // falling back to simulation; see IOrderEngine.DescribeRefusal.
+            Exchange                 = req.Exchange?.ToUpperInvariant() ?? "BINANCE",
+            ActiveStrategies         = req.ActiveStrategies ?? new List<string> { "MOMENTUM" },
             CapitalUsd               = req.CapitalUsd > 0 ? req.CapitalUsd : 100m,
             MaxOpenTradesPerStrategy = req.MaxOpenTradesPerStrategy > 0 ? req.MaxOpenTradesPerStrategy : 5,
             PositionPctOfCapital     = req.PositionPct > 0 ? req.PositionPct : 0.10m,
-            TakeProfitPct            = req.TakeProfitPct > 0 ? req.TakeProfitPct : 0.003m,
-            StopLossPct              = req.StopLossPct > 0 ? req.StopLossPct : 0.05m,
+            // Fallbacks must form a viable pair — RiskEngine rejects the old
+            // 0.3%/5% combination outright (98% breakeven win rate).
+            TakeProfitPct            = req.TakeProfitPct > 0 ? req.TakeProfitPct : 0.02m,
+            StopLossPct              = req.StopLossPct > 0 ? req.StopLossPct : 0.015m,
             CooldownSeconds          = req.CooldownSeconds > 0 ? req.CooldownSeconds : 120,
             MaxHoldMinutes           = 1440,
             UseTrailingStop          = req.UseTrailingStop,
-            TrailingStopPct          = req.TrailingStopPct > 0 ? req.TrailingStopPct : 0.015m,
+            TrailingStopPct          = req.TrailingStopPct > 0 ? req.TrailingStopPct : 0.012m,
             UseBreakevenStop         = req.UseBreakevenStop,
-            BreakevenTriggerPct      = req.BreakevenTriggerPct > 0 ? req.BreakevenTriggerPct : 0.005m,
+            BreakevenTriggerPct      = req.BreakevenTriggerPct > 0 ? req.BreakevenTriggerPct : 0.008m,
             UseDynamicTpSl           = req.UseDynamicTpSl,
             UseAiFilter              = req.UseAiFilter,
             MinAiConfidence          = req.MinAiConfidence > 0 ? req.MinAiConfidence : 0.50m,
-            UseAiSizing              = req.UseAiSizing
+            UseAiSizing              = req.UseAiSizing,
+            UseAiAgent               = req.UseAiAgent
         };
 
         await configRepo.StartBotAsync(opts, ct);
@@ -92,7 +100,7 @@ public sealed class BotController(
         var dtos = trades.Select(t => new BotTradeDto(
             t.Id, t.Symbol, t.Side, t.Strategy, t.EntryPrice, t.ExitPrice, t.Quantity,
             t.NotionalUsd, t.PnlUsd, t.PnlPct, t.Status,
-            t.OpenedAt, t.ClosedAt, t.CloseReason));
+            t.OpenedAt, t.ClosedAt, t.CloseReason, t.Mode, t.Exchange));
         return Ok(dtos);
     }
 
@@ -228,8 +236,9 @@ public sealed class BotController(
 public sealed record BotStartRequest(
     bool         PaperMode                = true,
     string?      Symbol                   = "BTCUSDT",
+    // Venue for live orders. Only OKX is implemented; ignored in paper mode.
+    string?      Exchange                 = "BINANCE",
     List<string>? ActiveStrategies        = null,
-    decimal      GridStepPct              = 0.005m,
     decimal      CapitalUsd               = 100m,
     decimal      PositionPct              = 0.10m,
     decimal      TakeProfitPct            = 0.003m,
@@ -243,5 +252,6 @@ public sealed record BotStartRequest(
     bool         UseDynamicTpSl           = false,
     bool         UseAiFilter              = false,
     decimal      MinAiConfidence          = 0.50m,
-    bool         UseAiSizing              = false
+    bool         UseAiSizing              = false,
+    bool         UseAiAgent               = false
 );

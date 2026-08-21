@@ -7,9 +7,6 @@ using CryptoDecision.ProcessorService.Telemetry;
 using CryptoDecision.ProcessorService.Workers;
 using Microsoft.Extensions.Hosting;
 using Npgsql;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Serilog;
 
 Log.Logger = new LoggerConfiguration()
@@ -20,7 +17,6 @@ try
 {
     var builder = Host.CreateApplicationBuilder(args);
 
-    var tempoEndpoint = builder.Configuration["Telemetry:TempoEndpoint"] ?? "http://tempo:4317";
 
     // ─── Serilog ─────────────────────────────────────────────────────────────
     builder.Services.AddSerilog((svc, cfg) =>
@@ -49,18 +45,6 @@ try
     // ─── Custom Metrics ───────────────────────────────────────────────────────
     builder.Services.AddSingleton<ProcessorMetrics>();
 
-    // ─── OpenTelemetry ────────────────────────────────────────────────────────
-    var resource = ResourceBuilder.CreateDefault().AddService("processor-service");
-    builder.Services.AddOpenTelemetry()
-        .WithTracing(t => t
-            .SetResourceBuilder(resource)
-            .AddSource("CryptoDecision.Processor")
-            .AddOtlpExporter(o => o.Endpoint = new Uri(tempoEndpoint)))
-        .WithMetrics(m => m
-            .SetResourceBuilder(resource)
-            .AddMeter(ProcessorMetrics.MeterName)
-            .AddRuntimeInstrumentation()
-            .AddPrometheusHttpListener(o => o.UriPrefixes = ["http://+:9090/"]));
 
     // ─── Repositories ─────────────────────────────────────────────────────────
     builder.Services.AddSingleton<DatabaseInitializer>();

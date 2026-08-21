@@ -97,9 +97,6 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
         --topic kraken.trade.ethusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic alerts.notifications --partitions 1 --replication-factor 1
-        --config retention.ms=604800000 &&
         echo All Kafka topics created successfully
     restart: "no"
 
@@ -144,87 +141,6 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Grafana Tempo (distributed tracing backend) ───────────────────────────────
-  # Start with: docker compose --profile observability up -d
-  tempo:
-    image: grafana/tempo:2.4.1
-    container_name: tempo
-    command: ["-config.file=/etc/tempo.yml"]
-    mem_limit: 384m
-    profiles: ["observability"]
-    volumes:
-      - ./docker/tempo.yml:/etc/tempo.yml:ro
-      - tempo_data:/var/tempo
-    ports:
-      - "3200:3200"   # Tempo query UI / HTTP API
-      - "4317:4317"   # OTLP gRPC (services export traces here)
-    networks:
-      - default
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  # ── Prometheus (metrics scraper) ──────────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:v2.54.0
-    container_name: prometheus
-    mem_limit: 256m
-    profiles: ["observability"]
-    volumes:
-      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    ports:
-      - "9091:9090"   # exposed on 9091 to avoid conflict with service metrics ports
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=15d"
-      - "--web.enable-lifecycle"
-    networks:
-      - default
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-  # ── Grafana (dashboards) ──────────────────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:11.0.0
-    container_name: grafana
-    mem_limit: 192m
-    profiles: ["observability"]
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP:     "false"
-      GF_FEATURE_TOGGLES_ENABLE:  traceqlEditor
-    volumes:
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      prometheus:
-        condition: service_healthy
-      tempo:
-        condition: service_healthy
-    networks:
-      - default
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
   # ── IngestionService ──────────────────────────────────────────────────────────
   ingestion:
     build:
@@ -234,11 +150,9 @@ services:
     mem_limit: 256m
     ports:
       - "8081:8080"   # health endpoint
-      - "9095:9090"   # Prometheus metrics scrape port (internal: 9090)
     environment:
       DOTNET_ENVIRONMENT:          Production
       Kafka__BootstrapServers:     kafka:9092
-      Telemetry__TempoEndpoint:    "http://tempo:4317"
       # Binance uses public stream — no auth needed
     depends_on:
       kafka-init:
@@ -260,12 +174,10 @@ services:
     mem_limit: 256m
     ports:
       - "8082:8080"   # health endpoint
-      - "9096:9090"   # Prometheus metrics scrape port (internal: 9090)
     environment:
       DOTNET_ENVIRONMENT:              Production
       Kafka__BootstrapServers:         kafka:9092
       ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=5;MaxPoolSize=50;"
-      Telemetry__TempoEndpoint:        "http://tempo:4317"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -289,7 +201,23 @@ services:
     environment:
       DOTNET_ENVIRONMENT:              Production
       ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
-      Telemetry__TempoEndpoint:        "http://tempo:4317"
+
+      # ── OKX live order placement ──
+      #
+      # Credentials come from the host environment or a .env file and are never
+      # written into this file — it is committed, they are not.
+      #
+      # Okx__EnableLiveTrading is the arm switch and defaults to false, so a
+      # deployment that has credentials still cannot place an order until this is
+      # deliberately set. bot_config.paper_mode=false is the second, separate
+      # switch. Okx__DemoTrading=true routes every order to OKX's simulated
+      # account, which is where a new configuration belongs first.
+      Okx__ApiKey:                     "${OKX_API_KEY:-}"
+      Okx__ApiSecret:                  "${OKX_API_SECRET:-}"
+      Okx__Passphrase:                 "${OKX_PASSPHRASE:-}"
+      Okx__DemoTrading:                "${OKX_DEMO_TRADING:-true}"
+      Okx__EnableLiveTrading:          "${OKX_ENABLE_LIVE_TRADING:-false}"
+      Okx__MaxOrderNotionalUsd:        "${OKX_MAX_ORDER_NOTIONAL_USD:-100}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -301,35 +229,6 @@ services:
       retries: 3
       start_period: 60s
 
-  # ── AlertService (Price Alert Kafka Consumer) ─────────────────────────────────
-  alert:
-    build:
-      context: ./src/CryptoDecision.AlertService
-      dockerfile: Dockerfile
-    container_name: alert
-    mem_limit: 128m
-    ports:
-      - "8084:8080"   # health endpoint
-      - "9097:9090"   # Prometheus metrics scrape port
-    environment:
-      DOTNET_ENVIRONMENT:              Production
-      Kafka__BootstrapServers:         kafka:9092
-      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=10;"
-      Telemetry__TempoEndpoint:        "http://tempo:4317"
-    depends_on:
-      kafka-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # ── ApiService ────────────────────────────────────────────────────────────────
   api:
     build:
       context: ./src
@@ -338,12 +237,11 @@ services:
     mem_limit: 256m
     profiles: ["ui"]
     ports:
-      - "8080:8080"   # HTTP (health + /metrics + Swagger)
+      - "8080:8080"   # HTTP (health + Swagger)
     environment:
       ASPNETCORE_ENVIRONMENT:          Production
       ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=30;"
       Kafka__BootstrapServers:         kafka:9092
-      Telemetry__TempoEndpoint:        "http://tempo:4317"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -427,7 +325,6 @@ services:
     mem_limit: 256m
     ports:
       - "8083:8080"   # health endpoint
-      - "9094:9091"   # Prometheus metrics (prometheus_client default port)
     environment:
       POSTGRES_URL:             "postgresql://crypto:crypto@postgres:5432/crypto"
       KAFKA_BOOTSTRAP_SERVERS:  "kafka:9092"
@@ -483,7 +380,6 @@ services:
       - ./dashboard/index.html:/usr/share/nginx/html/index.html:ro
       - ./dashboard/style.css:/usr/share/nginx/html/style.css:ro
       - ./dashboard/app.js:/usr/share/nginx/html/app.js:ro
-      - ./dashboard/docs.html:/usr/share/nginx/html/docs.html:ro
     depends_on:
       api:
         condition: service_healthy
@@ -512,9 +408,6 @@ services:
 volumes:
   kafka_data:
   postgres_data:
-  tempo_data:
-  prometheus_data:
-  grafana_data:
   prediction_models:
   # Holds the downloaded Qwen 2.5 weights (~4.7 GB). Persisting this across
   # `docker compose down` is what keeps the re-pull from happening every restart.

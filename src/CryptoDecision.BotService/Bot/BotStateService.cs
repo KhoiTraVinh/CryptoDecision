@@ -50,6 +50,30 @@ public sealed class BotStateService
         lock (_lock) _openTrades.Add(t);
     }
 
+    /// <summary>
+    /// Take over positions that were already open — on startup, after a restart.
+    ///
+    /// Without this a restarted worker starts with an empty position list while the
+    /// database still says OPEN: nothing evaluates those trades' stops, take
+    /// profits or timeouts ever again. In paper mode that is a leaked row. On a
+    /// live account it is real coins with nobody watching them.
+    ///
+    /// The per-strategy cooldown is seeded from the recovered entries too, so a
+    /// restart cannot be used — accidentally, in a crash loop — to bypass entry
+    /// pacing and stack positions.
+    /// </summary>
+    public void SeedOpenTrades(IReadOnlyList<BotTrade> openTrades)
+    {
+        lock (_lock)
+        {
+            _openTrades = openTrades.ToList();
+
+            _lastEntryAtByStrategy = openTrades
+                .GroupBy(t => t.Strategy)
+                .ToDictionary(g => g.Key, g => g.Max(t => t.OpenedAt));
+        }
+    }
+
     public void RemoveOpenTrade(long id)
     {
         lock (_lock)

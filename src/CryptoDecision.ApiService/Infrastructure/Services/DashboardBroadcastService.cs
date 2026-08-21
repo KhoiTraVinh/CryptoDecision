@@ -2,7 +2,6 @@ using CryptoDecision.ApiService.Application;
 using CryptoDecision.Shared.Bot;
 using CryptoDecision.ApiService.Infrastructure.Hubs;
 using CryptoDecision.ApiService.Infrastructure.Persistence;
-using MediatR;
 using Microsoft.AspNetCore.SignalR;
 
 namespace CryptoDecision.ApiService.Infrastructure.Services;
@@ -33,8 +32,6 @@ public sealed class DashboardBroadcastService(
         var tasks = new[]
         {
             LoopMarketStatus(stoppingToken),
-            LoopKlines(stoppingToken),
-            LoopUsers(stoppingToken),
             LoopBotStatus(stoppingToken)
         };
         
@@ -48,13 +45,12 @@ public sealed class DashboardBroadcastService(
             try
             {
                 using var scope = scopeFactory.CreateScope();
-                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+                var queries = scope.ServiceProvider.GetRequiredService<MarketQueries>();
 
                 foreach (var symbol in ActiveSymbols)
                 {
                     // AI Prediction & Today's metrics (every 20s)
-                    var query = new GetMarketStatusQuery(Exchange, symbol);
-                    var status = await mediator.Send(query, ct);
+                    var status = await queries.GetMarketStatusAsync(symbol, ct);
                     if (status != null)
                     {
                         var group = MarketHub.GroupName(symbol, BinanceExchange);
@@ -70,37 +66,6 @@ public sealed class DashboardBroadcastService(
         }
     }
 
-    private async Task LoopKlines(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                using var scope = scopeFactory.CreateScope();
-                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-
-                foreach (var symbol in ActiveSymbols)
-                {
-                    var exchanges = new[] { "BINANCE", "BYBIT", "OKX" };
-                    var resultList = new List<dynamic>();
-                    
-                    foreach (var ex in exchanges)
-                    {
-                        var klines = await mediator.Send(new GetKlinesQuery(symbol, 60, ex), ct);
-                        resultList.Add(new { Exchange = ex, Data = klines });
-                    }
-                    
-                    var group = MarketHub.GroupName(symbol, BinanceExchange);
-                    await hub.Clients.Group(group).ReceiveKlines(new { Symbol = symbol, Charts = resultList });
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "[SignalR] Error broadcasting Klines");
-            }
-            await Task.Delay(TimeSpan.FromSeconds(60), ct);
-        }
-    }
 
     private async Task LoopBotStatus(CancellationToken ct)
     {
@@ -241,7 +206,7 @@ public sealed class DashboardBroadcastService(
                 var dtos = tradesList.Select(t => new BotTradeDto(
                     t.Id, t.Symbol, t.Side, t.Strategy, t.EntryPrice, t.ExitPrice, t.Quantity,
                     t.NotionalUsd, t.PnlUsd, t.PnlPct, t.Status,
-                    t.OpenedAt, t.ClosedAt, t.CloseReason));
+                    t.OpenedAt, t.ClosedAt, t.CloseReason, t.Mode, t.Exchange));
 
                 await hub.Clients.All.ReceiveBotStatus(new
                 {
@@ -259,27 +224,4 @@ public sealed class DashboardBroadcastService(
         }
     }
 
-    private async Task LoopUsers(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                using var scope = scopeFactory.CreateScope();
-                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-                
-                var query = new GetUserStatsQuery();
-                var stats = await mediator.Send(query, ct);
-                if (stats != null)
-                {
-                    await hub.Clients.All.ReceiveUserStats(stats);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "[SignalR] Error broadcasting UserStats");
-            }
-            await Task.Delay(TimeSpan.FromSeconds(60), ct);
-        }
-    }
 }

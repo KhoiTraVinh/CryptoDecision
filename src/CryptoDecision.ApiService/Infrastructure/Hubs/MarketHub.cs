@@ -5,11 +5,13 @@ namespace CryptoDecision.ApiService.Infrastructure.Hubs;
 
 // ── Strongly-typed client interface ──────────────────────────────────────────
 
+/// <summary>
+/// Everything pushed to connected clients. This list is kept in step with what the
+/// dashboard actually renders — a broadcast nobody listens to is a database query
+/// on a timer for no one.
+/// </summary>
 public interface IMarketClient
 {
-    /// <summary>Pushed every 5 s with fresh momentum data for the subscribed symbol.</summary>
-    Task ReceiveMomentum(MomentumDto data);
-
     /// <summary>Pushed every 30 s with volume analysis for the subscribed symbol.</summary>
     Task ReceiveVolumeAnalysis(VolumeAnalysisDto data);
 
@@ -19,17 +21,8 @@ public interface IMarketClient
     /// <summary>Pushed every 30s with general market status (AI prediction, today's metrics).</summary>
     Task ReceiveMarketStatus(MarketStatusDto data);
 
-    /// <summary>Pushed every 60s with combined Klines from multiple exchanges.</summary>
-    Task ReceiveKlines(dynamic data);
-
     /// <summary>Pushed every 15s with trading bot status.</summary>
     Task ReceiveBotStatus(dynamic data);
-
-    /// <summary>Pushed every 60s with application active users stats.</summary>
-    Task ReceiveUserStats(UserStatsDto data);
-
-    /// <summary>Pushed when a price alert triggers (via AlertService → Kafka → this consumer).</summary>
-    Task ReceiveAlertTriggered(AlertTriggeredDto data);
 }
 
 // ── Hub ───────────────────────────────────────────────────────────────────────

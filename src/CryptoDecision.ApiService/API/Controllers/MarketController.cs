@@ -1,5 +1,5 @@
 using CryptoDecision.ApiService.Application;
-using MediatR;
+
 using Microsoft.AspNetCore.Mvc;
 
 namespace CryptoDecision.ApiService.API.Controllers;
@@ -8,7 +8,7 @@ namespace CryptoDecision.ApiService.API.Controllers;
 [ApiController]
 [Route("api")]
 [Produces("application/json")]
-public sealed class MarketController(IMediator mediator) : ControllerBase
+public sealed class MarketController(MarketQueries queries) : ControllerBase
 {
     /// <summary>
     /// Returns the latest market status for a symbol:
@@ -22,7 +22,7 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 30)]
     public async Task<IActionResult> GetMarketStatus(
         string symbol, [FromQuery] string exchange = "BINANCE", CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetMarketStatusQuery(symbol.ToUpperInvariant(), exchange), ct));
+        => Ok(await queries.GetMarketStatusAsync(symbol, ct));
 
     /// <summary>
     /// Returns the full decision dashboard for a symbol:
@@ -35,7 +35,7 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 60)]
     public async Task<IActionResult> GetDashboard(
         string symbol, [FromQuery] int days = 30, [FromQuery] string exchange = "BINANCE", CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetDashboardQuery(symbol.ToUpperInvariant(), days, exchange), ct));
+        => Ok(await queries.GetDashboardAsync(symbol, days, ct));
 
     /// <summary>
     /// Returns 5-minute real-time buy/sell momentum with whale activity and signal.
@@ -46,7 +46,7 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 5)]
     public async Task<IActionResult> GetMomentum(
         string symbol, [FromQuery] string exchange = "BINANCE", CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetMomentumQuery(symbol.ToUpperInvariant(), exchange), ct));
+        => Ok(await queries.GetMomentumAsync(symbol, exchange, ct));
 
     /// <summary>
     /// Returns the most recent 1-minute klines (OHLCV) in ascending time order.
@@ -57,7 +57,7 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 10)]
     public async Task<IActionResult> GetKlines(
         string symbol, [FromQuery] int limit = 60, [FromQuery] string exchange = "BINANCE", CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetKlinesQuery(symbol.ToUpperInvariant(), limit, exchange), ct));
+        => Ok(await queries.GetKlinesAsync(symbol, limit, exchange, ct));
 
     /// <summary>
     /// Returns buy/sell volume analysis across 1h, 24h, 7d and 30d windows,
@@ -69,7 +69,7 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 30)]
     public async Task<IActionResult> GetVolumeAnalysis(
         string symbol, [FromQuery] string exchange = "BINANCE", CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetVolumeAnalysisQuery(symbol.ToUpperInvariant(), exchange), ct));
+        => Ok(await queries.GetVolumeAnalysisAsync(symbol, exchange, ct));
 
     /// <summary>
     /// Returns the most recent whale trades.
@@ -80,5 +80,5 @@ public sealed class MarketController(IMediator mediator) : ControllerBase
     [ResponseCache(Duration = 5)]
     public async Task<IActionResult> GetWhales(
         string symbol, [FromQuery] string exchange = "BINANCE", [FromQuery] int limit = 50, CancellationToken ct = default)
-        => Ok(await mediator.Send(new GetRecentWhalesQuery(symbol.ToUpperInvariant(), exchange, limit), ct));
+        => Ok(await queries.GetRecentWhalesAsync(symbol, exchange, limit, ct));
 }

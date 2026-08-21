@@ -10,9 +10,6 @@ using CryptoDecision.IngestionService.OKX;
 using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.Workers;
 using Microsoft.Extensions.Hosting;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Serilog;
 
 // Bootstrap Serilog early to capture startup errors
@@ -24,7 +21,6 @@ try
 {
     var builder = Host.CreateApplicationBuilder(args);
 
-    var tempoEndpoint = builder.Configuration["Telemetry:TempoEndpoint"] ?? "http://tempo:4317";
 
     // ─── Serilog ──────────────────────────────────────────────────────────────
     builder.Services.AddSerilog((services, cfg) =>
@@ -63,18 +59,6 @@ try
         return m;
     });
 
-    // ─── OpenTelemetry ────────────────────────────────────────────────────────
-    var resource = ResourceBuilder.CreateDefault().AddService("ingestion-service");
-    builder.Services.AddOpenTelemetry()
-        .WithTracing(t => t
-            .SetResourceBuilder(resource)
-            .AddSource("CryptoDecision.Ingestion")
-            .AddOtlpExporter(o => o.Endpoint = new Uri(tempoEndpoint)))
-        .WithMetrics(m => m
-            .SetResourceBuilder(resource)
-            .AddMeter(IngestionMetrics.MeterName)
-            .AddRuntimeInstrumentation()
-            .AddPrometheusHttpListener(o => o.UriPrefixes = ["http://+:9090/"]));
 
     // ─── Kafka ────────────────────────────────────────────────────────────────
     builder.Services.AddSingleton<KafkaProducerService>();

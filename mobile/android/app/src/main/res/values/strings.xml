@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">CryptoDecision</string>
-    <string name="title_activity_main">CryptoDecision</string>
-    <string name="package_name">com.cryptodecision.mobile</string>
-    <string name="custom_url_scheme">com.cryptodecision.mobile</string>
-</resources>

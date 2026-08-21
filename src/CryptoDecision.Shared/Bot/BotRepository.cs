@@ -12,9 +12,11 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     {
         const string sql = """
             INSERT INTO bot_trades
-              (symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at)
+              (symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at,
+               mode, exchange, entry_order_id, fee_usd, exit_algo_id)
             VALUES
-              (@symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt)
+              (@symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt,
+               @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId)
             RETURNING id
             """;
 
@@ -28,6 +30,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("notional",   NpgsqlDbType.Numeric, t.NotionalUsd);
         cmd.Parameters.AddWithValue("status",     t.Status);
         cmd.Parameters.AddWithValue("openedAt",   NpgsqlDbType.TimestampTz, t.OpenedAt);
+        cmd.Parameters.AddWithValue("mode",       t.Mode);
+        cmd.Parameters.AddWithValue("exchange",   t.Exchange);
+        cmd.Parameters.AddWithValue("entryOrderId", t.EntryOrderId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("feeUsd",     NpgsqlDbType.Numeric,
+            t.FeeUsd.HasValue ? t.FeeUsd.Value : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("exitAlgoId", t.ExitAlgoId ?? (object)DBNull.Value);
 
         return (long)(await cmd.ExecuteScalarAsync(ct))!;
     }
@@ -43,7 +51,13 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                 pnl_pct      = @pnlPct,
                 status       = @status,
                 closed_at    = @closedAt,
-                close_reason = @reason
+                close_reason = @reason,
+                exit_order_id= @exitOrderId,
+                fee_usd      = @feeUsd,
+                -- Cleared on close: the protective order has either fired or been
+                -- cancelled, and a stale algoId on a closed row would make the next
+                -- reconciliation pass think there is still something to check.
+                exit_algo_id = NULL
             WHERE id = @id
             """;
 
@@ -55,9 +69,65 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("status",    t.Status);
         cmd.Parameters.AddWithValue("closedAt",  NpgsqlDbType.TimestampTz, t.ClosedAt!.Value);
         cmd.Parameters.AddWithValue("reason",    t.CloseReason ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("exitOrderId", t.ExitOrderId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("feeUsd",    NpgsqlDbType.Numeric,
+            t.FeeUsd.HasValue ? t.FeeUsd.Value : (object)DBNull.Value);
         cmd.Parameters.AddWithValue("id",        t.Id);
 
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Protective order handle ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Record the exchange-side OCO order guarding an open position.
+    ///
+    /// Written as its own statement immediately after the OCO is accepted, rather
+    /// than as part of the insert, because the order cannot be placed until the
+    /// entry has filled and the trade already has an id. The window between the
+    /// two is the one place a protective order can exist without the database
+    /// knowing about it, which is why the caller logs loudly if this fails.
+    /// </summary>
+    public async Task UpdateExitAlgoIdAsync(long tradeId, string? algoId, CancellationToken ct = default)
+    {
+        const string sql = "UPDATE bot_trades SET exit_algo_id = @algoId WHERE id = @id";
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("algoId", algoId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("id",     tradeId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Open positions ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every position still marked OPEN, oldest first.
+    ///
+    /// This is what lets a restarted worker take responsibility for positions it
+    /// did not open. It deliberately does not reuse GetRecentTradesAsync with a
+    /// limit: an open position can be arbitrarily older than the most recent N
+    /// trades, and a live position missed by a limit clause is a real holding with
+    /// nothing evaluating its stop loss.
+    /// </summary>
+    public async Task<IReadOnlyList<BotTrade>> GetOpenTradesAsync(CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
+                   pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
+                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id
+            FROM bot_trades
+            WHERE status = 'OPEN'
+            ORDER BY opened_at ASC
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var result = new List<BotTrade>();
+        while (await reader.ReadAsync(ct))
+            result.Add(MapRow(reader));
+        return result;
     }
 
     // ── Update peak price (trailing stop tracking) ────────────────────────────
@@ -79,7 +149,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     {
         const string sql = """
             SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
-                   pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price
+                   pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
+                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -150,5 +221,11 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         ClosedAt    = r.IsDBNull(12) ? null : r.GetDateTime(12),
         CloseReason = r.IsDBNull(13) ? null : r.GetString(13),
         PeakPrice   = r.IsDBNull(14) ? null : r.GetDecimal(14),
+        Mode         = r.GetString(15),
+        Exchange     = r.GetString(16),
+        EntryOrderId = r.IsDBNull(17) ? null : r.GetString(17),
+        ExitOrderId  = r.IsDBNull(18) ? null : r.GetString(18),
+        FeeUsd       = r.IsDBNull(19) ? null : r.GetDecimal(19),
+        ExitAlgoId   = r.IsDBNull(20) ? null : r.GetString(20),
     };
 }

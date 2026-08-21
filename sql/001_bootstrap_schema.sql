@@ -99,9 +99,15 @@ CREATE TABLE IF NOT EXISTS prediction_table (
 );
 CREATE INDEX IF NOT EXISTS ix_prediction_symbol_date ON prediction_table (symbol, date DESC);
 
--- ── Seed sample predictions for testing ──────────────────────────────────────
-INSERT INTO prediction_table (symbol, date, direction, confidence, model_version)
-VALUES
-    ('BTCUSDT', CURRENT_DATE, 'UP',      0.7823, 'v1.0.0'),
-    ('ETHUSDT', CURRENT_DATE, 'NEUTRAL', 0.5541, 'v1.0.0')
-ON CONFLICT (symbol, date, model_version) DO NOTHING;
+-- NOTE: this file used to seed two sample predictions here
+-- ('BTCUSDT' UP 0.7823, 'ETHUSDT' NEUTRAL 0.5541, model_version 'v1.0.0') so the
+-- dashboard had something to render on a fresh database.
+--
+-- They were removed because nothing downstream could tell them apart from a real
+-- prediction. The dashboard displayed the fabricated 78% as a genuine AI call, and
+-- MomentumStrategy fed it straight into its composite entry score — a hardcoded
+-- constant was contributing 15% of the weight behind live trading decisions.
+--
+-- An empty prediction_table is handled correctly everywhere: the strategy falls
+-- back to a neutral 50 and the dashboard shows no signal until PredictionService
+-- writes a real one. Empty is honest; fabricated is not.

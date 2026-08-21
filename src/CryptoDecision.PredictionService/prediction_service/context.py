@@ -117,10 +117,17 @@ class TimeframeFlow:
         else:
             whale = "; no whale trades"
 
+        # Each figure carries its own label. The earlier phrasing — "39% of trades
+        # and 43% of volume were aggressive buys" — required carrying "were
+        # aggressive buys" across a conjunction, and the model reliably read the
+        # second number as the *sell* share instead, inverting the tape it was
+        # reasoning about.
         return (
-            f"  {self.label:>4}: {self.total_trades:,} trades — {lean} "
-            f"({self.buy_ratio:.1%} of trades and {self.volume_buy_ratio:.1%} of volume "
-            f"were aggressive buys){whale}"
+            f"  {self.label:>4}: {self.total_trades:,} trades — {lean}. "
+            f"buy share: {self.buy_ratio:.0%} of trade count, "
+            f"{self.volume_buy_ratio:.0%} of volume "
+            f"(so sell share is {1 - self.buy_ratio:.0%} and "
+            f"{1 - self.volume_buy_ratio:.0%}){whale}"
         )
 
 

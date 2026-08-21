@@ -1,3 +1,4 @@
+using CryptoDecision.BotService.Agent;
 using CryptoDecision.Shared.Bot;
 
 namespace CryptoDecision.BotService.Bot;
@@ -13,6 +14,8 @@ public sealed class TradingBotService(
     IOrderEngine          orderEngine,
     BotRepository         repo,
     BotConfigRepository   configRepo,
+    TradingAgent          agent,
+    AgentContext          agentContext,
     ILogger<TradingBotService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -22,6 +25,9 @@ public sealed class TradingBotService(
         // Seed in-memory stats from DB on startup
         var history = await repo.GetRecentTradesAsync(500, stoppingToken);
         state.SeedStats(history);
+
+        // Take over anything still open before the loop can open more.
+        await RecoverOpenPositionsAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -67,18 +73,33 @@ public sealed class TradingBotService(
 
                 if (!state.IsRunning) continue;
 
-                await EvalCycleAsync(opts, stoppingToken);
-
-                // ── Write heartbeat back to DB ────────────────────────────────
-                var status = state.GetStatus();
-                await configRepo.UpdateHeartbeatAsync(
-                    status.LastEvalAt ?? DateTime.UtcNow,
-                    status.OpenTradeCount,
-                    status.TotalTrades,
-                    status.TotalPnlUsd,
-                    status.WinCount,
-                    status.LossCount,
-                    stoppingToken);
+                try
+                {
+                    await EvalCycleAsync(opts, stoppingToken);
+                }
+                finally
+                {
+                    // ── Heartbeat ─────────────────────────────────────────────
+                    // Written in a finally block because it answers "is the worker
+                    // alive", not "did this cycle do anything". EvalCycleAsync
+                    // returns early on perfectly normal conditions — a failed price
+                    // fetch, a tripped circuit breaker — and skipping the heartbeat
+                    // on those made a healthy bot read as STOPPED in the dashboard
+                    // after 60 seconds, which is exactly when an operator most needs
+                    // to trust the status.
+                    if (state.IsRunning)
+                    {
+                        var status = state.GetStatus();
+                        await configRepo.UpdateHeartbeatAsync(
+                            status.LastEvalAt ?? DateTime.UtcNow,
+                            status.OpenTradeCount,
+                            status.TotalTrades,
+                            status.TotalPnlUsd,
+                            status.WinCount,
+                            status.LossCount,
+                            stoppingToken);
+                    }
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -87,6 +108,99 @@ public sealed class TradingBotService(
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
+    }
+
+    /// <summary>
+    /// Adopt every position the database still shows as open.
+    ///
+    /// Deliberately fatal on failure. A worker that cannot read its open positions
+    /// but starts anyway will happily open new ones while the existing holdings sit
+    /// unmanaged — no stop loss, no take profit, no timeout — and on a live account
+    /// those are real coins. Crashing lets the container restart and try again,
+    /// which is the safe failure; trading blind is not.
+    /// </summary>
+    private async Task RecoverOpenPositionsAsync(CancellationToken ct)
+    {
+        IReadOnlyList<BotTrade> open;
+        try
+        {
+            open = await repo.GetOpenTradesAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogCritical(ex,
+                "[TradingBot] Could not read open positions on startup. Refusing to run: the bot " +
+                "would open new positions while existing ones go unmanaged.");
+            throw;
+        }
+
+        if (open.Count == 0)
+        {
+            log.LogInformation("[TradingBot] No open positions to recover.");
+            return;
+        }
+
+        state.SeedOpenTrades(open);
+
+        var live      = open.Where(t => t.IsLive).ToList();
+        var unguarded = live.Count(t => string.IsNullOrEmpty(t.ExitAlgoId));
+
+        log.LogInformation(
+            "[TradingBot] Recovered {Total} open position(s): {Paper} paper, {Live} live. " +
+            "Exits, stops and timeouts now apply to them again.",
+            open.Count, open.Count - live.Count, live.Count);
+
+        if (live.Count > 0)
+            log.LogWarning(
+                "[TradingBot] Took over {Live} LIVE position(s) worth ${Notional} on {Venues}. " +
+                "{Unguarded} of them have no exchange-side stop order and are protected only by " +
+                "this process.",
+                live.Count, live.Sum(t => t.NotionalUsd),
+                string.Join("/", live.Select(t => t.Exchange).Distinct()), unguarded);
+    }
+
+    /// <summary>
+    /// Ask the venue whether it closed any position on its own — an OCO that fired
+    /// while the bot was down, or between cycles — and settle those rows from the
+    /// exchange's fill. Returns the trades that are genuinely still open.
+    ///
+    /// Runs before exits are evaluated, because evaluating a stop for a position
+    /// that no longer exists ends in a sell order against a zero balance, retried
+    /// every cycle forever. Paper trades short-circuit without any network call.
+    /// </summary>
+    private async Task<IReadOnlyList<BotTrade>> ReconcileVenueClosuresAsync(
+        IReadOnlyList<BotTrade> openTrades, CancellationToken ct)
+    {
+        var stillOpen = new List<BotTrade>(openTrades.Count);
+
+        foreach (var trade in openTrades)
+        {
+            try
+            {
+                var settled = await orderEngine.ReconcileAsync(trade, ct);
+                if (settled is null)
+                {
+                    stillOpen.Add(trade);
+                    continue;
+                }
+
+                state.RemoveOpenTrade(trade.Id);
+                state.SetLastClosedAt(DateTime.UtcNow);
+                state.RecordClose(settled.PnlUsd ?? 0m);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Cannot establish what the venue did — assume the position is still
+                // ours. Treating an unreachable exchange as "position closed" would
+                // drop a real holding from management.
+                log.LogWarning(ex,
+                    "[TradingBot] Could not reconcile trade {Id} with the exchange; " +
+                    "treating it as still open.", trade.Id);
+                stillOpen.Add(trade);
+            }
+        }
+
+        return stillOpen;
     }
 
     /// <summary>
@@ -99,6 +213,28 @@ public sealed class TradingBotService(
     /// </summary>
     private bool PassesRiskGate(BotOptions opts)
     {
+        // ── Can the configured execution mode actually be honoured? ──
+        //
+        // Checked before the expectancy arithmetic because it is the more dangerous
+        // failure. A bad TP/SL loses money slowly; a request for live trading that
+        // silently falls back to simulation reports fictional P&L as real, and an
+        // operator acting on those numbers has no way to tell.
+        var executionRefusal = orderEngine.DescribeRefusal(opts);
+        if (executionRefusal is not null)
+        {
+            log.LogError(
+                "[TradingBot] Refusing to start: paper_mode is {PaperMode} and exchange is {Exchange}, " +
+                "but {Reason} Fix the deployment or switch to paper mode; the bot will start automatically.",
+                opts.PaperMode, opts.Exchange, executionRefusal);
+            return false;
+        }
+
+        if (!opts.PaperMode)
+            log.LogWarning(
+                "[TradingBot] LIVE MODE on {Exchange}: orders placed from here commit real funds. " +
+                "Capital ${Capital}, {Pct:P0} per position, up to {Max} positions per strategy.",
+                opts.Exchange, opts.CapitalUsd, opts.PositionPctOfCapital, opts.MaxOpenTradesPerStrategy);
+
         var assessment = RiskEngine.Validate(opts);
         var profile    = assessment.Expectancy;
 
@@ -123,6 +259,56 @@ public sealed class TradingBotService(
         return false;
     }
 
+    /// <summary>
+    /// Hand the entry decision to the LLM agent for one turn.
+    ///
+    /// The agent opens positions through its own risk-gated tool, so nothing here
+    /// re-checks limits — that would duplicate the gate and let the two drift apart.
+    /// What this does own is reconciling the agent's actions back into
+    /// BotStateService, since the tools operate on AgentContext rather than on the
+    /// bot's in-memory state directly.
+    ///
+    /// A turn that opens nothing is the expected outcome most cycles.
+    /// </summary>
+    private async Task RunAgentEntryAsync(BotOptions opts, decimal currentPrice, CancellationToken ct)
+    {
+        if (!await agent.IsAvailableAsync(ct))
+        {
+            log.LogWarning(
+                "[TradingBot] AI agent is enabled but Ollama is unreachable. " +
+                "Skipping entries this cycle; open positions are still managed normally.");
+            return;
+        }
+
+        var openBefore = state.GetOpenTrades();
+        var knownIds   = openBefore.Select(t => t.Id).ToHashSet();
+
+        agentContext.BeginTurn(
+            opts, currentPrice, openBefore,
+            state.GetLastEntryAt(AgentContext.AgentStrategyName));
+
+        var outcome = await agent.RunTurnAsync(ct);
+
+        // Reconcile: register anything the agent opened, and drop anything it closed.
+        foreach (var opened in agentContext.TradesOpenedThisTurn(knownIds))
+        {
+            state.AddOpenTrade(opened);
+            state.SetLastEntryAt(AgentContext.AgentStrategyName, DateTime.UtcNow);
+        }
+
+        var stillOpen = agentContext.OpenTrades.Select(t => t.Id).ToHashSet();
+        foreach (var closed in openBefore.Where(t => !stillOpen.Contains(t.Id)))
+        {
+            state.RemoveOpenTrade(closed.Id);
+            state.SetLastClosedAt(DateTime.UtcNow);
+        }
+
+        if (outcome.OrdersRefused > 0)
+            log.LogInformation(
+                "[TradingBot] Risk engine refused {Count} agent order(s) this cycle.",
+                outcome.OrdersRefused);
+    }
+
     private async Task EvalCycleAsync(BotOptions opts, CancellationToken ct)
     {
         state.TouchEval();
@@ -144,11 +330,17 @@ public sealed class TradingBotService(
             return;
         }
 
-        var openTrades = state.GetOpenTrades();
-        var currentPrice = await strategy.GetCurrentPriceAsync(opts.Symbol, ct);
+        // ── 2. Reconcile anything the venue closed without us ──────────────────
+        // An exchange-side OCO can fire between cycles, or while the bot was down.
+        // Settling those rows first keeps the exit evaluation below from working on
+        // positions that no longer exist.
+        var openTrades = await ReconcileVenueClosuresAsync(state.GetOpenTrades(), ct);
+
+        // Price comes from the venue orders are placed on — see PriceFeedResolver.
+        var currentPrice = await strategy.GetCurrentPriceAsync(opts, ct);
         if (currentPrice is null) return;
 
-        // ── 2. Update peak price for trailing stop tracking ─────────────────────
+        // ── 3. Update peak price for trailing stop tracking ─────────────────────
         foreach (var trade in openTrades)
         {
             var newPeak = trade.Side == "SHORT"
@@ -162,23 +354,44 @@ public sealed class TradingBotService(
             }
         }
 
-        // ── 3. Manage all open trades exits ────────────────────────────────────
+        // ── 4. Manage all open trades exits ────────────────────────────────────
         foreach (var trade in openTrades)
         {
             var decision = strategy.EvaluateExit(trade, currentPrice.Value, opts);
             if (decision.ShouldExit)
             {
-                log.LogInformation("[TradingBot] Closing trade {Id} at ${Price} reason={Reason}", 
+                log.LogInformation("[TradingBot] Closing trade {Id} at ${Price} reason={Reason}",
                     trade.Id, currentPrice, decision.Reason);
-                    
-                var closed = await orderEngine.CloseTradeAsync(trade, currentPrice.Value, decision.Reason!, ct);
-                state.RemoveOpenTrade(trade.Id);
-                state.SetLastClosedAt(DateTime.UtcNow);
-                state.RecordClose(closed.PnlUsd ?? 0m);
+
+                try
+                {
+                    var closed = await orderEngine.CloseTradeAsync(trade, currentPrice.Value, decision.Reason!, ct);
+                    state.RemoveOpenTrade(trade.Id);
+                    state.SetLastClosedAt(DateTime.UtcNow);
+                    state.RecordClose(closed.PnlUsd ?? 0m);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // A live exit can fail on a rejected order or an unreachable
+                    // exchange. The trade deliberately stays open in state so the
+                    // next cycle tries again — dropping it here would abandon a real
+                    // position with its stop loss no longer being evaluated.
+                    log.LogError(ex,
+                        "[TradingBot] Exit for trade {Id} failed ({Reason}). The position is still " +
+                        "open and will be retried next cycle.", trade.Id, decision.Reason);
+                }
             }
         }
 
-        // ── 4. Check for new entry (Per Strategy) ──────────────────────────────
+        // ── 5. Check for new entry ─────────────────────────────────────────────
+        // Exits above are always deterministic. Only the entry decision is
+        // delegated, and only when the operator has explicitly enabled the agent.
+        if (opts.UseAiAgent)
+        {
+            await RunAgentEntryAsync(opts, currentPrice.Value, ct);
+            return;
+        }
+
         foreach (var strat in opts.ActiveStrategies)
         {
             var stratTrades = openTrades.Where(t => t.Strategy == strat).ToList();
@@ -202,12 +415,26 @@ public sealed class TradingBotService(
                             strat, decision.Side, stratTrades.Count + 1, opts.MaxOpenTradesPerStrategy, opts.Symbol,
                             decision.Confidence, decision.Rationale != null ? $" [{decision.Rationale}]" : "");
 
-                        var trade = await orderEngine.OpenPositionAsync(
-                            opts.Symbol, strat, decision.Side, currentPrice.Value, opts.CapitalUsd, opts.PositionPctOfCapital, ct,
-                            decision.Confidence, opts.UseAiSizing);
+                        try
+                        {
+                            var trade = await orderEngine.OpenPositionAsync(
+                                opts.Symbol, strat, decision.Side, currentPrice.Value, opts.CapitalUsd, opts.PositionPctOfCapital, ct,
+                                decision.Confidence, opts.UseAiSizing);
 
-                        state.AddOpenTrade(trade);
-                        state.SetLastEntryAt(strat, DateTime.UtcNow);
+                            state.AddOpenTrade(trade);
+                            state.SetLastEntryAt(strat, DateTime.UtcNow);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // A refused entry is a normal outcome live: a SHORT signal
+                            // on a spot account, insufficient balance, an order below
+                            // the exchange minimum. Caught per strategy so one refusal
+                            // does not skip the remaining strategies, and the cooldown
+                            // is deliberately not stamped — nothing was opened.
+                            log.LogError(ex,
+                                "[TradingBot] Entry for {Strat} ({Side}) was not placed: {Message}",
+                                strat, decision.Side, ex.Message);
+                        }
                     }
                 }
             }

@@ -13,7 +13,12 @@ namespace CryptoDecision.BotService.Strategies;
 ///   2. 15-min momentum  buy ratio  (weight 25%)  — short-term trend confirmation
 ///   3. 1h     volume    buy ratio  (weight 20%)  — hourly trend confirmation
 ///   4. Whale  flow      pressure   (weight 15%)  — smart money direction
-///   5. AI     prediction alignment (weight 15%)  — ML/heuristic direction + confidence
+///   5. AI     prediction alignment (weight 15%)  — ensemble direction + confidence
+///
+/// The three flow windows are cumulative — 15m contains 5m, 1h contains both — so
+/// they are correlated by construction and the composite moves smoothly rather
+/// than snapping. Weighting overlapping windows is the point: agreement across
+/// nested horizons is what distinguishes a trend from a single burst.
 ///
 /// LONG entry:  compositeScore >= 65 (bullish bias across timeframes)
 /// SHORT entry: compositeScore <= 35 (bearish bias)
@@ -23,7 +28,6 @@ namespace CryptoDecision.BotService.Strategies;
 /// </summary>
 public sealed class MomentumStrategy(
     IMomentumRepository        momentumRepo,
-    IVolumeRepository          volumeRepo,
     IPredictionRepository      predictionRepo,
     ILogger<MomentumStrategy>  log) : ITradingStrategy
 {
@@ -59,21 +63,20 @@ public sealed class MomentumStrategy(
             var score1h  = mtf.M1h.TotalTrades > 0 ? mtf.M1h.VolBuyRatio * 100m : 50m;
 
             // ── 2. Whale flow pressure ──────────────────────────────────────
-            // WhalePressure is [-0.5, +0.5], normalize to [0, 100]
-            var totalWhales = mtf.M5.WhaleBuyCount + mtf.M5.WhaleSellCount
-                            + mtf.M15.WhaleBuyCount + mtf.M15.WhaleSellCount
-                            + mtf.M1h.WhaleBuyCount + mtf.M1h.WhaleSellCount;
-            var whaleBuys   = mtf.M5.WhaleBuyCount + mtf.M15.WhaleBuyCount + mtf.M1h.WhaleBuyCount;
+            //
+            // Read from the 1h window alone, which now covers the full hour on its
+            // own. Summing the three windows would triple-count the last five
+            // minutes and double-count the 5-15 minute slice, because the windows
+            // are cumulative rather than disjoint — see
+            // MomentumRepository.GetMultiTimeframeAsync. Recency is already
+            // expressed through the separate 5m/15m/1h flow weights; layering an
+            // implicit second recency bias into the whale term would double it.
+            var totalWhales = mtf.M1h.WhaleBuyCount + mtf.M1h.WhaleSellCount;
+            var whaleBuys   = mtf.M1h.WhaleBuyCount;
 
-            decimal whaleScore;
-            if (totalWhales > 0)
-            {
-                whaleScore = ((decimal)whaleBuys / totalWhales) * 100m;
-            }
-            else
-            {
-                whaleScore = 50m; // no whale data → neutral
-            }
+            var whaleScore = totalWhales > 0
+                ? ((decimal)whaleBuys / totalWhales) * 100m
+                : 50m;  // no whale data → neutral
 
             // ── 3. AI prediction ────────────────────────────────────────────
             decimal aiScore = 50m; // default neutral

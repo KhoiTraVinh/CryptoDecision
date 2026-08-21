@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using CryptoDecision.BotService.Strategies;
 using CryptoDecision.Shared.Bot;
 
@@ -7,45 +6,35 @@ namespace CryptoDecision.BotService.Bot;
 /// <summary>
 /// Thin coordinator that resolves ITradingStrategy by name from DI.
 /// No strategy logic lives here — each strategy is a separate class (Strategy Pattern / OCP).
-/// Also provides live price from Binance REST.
+/// Also supplies the live price, from whichever venue orders are going to.
 /// </summary>
 public sealed class StrategyEvaluator
 {
     private readonly IReadOnlyDictionary<string, ITradingStrategy> _strategies;
-    private readonly IHttpClientFactory _httpFactory;
+    private readonly PriceFeedResolver _prices;
+    private readonly IOrderEngine _orderEngine;
     private readonly ILogger<StrategyEvaluator> _log;
 
     public StrategyEvaluator(
         IEnumerable<ITradingStrategy> strategies,
-        IHttpClientFactory            httpFactory,
+        PriceFeedResolver             prices,
+        IOrderEngine                  orderEngine,
         ILogger<StrategyEvaluator>    log)
     {
         // Build a lookup dictionary keyed by strategy name for O(1) resolution
-        _strategies = strategies.ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
-        _httpFactory = httpFactory;
-        _log = log;
+        _strategies  = strategies.ToDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
+        _prices      = prices;
+        _orderEngine = orderEngine;
+        _log         = log;
 
         _log.LogInformation("[StrategyEvaluator] Registered strategies: [{Names}]",
             string.Join(", ", _strategies.Keys));
     }
 
-    // ── Live price from Binance public REST ───────────────────────────────────
+    // ── Live price from the execution venue ───────────────────────────────────
 
-    public async Task<decimal?> GetCurrentPriceAsync(string symbol, CancellationToken ct)
-    {
-        try
-        {
-            var http = _httpFactory.CreateClient("binance-public");
-            var resp = await http.GetFromJsonAsync<BinancePriceTicker>(
-                $"/api/v3/ticker/price?symbol={symbol}", ct);
-            return resp?.Price;
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning("[Bot] GetCurrentPrice failed: {Err}", ex.Message);
-            return null;
-        }
-    }
+    public Task<decimal?> GetCurrentPriceAsync(BotOptions opts, CancellationToken ct)
+        => _prices.GetPriceAsync(opts, ct);
 
     // ── Entry Evaluation (delegates to resolved strategy) ─────────────────────
 
@@ -62,8 +51,28 @@ public sealed class StrategyEvaluator
             return new EntryDecision(false);
         }
 
-        var ctx = new StrategyContext(opts, openTrades, currentPrice);
-        return await impl.EvaluateEntryAsync(ctx, ct);
+        var ctx      = new StrategyContext(opts, openTrades, currentPrice);
+        var decision = await impl.EvaluateEntryAsync(ctx, ct);
+
+        // ── Drop signals the execution venue cannot fill ──
+        //
+        // MomentumStrategy's thresholds are symmetric (LONG >= 62, SHORT <= 38), so
+        // on a spot account roughly half its actionable signals are unfillable. The
+        // order engine refuses them correctly, but refusing there turns a known
+        // structural constraint into a stream of errors that buries the real ones.
+        // Filtered here instead, at Information level, because a long-only run is a
+        // valid configuration rather than a fault.
+        if (decision.Pass && decision.Side == "SHORT" && !_orderEngine.SupportsShort(opts))
+        {
+            _log.LogInformation(
+                "[StrategyEvaluator] {Strategy} signalled SHORT but {Exchange} cannot short in this " +
+                "mode (spot is long-only). Skipping the entry. [{Rationale}]",
+                strategy, opts.Exchange, decision.Rationale ?? "no rationale");
+
+            return new EntryDecision(false, Rationale: $"SHORT not executable on {opts.Exchange} spot");
+        }
+
+        return decision;
     }
 
     // ── Exit Evaluation (delegates to resolved strategy) ──────────────────────
@@ -127,5 +136,3 @@ public sealed class StrategyEvaluator
 }
 
 public sealed record ExitDecision(bool ShouldExit, string? Reason, decimal CurrentPrice, decimal ChangePct);
-
-file sealed record BinancePriceTicker(string Symbol, decimal Price);

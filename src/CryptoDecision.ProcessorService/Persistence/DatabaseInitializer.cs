@@ -33,6 +33,7 @@ public sealed class DatabaseInitializer(
             await CreateKlinesTableAsync(conn, ct);
             await CreateDailyFeatureTableAsync(conn, ct);
             await CreatePredictionTableAsync(conn, ct);
+            await EnsureBotConfigColumnsAsync(conn, ct);
             await EnsureDailyPartitionsAsync(conn, ct);
             await EnsureDedupIndexAsync(conn, ct);
             await tx.CommitAsync(ct);
@@ -140,6 +141,32 @@ public sealed class DatabaseInitializer(
             ALTER TABLE prediction_table ADD COLUMN IF NOT EXISTS signals   JSONB;
             CREATE INDEX IF NOT EXISTS ix_prediction_symbol_date
                 ON prediction_table (symbol, date DESC);
+            """, ct);
+    }
+
+    /// <summary>
+    /// Add bot_config columns that newer bot builds read.
+    ///
+    /// BotConfigRepository selects these by name, so a database that predates them
+    /// fails the whole config read and the bot cannot start at all. Applying them
+    /// here means a preserved postgres_data volume self-heals on boot instead of
+    /// requiring the operator to remember a manual migration.
+    ///
+    /// bot_config is created by the sql/ bootstrap scripts, which only run on an
+    /// empty volume — hence the to_regclass guard for a fresh database where this
+    /// runs before those scripts have created the table.
+    /// </summary>
+    private static async Task EnsureBotConfigColumnsAsync(NpgsqlConnection conn, CancellationToken ct)
+    {
+        await Exec(conn, """
+            DO $$
+            BEGIN
+                IF to_regclass('public.bot_config') IS NOT NULL THEN
+                    ALTER TABLE bot_config
+                        ADD COLUMN IF NOT EXISTS use_ai_agent BOOLEAN NOT NULL DEFAULT FALSE;
+                END IF;
+            END
+            $$;
             """, ct);
     }
 

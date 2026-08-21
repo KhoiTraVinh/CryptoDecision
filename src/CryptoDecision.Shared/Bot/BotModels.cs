@@ -25,6 +25,46 @@ public sealed record BotTrade
     /// SHORT: tracks lowest price seen (trailing stop fires when price rises TrailingStopPct from peak).
     /// </summary>
     public decimal?  PeakPrice   { get; set;  }
+
+    // ── Execution provenance ──
+    //
+    // A paper row and a live row are not the same kind of fact, and once real
+    // orders are possible the difference has to travel with the trade rather than
+    // being inferred from whatever bot_config happens to say now. PaperMode can be
+    // flipped while positions are still open; an exit has to go back to the venue
+    // its entry actually filled on, which is what Mode and Exchange are read for.
+
+    /// <summary>PAPER = simulated fill. LIVE = a real order was placed and real funds moved.</summary>
+    public string    Mode         { get; init; } = "PAPER";
+
+    /// <summary>Venue the order was placed on, or the price source for a paper fill.</summary>
+    public string    Exchange     { get; init; } = "BINANCE";
+
+    /// <summary>Exchange order id of the entry order. Null for paper trades.</summary>
+    public string?   EntryOrderId { get; init; }
+
+    /// <summary>Exchange order id of the exit order. Null for paper and still-open trades.</summary>
+    public string?   ExitOrderId  { get; set;  }
+
+    /// <summary>
+    /// OKX algoId of the OCO take-profit/stop-loss order guarding this position.
+    ///
+    /// Persisted rather than held in memory because it has to survive the restart
+    /// it exists to protect against. A bot-driven exit must cancel this first: a
+    /// manual sell leaves the OCO live, and an orphaned OCO waits to sell coins
+    /// that are no longer there.
+    /// </summary>
+    public string?   ExitAlgoId   { get; set;  }
+
+    /// <summary>
+    /// Fees the exchange actually charged, in USD — the entry fee while open, entry
+    /// plus exit once closed. Null for paper trades, whose fee is modelled inside
+    /// the P&amp;L rather than charged.
+    /// </summary>
+    public decimal?  FeeUsd       { get; set;  }
+
+    /// <summary>True when this trade committed real funds.</summary>
+    public bool IsLive => Mode == "LIVE";
 }
 
 // ── Bot configuration ─────────────────────────────────────────────────────────
@@ -35,7 +75,7 @@ public sealed class BotOptions
     public bool         PaperMode                { get; set; } = true;
     public string       Symbol                   { get; set; } = "BTCUSDT";
     public string       Exchange                 { get; set; } = "BINANCE";
-    public List<string> ActiveStrategies         { get; set; } = ["GRID", "MOMENTUM"];
+    public List<string> ActiveStrategies         { get; set; } = ["MOMENTUM"];
     public decimal      CapitalUsd               { get; set; } = 100m;
     
     /// <summary>Number of concurrent positions per strategy.</summary>
@@ -64,16 +104,6 @@ public sealed class BotOptions
     public int     CooldownSeconds{ get; set; } = 120;     // 2 minutes
 
     public decimal DailyLossLimitPct   { get; set; } = 0.15m;  // -15% of capital/day
-    public int     EvalIntervalSeconds { get; set; } = 30;
-
-    // ── Grid fields ──
-    public decimal GridStepPct         { get; set; } = 0.005m; // 0.5% default step
-
-    // ── Momentum fields ──
-    public decimal MinConfidence       { get; set; } = 0m;
-    public decimal MinMomentumBuyRatio { get; set; } = 0.65m;  // Trigger if 5-min buy ratio > 65%
-    public decimal MinBuyRatio1h       { get; set; } = 0.55m;  // Global trend > 55%
-    public int     MinWhaleBuys1h      { get; set; } = 0;
 
     // ── Trailing stop ──
 
@@ -102,6 +132,22 @@ public sealed class BotOptions
     public decimal MinAiConfidence     { get; set; } = 0.50m;
     /// <summary>Enable AI-based position sizing: higher confidence = larger position.</summary>
     public bool    UseAiSizing         { get; set; } = false;
+
+    // ── Autonomous agent ──
+
+    /// <summary>
+    /// Hand entry decisions to the LLM agent instead of the deterministic strategies.
+    ///
+    /// The agent only decides *entries*. Stop loss, take profit, trailing and
+    /// breakeven exits stay in the deterministic evaluation loop, and every order the
+    /// agent proposes is still gated by RiskEngine — it cannot size its own position
+    /// or trade past an exposure, drawdown or daily-loss limit.
+    ///
+    /// Off by default: turning this on gives a language model discretion over when
+    /// capital is committed, which is a deliberate decision an operator should make
+    /// explicitly rather than inherit.
+    /// </summary>
+    public bool    UseAiAgent          { get; set; } = false;
 }
 
 // ── Runtime status ────────────────────────────────────────────────────────────
@@ -138,5 +184,9 @@ public sealed record BotTradeDto(
     string   Status,
     DateTime OpenedAt,
     DateTime? ClosedAt,
-    string?  CloseReason
+    string?  CloseReason,
+    // Defaulted so a caller not yet taught about live trading cannot accidentally
+    // present a real trade as a simulated one.
+    string   Mode     = "PAPER",
+    string   Exchange = "BINANCE"
 );

@@ -1,6 +1,6 @@
 using System.Net;
 using System.Text.Json;
-using FluentValidation;
+using CryptoDecision.ApiService.Application;
 
 namespace CryptoDecision.ApiService.Middleware;
 
@@ -23,14 +23,14 @@ public sealed class GlobalExceptionMiddleware(
         {
             await next(ctx);
         }
-        catch (ValidationException ex)
+        catch (RequestValidationException ex)
         {
             ctx.Response.StatusCode  = (int)HttpStatusCode.BadRequest;
             ctx.Response.ContentType = "application/json";
             var body = JsonSerializer.Serialize(new
             {
                 type   = "validation_error",
-                errors = ex.Errors.Select(e => new { e.PropertyName, e.ErrorMessage })
+                errors = new[] { new { PropertyName = ex.Field, ErrorMessage = ex.Message } }
             }, JsonOpts);
             await ctx.Response.WriteAsync(body);
         }

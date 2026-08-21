@@ -20,10 +20,6 @@
     <PackageReference Include="Microsoft.Extensions.Http"                Version="9.*" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.*" />
     <PackageReference Include="AspNetCore.HealthChecks.NpgSql"           Version="8.*" />
-    <!-- OpenTelemetry: distributed tracing (→ Grafana Tempo) -->
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting"               Version="1.*" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"   Version="1.*" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http"             Version="1.*" />
 
     <ProjectReference Include="..\CryptoDecision.Shared\CryptoDecision.Shared.csproj" />
   </ItemGroup>
