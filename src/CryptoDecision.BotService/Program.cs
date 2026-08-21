@@ -127,10 +127,79 @@ if (liveRefusal is not null)
         "[Startup] Live order placement is DISABLED — {Reason} The bot can only paper trade.",
         liveRefusal);
 else
+{
     startupLog.LogWarning(
         "[Startup] Live order placement is ARMED on OKX {Mode}. Per-order ceiling ${Cap}. " +
         "Orders are placed whenever bot_config.paper_mode is false.",
         okxOptions.DemoTrading ? "demo trading (simulated funds)" : "REAL FUNDS",
         okxOptions.MaxOrderNotionalUsd);
+
+    // ─── Credential self-check ────────────────────────────────────────────────
+    //
+    // One signed read-only call, before the loop starts. Being armed only means
+    // credentials are *present*; whether they authenticate — and whether they
+    // belong to the environment the demo flag selects — is a different question,
+    // and the only other place it gets answered is halfway through placing a real
+    // order. Failing here costs a log line; failing there means a signal was acted
+    // on, refused by the exchange, and the opportunity is gone.
+    //
+    // Never fatal: a network blip at startup should not stop a bot that may be
+    // perfectly able to paper trade.
+    try
+    {
+        var probe  = host.Services.GetRequiredService<OkxTradingClient>();
+        var config = await probe.GetAccountConfigAsync(CancellationToken.None);
+
+        startupLog.LogInformation(
+            "[Startup] OKX credentials authenticated. Account level {Level}, position mode {PosMode}.",
+            config.AccountLevel, config.PosMode);
+
+        // Account level 1 is spot-only and cannot hold a swap position, so every
+        // order this bot places would be refused. Worth saying now, in the words
+        // of the setting the operator has to change.
+        if (config.AccountLevel == "1")
+            startupLog.LogError(
+                "[Startup] OKX account is in Simple mode (acctLv=1), which cannot trade perpetual " +
+                "swaps. Switch the account to Single-currency or Multi-currency margin in the OKX " +
+                "app, or every order will be refused.");
+    }
+    catch (OkxApiException ex)
+    {
+        startupLog.LogCritical(
+            "[Startup] OKX rejected the credential check — code {Code}: {Message} {Hint}",
+            ex.Code, ex.Message, DescribeAuthFailure(ex.Code, okxOptions.DemoTrading));
+    }
+    catch (Exception ex)
+    {
+        startupLog.LogError(ex,
+            "[Startup] Could not reach OKX to verify credentials. Trading will retry on demand.");
+    }
+}
+
+// Maps the OKX auth error codes to the thing an operator actually has to change.
+// The codes are not self-explanatory and the difference between them is the
+// difference between a wrong passphrase and a key from the wrong environment.
+static string DescribeAuthFailure(string code, bool demoTrading) => code switch
+{
+    "50101" => demoTrading
+        ? "This key was created for live trading, but Okx:DemoTrading is true. Demo trading " +
+          "needs an API key created inside OKX's Demo Trading environment — a live key will " +
+          "not authenticate there. Either create a demo key, or set OKX_DEMO_TRADING=false."
+        : "This key belongs to OKX's demo environment, but Okx:DemoTrading is false. Set " +
+          "OKX_DEMO_TRADING=true, or use a live API key.",
+    "50102" => "The request timestamp was outside OKX's accepted window. The container clock has " +
+               "drifted — check the host clock and Docker's time sync.",
+    "50103" => "Request header OK-ACCESS-KEY is missing or empty.",
+    "50104" => "Request header OK-ACCESS-PASSPHRASE is missing or empty.",
+    "50105" => "Wrong passphrase. This is the phrase chosen when the API key was created, " +
+               "not the account login password.",
+    "50111" => "Invalid API key.",
+    "50113" => "Invalid signature. The key and passphrase may be fine while the secret is wrong " +
+               "or truncated — check for a trailing space or newline in the .env value.",
+    "50110" => "The caller IP is not on this key's allowlist. Add the host's public IP to the " +
+               "key in the OKX API settings, or remove the IP restriction.",
+    "50119" => "API key does not exist.",
+    _       => "See the OKX API error code reference for this code.",
+};
 
 host.Run();
