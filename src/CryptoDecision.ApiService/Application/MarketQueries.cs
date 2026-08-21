@@ -206,7 +206,13 @@ internal static class MomentumScorer
 
 internal static class VolumeAnalysisMapper
 {
-    private static readonly string[] Windows = ["1h", "24h", "7d", "30d", "3m", "6m", "1y"];
+    /// <summary>
+    /// The windows the response advertises, in order. Must match what
+    /// VolumeRepository actually queries: a window listed here but not computed is
+    /// filled with zeros, and a zero is indistinguishable from "no trading" — the
+    /// API would report a flat 30-day tape it never looked at.
+    /// </summary>
+    private static readonly string[] Windows = ["1h", "24h", "7d"];
 
     public static VolumeAnalysisDto BuildDto(string symbol, IReadOnlyList<VolumeWindowData> raw)
     {

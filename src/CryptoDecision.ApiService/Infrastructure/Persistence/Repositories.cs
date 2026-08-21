@@ -204,43 +204,62 @@ public sealed class VolumeRepository(NpgsqlDataSource dataSource) : IVolumeRepos
     public async Task<IReadOnlyList<VolumeWindowData>> GetWindowsAsync(
         string symbol, string exchange = "BINANCE", CancellationToken ct = default)
     {
-        // Classify each trade into the smallest window it belongs to:
-        // trades within 1h → "1h", 1h–24h → "24h", 24h–7d → "7d", 7d–30d → "30d".
-        const string sql = """
-            WITH classified AS (
-                SELECT
-                    CASE
-                        WHEN trade_time >= NOW() - INTERVAL '1 hour'  THEN '1h'
-                        WHEN trade_time >= NOW() - INTERVAL '1 day'   THEN '24h'
-                        WHEN trade_time >= NOW() - INTERVAL '7 days'  THEN '7d'
-                        WHEN trade_time >= NOW() - INTERVAL '30 days' THEN '30d'
-                        WHEN trade_time >= NOW() - INTERVAL '3 months' THEN '3m'
-                        WHEN trade_time >= NOW() - INTERVAL '6 months' THEN '6m'
-                        ELSE '1y'
-                    END AS win,
-                    is_buyer_maker, is_whale, quote_qty
-                FROM trades
-                WHERE symbol = @symbol
-                  AND (exchange = @exchange OR @exchange = 'ALL')
-                  AND trade_time >= NOW() - INTERVAL '1 year'
-            )
-            SELECT
-                win,
+        // Cumulative windows: "24h" is the last 24 hours and contains the last hour,
+        // "7d" contains both. That is what the labels say, and it was not what the
+        // query did — a CASE expression put each trade in exactly one bucket, so
+        // "24h" meant "between 1 and 24 hours ago". The two readings diverge most
+        // when they matter most: right after a symbol change, when all the data is
+        // inside the hour and every wider column reads zero.
+        //
+        // One aggregate per window with a literal interval, rather than one pass
+        // with a CASE. Literals let the planner prune partitions at plan time, so
+        // the 1h window touches today's partition instead of a year of them. A bare
+        // aggregate with no GROUP BY always returns exactly one row, so an empty
+        // window comes back as zeros rather than a missing row — the same shape
+        // PredictionService uses for its flow windows.
+        //
+        // Only the windows the dashboard renders. The previous query also computed
+        // 30d, 3m, 6m and 1y — scanning a full year of trades every 30 seconds for
+        // numbers nothing displayed.
+        const string aggregates = """
                 COUNT(*)                                                      AS total_trades,
                 COUNT(*) FILTER (WHERE NOT is_buyer_maker)                    AS buy_count,
                 COUNT(*) FILTER (WHERE     is_buyer_maker)                    AS sell_count,
                 COALESCE(SUM(quote_qty) FILTER (WHERE NOT is_buyer_maker), 0) AS buy_volume_usd,
                 COALESCE(SUM(quote_qty) FILTER (WHERE     is_buyer_maker), 0) AS sell_volume_usd,
-                COUNT(*) FILTER (WHERE is_whale AND NOT is_buyer_maker)        AS whale_buy_count,
-                COUNT(*) FILTER (WHERE is_whale AND     is_buyer_maker)        AS whale_sell_count,
+                COUNT(*) FILTER (WHERE is_whale AND NOT is_buyer_maker)       AS whale_buy_count,
+                COUNT(*) FILTER (WHERE is_whale AND     is_buyer_maker)       AS whale_sell_count,
                 COALESCE(SUM(quote_qty) FILTER (WHERE is_whale), 0)           AS whale_volume_usd
-            FROM classified
-            GROUP BY win
+            """;
+
+        const string filter = """
+                WHERE symbol = @symbol
+                  AND (exchange = @exchange OR @exchange = 'ALL')
+            """;
+
+        var sql = $"""
+            SELECT '1h' AS win,
+            {aggregates}
+            FROM trades
+            {filter}
+              AND trade_time >= NOW() - INTERVAL '1 hour'
+            UNION ALL
+            SELECT '24h',
+            {aggregates}
+            FROM trades
+            {filter}
+              AND trade_time >= NOW() - INTERVAL '1 day'
+            UNION ALL
+            SELECT '7d',
+            {aggregates}
+            FROM trades
+            {filter}
+              AND trade_time >= NOW() - INTERVAL '7 days'
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = 20; // heavy query scanning up to 1 year of trades
+        cmd.CommandTimeout = 20;
         cmd.Parameters.AddWithValue("symbol", symbol);
         cmd.Parameters.AddWithValue("exchange", exchange);
 
