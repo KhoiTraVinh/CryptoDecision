@@ -57,10 +57,30 @@ public sealed class MomentumStrategy(
             if (mtf.M5.TotalTrades < MinTrades5m)
                 return new EntryDecision(false);
 
-            // Normalize buy ratios to 0-100 scale
-            var score5m  = mtf.M5.BuyRatio * 100m;   // 0=all sells, 100=all buys
-            var score15m = mtf.M15.TotalTrades > 0 ? mtf.M15.BuyRatio * 100m : 50m;
-            var score1h  = mtf.M1h.TotalTrades > 0 ? mtf.M1h.VolBuyRatio * 100m : 50m;
+            // Normalize buy ratios to 0-100 scale. 0 = all sells, 100 = all buys.
+            //
+            // Components are collected with their weights and only included when they
+            // actually carry information, then renormalised over the weight present.
+            //
+            // The alternative — which this replaced — was to substitute a neutral 50
+            // for a missing input. That looks harmless and is not: a neutral vote is
+            // not an abstention, it is a vote for the dead zone. On SOL the whale
+            // term is structurally absent (the 100k USDT threshold is calibrated for
+            // BTC and exceeds the largest SOL trade on record) and the AI term is
+            // absent until predictions accumulate, so 30% of the score sat pinned at
+            // 50 and the flow components had to reach 67 for a composite of 62. The
+            // bot was biased toward inaction by its own missing data rather than by
+            // the market.
+            var components = new List<(string Name, decimal Score, decimal Weight)>
+            {
+                ("5m", mtf.M5.BuyRatio * 100m, W_5m),
+            };
+
+            if (mtf.M15.TotalTrades > 0)
+                components.Add(("15m", mtf.M15.BuyRatio * 100m, W_15m));
+
+            if (mtf.M1h.TotalTrades > 0)
+                components.Add(("1h", mtf.M1h.VolBuyRatio * 100m, W_1h));
 
             // ── 2. Whale flow pressure ──────────────────────────────────────
             //
@@ -74,49 +94,53 @@ public sealed class MomentumStrategy(
             var totalWhales = mtf.M1h.WhaleBuyCount + mtf.M1h.WhaleSellCount;
             var whaleBuys   = mtf.M1h.WhaleBuyCount;
 
-            var whaleScore = totalWhales > 0
-                ? ((decimal)whaleBuys / totalWhales) * 100m
-                : 50m;  // no whale data → neutral
+            if (totalWhales > 0)
+                components.Add(("whale", ((decimal)whaleBuys / totalWhales) * 100m, W_Whale));
 
             // ── 3. AI prediction ────────────────────────────────────────────
-            decimal aiScore = 50m; // default neutral
+            //
+            // A NEUTRAL verdict is excluded along with a missing one. The model
+            // saying "no view" carries the same information as having no model, and
+            // scoring it as 50 would pull the composite toward the dead zone on the
+            // model's indecision rather than on the market's.
             PredictionSnapshot? prediction = null;
             try
             {
                 prediction = await predictionRepo.GetLatestAsync(opts.Symbol, ct);
-                if (prediction != null)
-                {
-                    // Map direction + confidence to 0-100 score
-                    var conf = prediction.Confidence;
-                    aiScore = prediction.Direction switch
-                    {
-                        "UP"   => 50m + (conf * 50m),   // 50-95 range
-                        "DOWN" => 50m - (conf * 50m),   // 5-50 range
-                        _      => 50m                     // NEUTRAL
-                    };
-                }
             }
             catch (Exception ex)
             {
                 log.LogDebug("[MomentumV2] Failed to read prediction: {Err}", ex.Message);
             }
 
-            // ── 4. Weighted composite score ─────────────────────────────────
-            var composite = (score5m  * W_5m)
-                          + (score15m * W_15m)
-                          + (score1h  * W_1h)
-                          + (whaleScore * W_Whale)
-                          + (aiScore  * W_AI);
+            if (prediction is not null && prediction.Direction is "UP" or "DOWN")
+            {
+                var conf = prediction.Confidence;
+                var aiScore = prediction.Direction == "UP"
+                    ? 50m + (conf * 50m)    // 50-95
+                    : 50m - (conf * 50m);   // 5-50
 
-            composite = Math.Clamp(composite, 0m, 100m);
+                components.Add(("ai", aiScore, W_AI));
+            }
 
-            // Build rationale string
-            var rationale = $"5m:{score5m:F0} 15m:{score15m:F0} 1h:{score1h:F0} whale:{whaleScore:F0} ai:{aiScore:F0} → {composite:F1}";
+            // ── 4. Weighted composite over the components that have data ─────
+            //
+            // Renormalised by the weight actually present, so the thresholds keep
+            // meaning "the evidence leans this far" regardless of how many sources
+            // are reporting. Fewer sources makes the score noisier, not smaller —
+            // which is the honest representation of a thinner read.
+            var presentWeight = components.Sum(c => c.Weight);
+            var composite     = Math.Clamp(
+                components.Sum(c => c.Score * c.Weight) / presentWeight, 0m, 100m);
+
+            var rationale = string.Join(" ", components.Select(c => $"{c.Name}:{c.Score:F0}"))
+                          + $" → {composite:F1}";
 
             log.LogInformation(
-                "[MomentumV2] {Symbol} composite={Score:F1} [{Detail}] whale_trades={WhaleTotal} ai={AiDir}({AiConf:P0})",
-                opts.Symbol, composite, rationale, totalWhales,
-                prediction?.Direction ?? "N/A", prediction?.Confidence ?? 0);
+                "[MomentumV2] {Symbol} composite={Score:F1} [{Detail}] weight={Weight:P0} of full " +
+                "(whale_trades={WhaleTotal} ai={AiDir})",
+                opts.Symbol, composite, rationale, presentWeight, totalWhales,
+                prediction?.Direction ?? "N/A");
 
             // ── 5. Entry decision ───────────────────────────────────────────
 
