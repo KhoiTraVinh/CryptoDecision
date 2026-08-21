@@ -2,10 +2,8 @@ using System.Diagnostics;
 using CryptoDecision.IngestionService.Binance;
 using CryptoDecision.IngestionService.Bybit;
 using CryptoDecision.IngestionService.Channels;
-using CryptoDecision.IngestionService.Coinbase;
 using CryptoDecision.IngestionService.Health;
 using CryptoDecision.IngestionService.Kafka;
-using CryptoDecision.IngestionService.Kraken;
 using CryptoDecision.IngestionService.OKX;
 using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.Workers;
@@ -43,8 +41,6 @@ try
     builder.Services.AddSingleton<KlineChannel>();
     builder.Services.AddSingleton<OkxTradeChannel>();
     builder.Services.AddSingleton<BybitTradeChannel>();
-    builder.Services.AddSingleton<CoinbaseTradeChannel>();
-    builder.Services.AddSingleton<KrakenTradeChannel>();
 
     // ─── ActivitySource (distributed tracing) ────────────────────────────────
     builder.Services.AddSingleton(new ActivitySource("CryptoDecision.Ingestion"));
@@ -67,15 +63,11 @@ try
     builder.Services.AddSingleton<BinanceNormalizer>();
     builder.Services.AddSingleton<OkxNormalizer>();
     builder.Services.AddSingleton<BybitNormalizer>();
-    builder.Services.AddSingleton<CoinbaseNormalizer>();
-    builder.Services.AddSingleton<KrakenNormalizer>();
 
     // ─── Exchange WebSocket clients ───────────────────────────────────────────
     builder.Services.AddSingleton<BinanceWebSocketClient>();
     builder.Services.AddSingleton<OkxWebSocketClient>();
     builder.Services.AddSingleton<BybitWebSocketClient>();
-    builder.Services.AddSingleton<CoinbaseWebSocketClient>();
-    builder.Services.AddSingleton<KrakenWebSocketClient>();
 
     // ─── Workers ──────────────────────────────────────────────────────────────
     // Binance: WebSocket → TradeChannel → Kafka
@@ -91,13 +83,7 @@ try
     builder.Services.AddHostedService<BybitIngestionWorker>();
     builder.Services.AddHostedService<BybitKafkaBatchPublisherWorker>();
 
-    // Coinbase: WebSocket → CoinbaseTradeChannel → Kafka
-    builder.Services.AddHostedService<CoinbaseIngestionWorker>();
-    builder.Services.AddHostedService<CoinbaseKafkaBatchPublisherWorker>();
 
-    // Kraken: WebSocket → KrakenTradeChannel → Kafka
-    builder.Services.AddHostedService<KrakenIngestionWorker>();
-    builder.Services.AddHostedService<KrakenKafkaBatchPublisherWorker>();
 
     // ─── Health checks ─────────────────────────────────────────────────────────
     builder.Services.AddHealthChecks()

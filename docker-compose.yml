@@ -85,18 +85,6 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
         --topic bybit.trade.ethusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic coinbase.trade.btcusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic coinbase.trade.ethusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic kraken.trade.btcusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic kraken.trade.ethusdt --partitions 3 --replication-factor 1
-        --config retention.ms=259200000 &&
         echo All Kafka topics created successfully
     restart: "no"
 
@@ -390,21 +378,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  # ── Cloudflare Tunnel — HTTPS ra ngoài (4G / WiFi khác), không cần port forwarding ──
-  # Chạy: docker compose --profile tunnel up -d cloudflared
-  # Lấy URL: docker compose logs cloudflared | grep "trycloudflare.com"
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared
-    restart: unless-stopped
-    command: tunnel --url http://dashboard:80
-    depends_on:
-      dashboard:
-        condition: service_healthy
-    profiles:
-      - tunnel   # chỉ chạy khi: docker compose --profile tunnel up -d
-
 volumes:
   kafka_data:
   postgres_data:

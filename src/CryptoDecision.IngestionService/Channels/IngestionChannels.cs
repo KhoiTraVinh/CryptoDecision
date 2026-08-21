@@ -38,11 +38,7 @@ public sealed class OkxTradeChannel() : TradeChannel(50_000);
 /// <summary>Bounded trade channel for Bybit trades (isolated from Binance channel).</summary>
 public sealed class BybitTradeChannel() : TradeChannel(50_000);
 
-/// <summary>Bounded trade channel for Coinbase trades (isolated per exchange).</summary>
-public sealed class CoinbaseTradeChannel() : TradeChannel(50_000);
 
-/// <summary>Bounded trade channel for Kraken trades (isolated per exchange).</summary>
-public sealed class KrakenTradeChannel() : TradeChannel(50_000);
 
 /// <summary>
 /// Bounded channel for normalized klines. Klines are lower volume (one per
