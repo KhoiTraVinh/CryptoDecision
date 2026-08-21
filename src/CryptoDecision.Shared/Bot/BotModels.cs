@@ -63,6 +63,18 @@ public sealed record BotTrade
     /// </summary>
     public decimal?  FeeUsd       { get; set;  }
 
+    /// <summary>
+    /// Leverage in force when the position was opened, and the margin mode behind
+    /// it. Null for paper and spot trades.
+    ///
+    /// Recorded because they are not recoverable from anything else on the row, and
+    /// without them the P&amp;L series is not comparable across trades: the same
+    /// entry, exit and size at different leverage risked different amounts of
+    /// capital and sat different distances from liquidation.
+    /// </summary>
+    public decimal?  Leverage    { get; init; }
+    public string?   MarginMode  { get; init; }
+
     /// <summary>True when this trade committed real funds.</summary>
     public bool IsLive => Mode == "LIVE";
 }
@@ -104,6 +116,9 @@ public sealed class BotOptions
     public int     CooldownSeconds{ get; set; } = 120;     // 2 minutes
 
     public decimal DailyLossLimitPct   { get; set; } = 0.15m;  // -15% of capital/day
+
+    /// <summary>Seconds between evaluation cycles — the granularity of every bot-side exit.</summary>
+    public int     EvalIntervalSeconds { get; set; } = 30;
 
     // ── Trailing stop ──
 

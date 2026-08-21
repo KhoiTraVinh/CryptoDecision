@@ -13,10 +13,10 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         const string sql = """
             INSERT INTO bot_trades
               (symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at,
-               mode, exchange, entry_order_id, fee_usd, exit_algo_id)
+               mode, exchange, entry_order_id, fee_usd, exit_algo_id, leverage, margin_mode)
             VALUES
               (@symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt,
-               @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId)
+               @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId, @leverage, @marginMode)
             RETURNING id
             """;
 
@@ -36,6 +36,9 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("feeUsd",     NpgsqlDbType.Numeric,
             t.FeeUsd.HasValue ? t.FeeUsd.Value : (object)DBNull.Value);
         cmd.Parameters.AddWithValue("exitAlgoId", t.ExitAlgoId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("leverage",   NpgsqlDbType.Numeric,
+            t.Leverage.HasValue ? t.Leverage.Value : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("marginMode", t.MarginMode ?? (object)DBNull.Value);
 
         return (long)(await cmd.ExecuteScalarAsync(ct))!;
     }
@@ -114,7 +117,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         const string sql = """
             SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
-                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id
+                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
+                   leverage, margin_mode
             FROM bot_trades
             WHERE status = 'OPEN'
             ORDER BY opened_at ASC
@@ -150,7 +154,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         const string sql = """
             SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
-                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id
+                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
+                   leverage, margin_mode
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -227,5 +232,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         ExitOrderId  = r.IsDBNull(18) ? null : r.GetString(18),
         FeeUsd       = r.IsDBNull(19) ? null : r.GetDecimal(19),
         ExitAlgoId   = r.IsDBNull(20) ? null : r.GetString(20),
+        Leverage     = r.IsDBNull(21) ? null : r.GetDecimal(21),
+        MarginMode   = r.IsDBNull(22) ? null : r.GetString(22),
     };
 }

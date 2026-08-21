@@ -38,7 +38,14 @@ public sealed class BinancePriceFeed(
     }
 }
 
-/// <summary>OKX public ticker — the book live orders are actually matched against.</summary>
+/// <summary>
+/// OKX perpetual swap ticker — the book live orders are actually matched against.
+///
+/// The swap instrument, not spot. A perp trades at a basis to spot that widens
+/// with funding pressure, and every threshold derived from this price — entry,
+/// take profit, stop loss, trailing — is compared against fills on the swap book.
+/// Reading spot would put a systematic offset into all of them.
+/// </summary>
 public sealed class OkxPriceFeed(
     OkxTradingClient trading,
     ILogger<OkxPriceFeed> log) : IPriceFeed
@@ -49,7 +56,7 @@ public sealed class OkxPriceFeed(
     {
         try
         {
-            return await trading.GetLastPriceAsync(OkxSymbols.ToInstId(symbol), ct);
+            return await trading.GetLastPriceAsync(OkxSymbols.ToSwapInstId(symbol), ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

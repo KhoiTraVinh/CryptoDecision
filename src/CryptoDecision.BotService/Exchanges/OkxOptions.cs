@@ -16,6 +16,34 @@ public sealed class OkxOptions
     /// <summary>REST host. Same host serves live and demo; demo is selected by a header.</summary>
     public string BaseUrl { get; set; } = "https://www.okx.com";
 
+    // ── Futures (USDT-margined perpetual swaps) ──
+    //
+    // Perps are traded rather than spot because the signal is symmetric: the
+    // strategy scores both directions and a cash account can only act on half of
+    // them. What comes with that is liquidation, which spot does not have — so
+    // leverage stays low and the margin mode stays isolated by default.
+
+    /// <summary>
+    /// Leverage applied per instrument before the first order.
+    ///
+    /// Low on purpose. Leverage does not change the edge, only how fast the
+    /// account reaches zero when the edge is absent: at 3x a 1.5% stop is a 4.5%
+    /// equity move, while liquidation sits roughly 33% away — a wide margin for
+    /// the stop to work in. At 20x the stop and the liquidation price are close
+    /// enough that a single wick can settle the position before the stop does.
+    /// </summary>
+    public decimal Leverage { get; set; } = 3m;
+
+    /// <summary>
+    /// Margin mode: "isolated" or "cross".
+    ///
+    /// Isolated by default. It caps the loss on a position at the margin posted
+    /// for it; cross margin puts the whole account balance behind every open
+    /// position, so one bad trade can take the others with it. For an unattended
+    /// bot that difference is the whole point.
+    /// </summary>
+    public string MarginMode { get; set; } = "isolated";
+
     public string ApiKey     { get; set; } = "";
     public string ApiSecret  { get; set; } = "";
     public string Passphrase { get; set; } = "";
@@ -78,6 +106,20 @@ public sealed class OkxOptions
         if (MaxOrderNotionalUsd <= 0m)
             return $"Okx:MaxOrderNotionalUsd is {MaxOrderNotionalUsd}, so every order would be refused.";
 
+        if (Leverage < 1m || Leverage > 125m)
+            return $"Okx:Leverage is {Leverage}, outside the 1-125 range OKX accepts.";
+
+        if (MarginMode is not ("isolated" or "cross"))
+            return $"Okx:MarginMode is '{MarginMode}'; it must be 'isolated' or 'cross'.";
+
         return null;
     }
+
+    /// <summary>
+    /// Price move against the position that would liquidate it, as a fraction —
+    /// roughly 1/leverage on isolated margin, before maintenance margin and fees
+    /// eat into it. Approximate by design: it is used to keep the configured stop
+    /// loss a wide distance clear of liquidation, not to predict the exact level.
+    /// </summary>
+    public decimal ApproxLiquidationDistance => Leverage > 0m ? 1m / Leverage : 1m;
 }

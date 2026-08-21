@@ -5,27 +5,30 @@ namespace CryptoDecision.BotService.Exchanges;
 /// <summary>
 /// Translation between the internal symbol form and OKX instrument ids.
 ///
-/// The rest of this codebase says BTCUSDT; OKX says BTC-USDT. OkxNormalizer in
-/// the ingestion service does the same translation in the opposite direction by
-/// stripping the dash, which is lossless one way and ambiguous the other — you
-/// cannot tell BTC/USDT from BTCU/SDT without knowing the quote currencies. The
-/// list below is that knowledge, longest match first so USDT is not read as USD.
+/// The rest of this codebase says BTCUSDT; OKX says BTC-USDT for spot and
+/// BTC-USDT-SWAP for the USDT-margined perpetual. OkxNormalizer in the ingestion
+/// service does the same translation in the opposite direction by stripping the
+/// dash, which is lossless one way and ambiguous the other — you cannot tell
+/// BTC/USDT from BTCU/SDT without knowing the quote currencies. The list below is
+/// that knowledge, longest match first so USDT is not read as USD.
 /// </summary>
 public static class OkxSymbols
 {
     private static readonly string[] QuoteCurrencies =
         ["USDT", "USDC", "TUSD", "EURT", "DAI", "EUR", "USD", "BTC", "ETH", "OKB"];
 
-    /// <summary>
-    /// Convert an internal symbol (BTCUSDT) to an OKX instrument id (BTC-USDT).
-    /// A symbol that already carries a dash is passed through unchanged.
-    /// </summary>
-    public static string ToInstId(string symbol)
+    private const string SwapSuffix = "-SWAP";
+
+    /// <summary>Convert an internal symbol (BTCUSDT) to a spot instrument id (BTC-USDT).</summary>
+    public static string ToSpotInstId(string symbol)
     {
         var s = (symbol ?? "").Trim().ToUpperInvariant();
 
         if (s.Length == 0)
             throw new ArgumentException("Symbol is empty.", nameof(symbol));
+
+        if (s.EndsWith(SwapSuffix, StringComparison.Ordinal))
+            s = s[..^SwapSuffix.Length];
 
         if (s.Contains('-'))
             return s;
@@ -40,6 +43,22 @@ public static class OkxSymbols
             "symbol as 'BASE-QUOTE' directly.",
             nameof(symbol));
     }
+
+    /// <summary>
+    /// Convert an internal symbol (BTCUSDT) to the perpetual swap instrument id
+    /// (BTC-USDT-SWAP). This is the instrument the bot trades, and therefore the
+    /// one whose price, tick size and contract value everything else must use —
+    /// a perp trades at a basis to spot, so the two books are not interchangeable
+    /// for a stop-loss calculation.
+    /// </summary>
+    public static string ToSwapInstId(string symbol)
+    {
+        var s = (symbol ?? "").Trim().ToUpperInvariant();
+
+        return s.EndsWith(SwapSuffix, StringComparison.Ordinal)
+            ? s
+            : ToSpotInstId(s) + SwapSuffix;
+    }
 }
 
 /// <summary>Order size arithmetic against an instrument's lot grid.</summary>
@@ -48,10 +67,10 @@ public static class OkxSizing
     /// <summary>
     /// Round a size down onto the instrument's lot grid.
     ///
-    /// Down, never to nearest: rounding up on an entry asks to spend more than the
-    /// position size allows, and rounding up on an exit asks to sell coins that are
-    /// not there. Both are rejected by the exchange, the second only after the
-    /// first leg has already been paid for.
+    /// Down, never to nearest: rounding up on an entry commits more than the
+    /// position size allows, and rounding up on an exit tries to close more than
+    /// is held. Both are rejected by the exchange, the second only after the first
+    /// leg has already been paid for.
     /// </summary>
     public static decimal FloorToStep(decimal value, decimal step)
     {
@@ -63,9 +82,8 @@ public static class OkxSizing
     /// Round a value up onto a step grid.
     ///
     /// Used for a stop-loss trigger price, where the two directions are not
-    /// equivalent: rounding a stop down moves it further from entry and quietly
-    /// widens the risk past what was configured. Rounding up keeps the stop at or
-    /// inside its intended level.
+    /// equivalent: rounding a long's stop down moves it further from entry and
+    /// quietly widens the risk past what was configured.
     /// </summary>
     public static decimal CeilToStep(decimal value, decimal step)
     {
@@ -75,12 +93,12 @@ public static class OkxSizing
 }
 
 /// <summary>
-/// Instrument rules for the pairs this bot trades, fetched once per process.
+/// Instrument rules for the perpetuals this bot trades, fetched once per process.
 ///
-/// Cached for the process lifetime. Lot and tick sizes change on the order of
-/// exchange announcements, not minutes, and the alternative — a public REST call
-/// on the path of every order — adds latency to the one operation that is timing
-/// sensitive. A container restart picks up any change.
+/// Cached for the process lifetime. Contract value, lot and tick sizes change on
+/// the order of exchange announcements, not minutes, and the alternative — a
+/// public REST call on the path of every order — adds latency to the one
+/// operation that is timing sensitive. A container restart picks up any change.
 /// </summary>
 public sealed class OkxInstrumentCache(
     OkxSignedClient client,
@@ -89,9 +107,10 @@ public sealed class OkxInstrumentCache(
     private readonly ConcurrentDictionary<string, OkxInstrument> _cache = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public async Task<OkxInstrument> GetSpotAsync(string symbol, CancellationToken ct)
+    /// <summary>Rules for the USDT-margined perpetual swap behind an internal symbol.</summary>
+    public async Task<OkxInstrument> GetSwapAsync(string symbol, CancellationToken ct)
     {
-        var instId = OkxSymbols.ToInstId(symbol);
+        var instId = OkxSymbols.ToSwapInstId(symbol);
 
         if (_cache.TryGetValue(instId, out var cached))
             return cached;
@@ -105,22 +124,31 @@ public sealed class OkxInstrumentCache(
                 return cached;
 
             var found = await client.GetPublicAsync<OkxInstrument>(
-                $"/api/v5/public/instruments?instType=SPOT&instId={instId}", ct);
+                $"/api/v5/public/instruments?instType=SWAP&instId={instId}", ct);
 
             var instrument = found.FirstOrDefault(i => i.InstId == instId)
                 ?? throw new OkxApiException("UNKNOWN_INSTRUMENT",
-                    $"OKX lists no spot instrument '{instId}' (from symbol '{symbol}').");
+                    $"OKX lists no perpetual swap '{instId}' (from symbol '{symbol}').");
 
             if (!instrument.IsLive)
                 throw new OkxApiException("INSTRUMENT_NOT_LIVE",
                     $"OKX instrument '{instId}' is in state '{instrument.State}', not live.");
 
+            // A linear perp settles in the quote currency. An inverse one (settled
+            // in the coin) inverts every P&L and margin calculation in this codebase,
+            // so it is refused rather than silently mispriced.
+            if (!string.Equals(instrument.SettleCcy, instrument.QuoteCcy, StringComparison.OrdinalIgnoreCase))
+                throw new OkxApiException("INVERSE_CONTRACT_UNSUPPORTED",
+                    $"'{instId}' settles in {instrument.SettleCcy}, not {instrument.QuoteCcy}. " +
+                    "This engine only handles linear (quote-settled) perpetuals.");
+
             _cache[instId] = instrument;
 
             log.LogInformation(
-                "[OKX] Instrument {InstId}: lotSz={Lot} minSz={Min} tickSz={Tick} ({Base}/{Quote})",
-                instId, instrument.LotSize, instrument.MinSize, instrument.TickSize,
-                instrument.BaseCcy, instrument.QuoteCcy);
+                "[OKX] Instrument {InstId}: ctVal={CtVal} {CtValCcy} lotSz={Lot} minSz={Min} " +
+                "tickSz={Tick} settle={Settle}",
+                instId, instrument.ContractValue, instrument.CtValCcy, instrument.LotSize,
+                instrument.MinSize, instrument.TickSize, instrument.SettleCcy);
 
             return instrument;
         }

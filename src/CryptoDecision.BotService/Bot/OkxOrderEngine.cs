@@ -5,31 +5,31 @@ using CryptoDecision.Shared.Bot;
 namespace CryptoDecision.BotService.Bot;
 
 /// <summary>
-/// Places real spot orders on OKX.
+/// Places real orders on OKX USDT-margined perpetual swaps.
 ///
-/// The difference from <see cref="PaperOrderEngine"/> is not that this one talks
-/// to a network — it is that nothing here may be assumed. The paper engine writes
-/// the price it was given and the quantity it computed; this engine writes only
-/// what OKX reports back after the fill, because a market order's price, its
-/// filled size and its fee are all unknown at the moment it is sent. A trade row
-/// built from the request rather than the fill is a row that does not match the
-/// account it claims to describe.
+/// Perps rather than spot because the strategy's signal is symmetric — it scores
+/// both directions and a cash account can only act on half of them. What comes
+/// with that is liquidation, so several things here exist purely to keep the stop
+/// loss the thing that closes a losing trade:
 ///
-/// Three ordering rules follow from that, and all three matter more than they look:
+///  - Leverage is set explicitly per instrument before the first order, because
+///    OKX stores it as instrument state that persists from whatever was set last.
+///  - <see cref="DescribeRefusal"/> refuses to run a stop loss that sits anywhere
+///    near the liquidation price.
+///  - An entry arms a reduce-only OCO at the exchange before the method returns.
 ///
+/// The other rules carried over from the spot version still hold, and matter more
+/// here rather than less:
+///
+///  - Nothing is assumed. A market order's price, filled size and fee are all
+///    unknown when it is sent, so the trade row is built from the fill.
 ///  - Every check that can refuse an order happens <em>before</em> placement.
-///    Once funds have moved there is no unwinding, so a failure after the fill is
-///    handled by recording loudly, never by throwing away the record.
-///  - The quantity persisted on the trade is the amount that can actually be sold
-///    later — the fill minus the fee OKX took out of it, floored onto the lot
-///    grid. Persisting the requested size instead produces an exit order for
-///    coins that were never received, which fails at the worst possible moment:
-///    when a stop loss is trying to fire.
-///  - An entry arms an OCO at the exchange before this method returns. The bot's
-///    own loop still runs trailing stops, breakeven and timeouts, but the hard
-///    floor has to exist somewhere that does not depend on this process being
-///    alive. Everything about <see cref="ReconcileAsync"/> follows from that: once
-///    the exchange can close a position unasked, something must notice it did.
+///    After the fill there is no unwinding, so failures are recorded loudly and
+///    never by discarding the record.
+///  - Sizes cross a unit boundary. OKX counts contracts (0.01 BTC each for
+///    BTC-USDT-SWAP); every risk figure the bot reasons about is in base units.
+///    <see cref="BotTrade.Quantity"/> holds base units so the P&amp;L arithmetic
+///    matches the paper engine, and contracts are derived at order time.
 /// </summary>
 public sealed class OkxOrderEngine(
     OkxTradingClient   trading,
@@ -43,20 +43,39 @@ public sealed class OkxOrderEngine(
     public const string ExchangeName = "OKX";
 
     /// <summary>
-    /// Headroom left for the entry fee when checking that the position will still
-    /// be large enough to sell. Double the standard 0.1% taker fee, so a fee tier
-    /// change cannot turn a valid entry into an unsellable one.
+    /// How much of the distance to liquidation the stop loss may occupy. At 0.5 the
+    /// stop fires no later than halfway there, which leaves room for the funding
+    /// and fee drag that also erodes margin. Above this the stop stops being a stop.
     /// </summary>
-    private const decimal FeeHeadroom = 0.998m;
+    private const decimal MaxStopShareOfLiquidation = 0.5m;
 
-    public string? DescribeRefusal(BotOptions opts) => okxOptions.DescribeRefusal();
+    public string? DescribeRefusal(BotOptions opts)
+    {
+        var configRefusal = okxOptions.DescribeRefusal();
+        if (configRefusal is not null) return configRefusal;
 
-    /// <summary>
-    /// Spot cash accounts cannot short. Reported here rather than enforced only at
-    /// order time so the strategy layer can stop generating orders that physically
-    /// cannot be filled.
-    /// </summary>
-    public bool SupportsShort(BotOptions opts) => false;
+        // ── Would the stop loss actually get there first? ──
+        //
+        // This is the failure mode leverage introduces and spot does not have. With
+        // the stop too far out relative to leverage, the exchange closes the
+        // position at the liquidation price — which is worse than the stop in every
+        // way: a market close at the worst available price, plus a liquidation fee,
+        // and no take-profit leg left on the other side.
+        var liquidationDistance = okxOptions.ApproxLiquidationDistance;
+        var maxStop             = liquidationDistance * MaxStopShareOfLiquidation;
+
+        if (opts.StopLossPct > maxStop)
+            return $"a {opts.StopLossPct:P2} stop loss at {okxOptions.Leverage}x leverage sits past " +
+                   $"{MaxStopShareOfLiquidation:P0} of the ~{liquidationDistance:P1} distance to " +
+                   $"liquidation. Lower the leverage to about " +
+                   $"{decimal.Floor(MaxStopShareOfLiquidation / Math.Max(opts.StopLossPct, 0.0001m))}x " +
+                   $"or tighten the stop below {maxStop:P2}.";
+
+        return null;
+    }
+
+    /// <summary>Perpetuals are symmetric — this is the reason for trading them.</summary>
+    public bool SupportsShort(BotOptions opts) => true;
 
     // ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -64,21 +83,30 @@ public sealed class OkxOrderEngine(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
         decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false)
     {
-        var refusal = okxOptions.DescribeRefusal();
+        var refusal = DescribeRefusal(state.Options);
         if (refusal is not null)
             throw new InvalidOperationException($"OKX live order refused: {refusal}");
 
-        // Still enforced at the boundary even though the strategy layer now filters
-        // shorts: a SHORT silently placed as a buy would be a position pointing the
-        // opposite way to the signal that asked for it.
-        if (side is not ("LONG" or "BUY"))
-            throw new InvalidOperationException(
-                $"Cannot open a {side} position on OKX spot (tdMode=cash) — short selling needs a " +
-                "margin or futures account, which this engine does not implement.");
+        var positionSide = side switch
+        {
+            "LONG" or "BUY"   => "long",
+            "SHORT" or "SELL" => "short",
+            _ => throw new InvalidOperationException(
+                     $"Unknown side '{side}'; expected LONG or SHORT."),
+        };
 
-        var instrument = await instruments.GetSpotAsync(symbol, ct);
+        var instrument = await instruments.GetSwapAsync(symbol, ct);
+        var config     = await trading.GetAccountConfigAsync(ct);
+
+        await trading.EnsureLeverageAsync(instrument.InstId, ct);
 
         // ── Size the order ──
+        //
+        // Sizing stays notional-based, exactly as it is in paper mode: the position
+        // is a percentage of capital, and leverage only reduces the margin that
+        // notional requires. Sizing off margin instead would let a leverage change
+        // silently multiply exposure, which is how a working configuration becomes
+        // an account-ending one without anybody editing a risk parameter.
         var feature = await featureRepo.GetTodayAsync(symbol, ct);
         var size    = PositionSizer.Resolve(
             capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
@@ -99,79 +127,60 @@ public sealed class OkxOrderEngine(
                 $"Order notional ${notional} is below the ${okxOptions.MinOrderNotionalUsd} minimum. " +
                 "Raise capital_usd or position_pct, or the exchange will reject the order as dust.");
 
-        var quantity = OkxSizing.FloorToStep(notional / price, instrument.LotSize);
+        // notional → base units → contracts, floored onto the contract grid.
+        var targetBase = notional / price;
+        var contracts  = OkxSizing.FloorToStep(targetBase / instrument.ContractValue, instrument.LotSize);
 
-        if (quantity < instrument.MinSize)
+        if (contracts < instrument.MinSize)
             throw new InvalidOperationException(
-                $"${notional} at {price} is {quantity} {instrument.BaseCcy}, under OKX's " +
-                $"{instrument.MinSize} minimum for {instrument.InstId}. Raise the position size.");
+                $"${notional} at {price} is {contracts} contracts of {instrument.InstId} " +
+                $"({instrument.ContractValue} {instrument.BaseCcy} each), under OKX's " +
+                $"{instrument.MinSize} minimum. Raise the position size.");
 
-        // Would the position still be sellable after the fee is taken out of it?
-        // Cheaper to answer now than to own an unsellable position later.
-        var sellableAfterFee = OkxSizing.FloorToStep(quantity * FeeHeadroom, instrument.LotSize);
-        if (sellableAfterFee < instrument.MinSize)
-            throw new InvalidOperationException(
-                $"{quantity} {instrument.BaseCcy} would fall to {sellableAfterFee} after the entry fee, " +
-                $"below the {instrument.MinSize} minimum needed to sell it again. Raise the position size.");
+        // ── Is there margin for it? ──
+        var marginNeeded = notional / okxOptions.Leverage;
+        var available    = await trading.GetAvailableAsync(instrument.QuoteCcy, ct);
 
-        // ── Do the funds exist? ──
-        var required  = quantity * price * 1.002m;
-        var available = await trading.GetAvailableAsync(instrument.QuoteCcy, ct);
-        if (available < required)
+        if (available < marginNeeded * 1.05m)
             throw new InvalidOperationException(
                 $"OKX {instrument.QuoteCcy} available balance is {available:F2}, short of the " +
-                $"{required:F2} this order needs. Fund the account or lower the position size.");
+                $"{marginNeeded:F2} margin this ${notional} position needs at " +
+                $"{okxOptions.Leverage}x. Fund the account or lower the position size.");
 
         // ── Cleared. Place it. ──
-        var orderId = await trading.PlaceSpotMarketOrderAsync(instrument.InstId, "buy", quantity, ct);
-        var fill    = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
+        var entrySide  = positionSide == "long" ? "buy" : "sell";
+        var payloadPos = config.IsHedgeMode ? positionSide : null;
+
+        var orderId = await trading.PlaceSwapMarketOrderAsync(
+            instrument.InstId, entrySide, payloadPos, contracts, reduceOnly: false, ct);
+
+        var fill = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
 
         // ── Reconcile the fill into a trade record ──
         //
-        // OKX charges the fee on a spot buy in the base currency: you pay
-        // filled × avgPx in USDT and receive filled minus the fee in coins. When
-        // it is charged in quote instead, the coins arrive whole and the USDT out
-        // is higher. Both are handled because getting it backwards misstates both
-        // the cost basis and the amount available to sell.
-        var feeInBase = string.Equals(fill.FeeCcy, instrument.BaseCcy, StringComparison.OrdinalIgnoreCase);
-
-        var cost    = fill.FilledBase * fill.AveragePrice;
-        var netBase = fill.FilledBase;
-        decimal feeUsd;
-
-        if (feeInBase)
-        {
-            netBase -= fill.FeeAbs;
-            feeUsd   = fill.FeeAbs * fill.AveragePrice;
-        }
-        else
-        {
-            feeUsd = fill.FeeAbs;
-            cost  += fill.FeeAbs;
-        }
-
-        var sellable = OkxSizing.FloorToStep(netBase, instrument.LotSize);
-
-        if (sellable < instrument.MinSize)
-            log.LogCritical(
-                "[OKX] Order {OrdId} filled {Filled} {Base} but only {Sellable} is sellable, under the " +
-                "{Min} minimum. This position cannot be closed by the bot and needs manual handling.",
-                orderId, fill.FilledBase, instrument.BaseCcy, sellable, instrument.MinSize);
+        // Unlike spot, a linear perp charges its fee in the quote currency, so the
+        // filled size arrives intact and the fee is a separate USDT cost rather than
+        // a haircut on the position. Nothing needs to be held back to stay sellable.
+        var filledBase   = fill.FilledContracts * instrument.ContractValue;
+        var entryFeeUsd  = fill.FeeAbs;
+        var filledNotion = filledBase * fill.AveragePrice;
 
         var trade = new BotTrade
         {
             Symbol       = symbol,
-            Side         = "LONG",
+            Side         = positionSide == "long" ? "LONG" : "SHORT",
             Strategy     = strategy,
             EntryPrice   = fill.AveragePrice,
-            Quantity     = sellable,
-            NotionalUsd  = Math.Round(cost, 4),
+            Quantity     = filledBase,
+            NotionalUsd  = Math.Round(filledNotion, 4),
             Status       = "OPEN",
             OpenedAt     = DateTime.UtcNow,
             Mode         = "LIVE",
             Exchange     = ExchangeName,
             EntryOrderId = orderId,
-            FeeUsd       = Math.Round(feeUsd, 8),
+            FeeUsd       = Math.Round(entryFeeUsd, 8),
+            Leverage     = okxOptions.Leverage,
+            MarginMode   = okxOptions.MarginMode,
         };
 
         try
@@ -180,26 +189,29 @@ public sealed class OkxOrderEngine(
         }
         catch (Exception ex)
         {
-            // The coins are already bought. Losing the row would leave an untracked
-            // position with no stop loss, so everything needed to recreate it goes
+            // The position is already open. Losing the row would leave a leveraged
+            // holding with no stop loss, so everything needed to recreate it goes
             // into the log before the exception continues.
             log.LogCritical(ex,
-                "[OKX] FILLED BUT NOT RECORDED — order {OrdId} on {InstId} bought {Qty} {Base} at " +
-                "{Price} for {Cost} {Quote}, and the bot_trades insert failed. This position is " +
-                "open on the exchange and unmanaged. Record it manually before restarting the bot.",
-                orderId, instrument.InstId, sellable, instrument.BaseCcy,
-                fill.AveragePrice, Math.Round(cost, 4), instrument.QuoteCcy);
+                "[OKX] FILLED BUT NOT RECORDED — order {OrdId} opened {Side} {Contracts} contracts " +
+                "({Base} {BaseCcy}) on {InstId} at {Price}, and the bot_trades insert failed. This " +
+                "position is open on the exchange and unmanaged. Record it manually before " +
+                "restarting the bot.",
+                orderId, positionSide, fill.FilledContracts, filledBase, instrument.BaseCcy,
+                instrument.InstId, fill.AveragePrice);
             throw;
         }
 
         log.LogInformation(
-            "[OKX] OPEN LONG {Symbol} id={Id} filled {Qty} {Base} @ ${Price} cost=${Cost} " +
-            "fee=${Fee} (signal price ${Signal}, slippage {Slip:+0.000;-0.000}%)",
-            symbol, trade.Id, sellable, instrument.BaseCcy, fill.AveragePrice,
-            trade.NotionalUsd, trade.FeeUsd, price,
+            "[OKX] OPEN {Side} {Symbol} id={Id} {Contracts} contracts ({Base} {BaseCcy}) @ ${Price} " +
+            "notional=${Notional} margin=${Margin} at {Lever}x fee=${Fee} " +
+            "(signal ${Signal}, slippage {Slip:+0.000;-0.000}%)",
+            trade.Side, symbol, trade.Id, fill.FilledContracts, filledBase, instrument.BaseCcy,
+            fill.AveragePrice, trade.NotionalUsd, Math.Round(filledNotion / okxOptions.Leverage, 2),
+            okxOptions.Leverage, trade.FeeUsd, price,
             price > 0m ? (fill.AveragePrice - price) / price * 100m : 0m);
 
-        await ArmProtectiveExitAsync(trade, instrument, ct);
+        await ArmProtectiveExitAsync(trade, instrument, positionSide, fill.FilledContracts, ct);
 
         return trade;
     }
@@ -207,54 +219,68 @@ public sealed class OkxOrderEngine(
     // ── Exchange-side protection ──────────────────────────────────────────────
 
     /// <summary>
-    /// Place the OCO that guards a freshly opened position, and persist its id.
+    /// Place the reduce-only OCO that guards a freshly opened position, and persist
+    /// its id.
     ///
-    /// Never throws. The position exists either way, and the bot's own loop is
-    /// still watching it — so failing to arm the exchange-side guard degrades
-    /// protection rather than removing it, and unwinding a real fill over a
-    /// transient API error would be the worse trade. It is logged as critical
-    /// because the operator needs to know this position is only as safe as the
-    /// container it is being watched from.
+    /// Never throws. The position exists either way and the bot's own loop is still
+    /// watching it, so failing to arm the exchange-side guard degrades protection
+    /// rather than removing it, and unwinding a real fill over a transient API error
+    /// would be the worse trade. Logged as critical because on a leveraged position
+    /// the fallback — the bot process staying alive — is now the only thing standing
+    /// between the trade and liquidation.
     /// </summary>
-    private async Task ArmProtectiveExitAsync(BotTrade trade, OkxInstrument instrument, CancellationToken ct)
+    private async Task ArmProtectiveExitAsync(
+        BotTrade trade, OkxInstrument instrument, string positionSide, decimal contracts,
+        CancellationToken ct)
     {
-        var opts = state.Options;
+        var opts    = state.Options;
+        var isLong  = positionSide == "long";
+        var entry   = trade.EntryPrice;
 
-        var takeProfit = OkxSizing.FloorToStep(
-            trade.EntryPrice * (1m + opts.TakeProfitPct), instrument.TickSize);
-        var stopLoss = OkxSizing.CeilToStep(
-            trade.EntryPrice * (1m - opts.StopLossPct), instrument.TickSize);
+        // Profit is up for a long and down for a short; the stop is the mirror.
+        // Rounding always goes the direction that does not widen risk.
+        var takeProfit = isLong
+            ? OkxSizing.FloorToStep(entry * (1m + opts.TakeProfitPct), instrument.TickSize)
+            : OkxSizing.CeilToStep (entry * (1m - opts.TakeProfitPct), instrument.TickSize);
 
-        if (takeProfit <= trade.EntryPrice || stopLoss >= trade.EntryPrice || stopLoss <= 0m)
+        var stopLoss = isLong
+            ? OkxSizing.CeilToStep (entry * (1m - opts.StopLossPct), instrument.TickSize)
+            : OkxSizing.FloorToStep(entry * (1m + opts.StopLossPct), instrument.TickSize);
+
+        var straddlesEntry = isLong
+            ? takeProfit > entry && stopLoss < entry && stopLoss > 0m
+            : takeProfit < entry && stopLoss > entry && takeProfit > 0m;
+
+        if (!straddlesEntry)
         {
             log.LogCritical(
-                "[OKX] Trade {Id} has no exchange-side stop: TP {Tp} / SL {Sl} do not straddle the " +
-                "{Entry} entry price (take_profit_pct={TpPct:P2}, stop_loss_pct={SlPct:P2}). " +
-                "This position is protected only while the bot process is alive.",
-                trade.Id, takeProfit, stopLoss, trade.EntryPrice, opts.TakeProfitPct, opts.StopLossPct);
+                "[OKX] Trade {Id} has no exchange-side stop: {Side} TP {Tp} / SL {Sl} do not straddle " +
+                "the {Entry} entry price (take_profit_pct={TpPct:P2}, stop_loss_pct={SlPct:P2}). " +
+                "This leveraged position is protected only while the bot process is alive.",
+                trade.Id, trade.Side, takeProfit, stopLoss, entry, opts.TakeProfitPct, opts.StopLossPct);
             return;
         }
 
         try
         {
             var algoId = await trading.PlaceOcoExitAsync(
-                instrument.InstId, trade.Quantity, takeProfit, stopLoss, ct);
+                instrument.InstId, positionSide, contracts, takeProfit, stopLoss, ct);
 
             trade.ExitAlgoId = algoId;
             await repo.UpdateExitAlgoIdAsync(trade.Id, algoId, ct);
 
             log.LogInformation(
-                "[OKX] Trade {Id} guarded by OCO {AlgoId}: TP ${Tp} (+{TpPct:P2}) / SL ${Sl} (-{SlPct:P2}). " +
-                "This survives a bot restart.",
-                trade.Id, algoId, takeProfit, opts.TakeProfitPct, stopLoss, opts.StopLossPct);
+                "[OKX] Trade {Id} guarded by OCO {AlgoId}: TP ${Tp} / SL ${Sl} " +
+                "({TpPct:P2} / {SlPct:P2} from entry). This survives a bot restart.",
+                trade.Id, algoId, takeProfit, stopLoss, opts.TakeProfitPct, opts.StopLossPct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogCritical(ex,
-                "[OKX] Trade {Id} is OPEN with {Qty} {Base} but its protective OCO could not be " +
-                "placed. The position is protected only by this process — if the bot stops, nothing " +
-                "will stop it out. Place a stop manually or close the position.",
-                trade.Id, trade.Quantity, instrument.BaseCcy);
+                "[OKX] Trade {Id} is OPEN — {Side} {Qty} {Base} at {Lever}x — but its protective OCO " +
+                "could not be placed. If the bot stops, nothing will stop it out before liquidation. " +
+                "Place a stop manually or close the position.",
+                trade.Id, trade.Side, trade.Quantity, instrument.BaseCcy, okxOptions.Leverage);
         }
     }
 
@@ -276,11 +302,12 @@ public sealed class OkxOrderEngine(
 
         if (!algo.HasTriggered)
         {
-            // Cancelled or failed at the exchange, without a fill. The position is
-            // still held but no longer guarded, which the operator needs to know.
+            // Cancelled or failed at the exchange without a fill. The position is
+            // still open but no longer guarded, which on leverage the operator needs
+            // to know immediately.
             log.LogWarning(
                 "[OKX] OCO {AlgoId} guarding trade {Id} is in state '{State}' with no fill. " +
-                "The position is open and no longer protected at the exchange.",
+                "The leveraged position is open and no longer protected at the exchange.",
                 algoId, trade.Id, algo.State);
 
             trade.ExitAlgoId = null;
@@ -288,7 +315,7 @@ public sealed class OkxOrderEngine(
             return null;
         }
 
-        var instrument = await instruments.GetSpotAsync(trade.Symbol, ct);
+        var instrument = await instruments.GetSwapAsync(trade.Symbol, ct);
         var detail     = await trading.ReadOrderAsync(instrument.InstId, algo.OrdId!, ct);
 
         if (detail is null || detail.FilledSize <= 0m || detail.AverageFillPrice is null)
@@ -300,18 +327,18 @@ public sealed class OkxOrderEngine(
             return null;
         }
 
-        var exitPrice = detail.AverageFillPrice.Value;
-        var reason    = exitPrice >= trade.EntryPrice ? "EXCHANGE_TP" : "EXCHANGE_SL";
+        var exitPrice   = detail.AverageFillPrice.Value;
+        var closedBase  = detail.FilledSize * instrument.ContractValue;
+        var wasProfit   = trade.Side == "SHORT" ? exitPrice <= trade.EntryPrice : exitPrice >= trade.EntryPrice;
+        var reason      = wasProfit ? "EXCHANGE_TP" : "EXCHANGE_SL";
 
-        if (detail.FilledSize < trade.Quantity)
+        if (closedBase < trade.Quantity)
             log.LogWarning(
-                "[OKX] OCO {AlgoId} for trade {Id} sold {Sold} of {Held} {Base}. The remaining " +
-                "{Residual} is still held and stops being tracked once this row closes.",
-                algoId, trade.Id, detail.FilledSize, trade.Quantity, instrument.BaseCcy,
-                trade.Quantity - detail.FilledSize);
+                "[OKX] OCO {AlgoId} for trade {Id} closed {Closed} of {Held} {Base}. The remainder " +
+                "is still an open position and stops being tracked once this row closes.",
+                algoId, trade.Id, closedBase, trade.Quantity, instrument.BaseCcy);
 
-        ApplyExit(trade, instrument, detail.FilledSize, exitPrice,
-            detail.FeeAbs, detail.FeeCcy, algo.OrdId!, reason);
+        ApplyExit(trade, closedBase, exitPrice, detail.FeeAbs, algo.OrdId!, reason);
 
         trade.ExitAlgoId = null;
         await repo.CloseTradeAsync(trade, ct);
@@ -335,14 +362,16 @@ public sealed class OkxOrderEngine(
                 $"Live trade {trade.Id} cannot be closed on OKX: {refusal} " +
                 "The position is still open on the exchange.");
 
-        var instrument = await instruments.GetSpotAsync(trade.Symbol, ct);
+        var instrument = await instruments.GetSwapAsync(trade.Symbol, ct);
+        var config     = await trading.GetAccountConfigAsync(ct);
+
+        var positionSide = trade.Side == "SHORT" ? "short" : "long";
 
         // ── Stand the exchange-side guard down first ──
         //
-        // Selling while the OCO is still armed queues a second sell for the same
-        // coins. Whichever lands first, the other is left trying to sell a balance
-        // that no longer exists — and if the account happens to hold that asset for
-        // another reason, it sells that instead.
+        // Closing while the OCO is armed queues a second reduce-only order against
+        // the same position. Whichever lands first, the other is left trying to
+        // reduce a position that no longer exists.
         if (trade.ExitAlgoId is { Length: > 0 } algoId)
         {
             var cancelled = await trading.TryCancelAlgoAsync(instrument.InstId, algoId, ct);
@@ -351,59 +380,80 @@ public sealed class OkxOrderEngine(
             {
                 // The ordinary reason a cancel fails is that the order just fired.
                 // If it did, the position is already closed and the right answer is
-                // the exchange's fill, not a new sell.
+                // the exchange's fill, not a new order.
                 var settled = await ReconcileAsync(trade, ct);
                 if (settled is not null) return settled;
 
                 throw new InvalidOperationException(
                     $"Could not cancel OCO {algoId} guarding trade {trade.Id}, and it has not " +
-                    "triggered either. Refusing to place a second sell for the same coins. " +
+                    "triggered either. Refusing to place a second exit against the same position. " +
                     "Retrying next cycle.");
             }
 
             trade.ExitAlgoId = null;
         }
 
-        var quantity = OkxSizing.FloorToStep(trade.Quantity, instrument.LotSize);
+        // ── What does the exchange say is actually open? ──
+        //
+        // For futures the position — not any coin balance — is the source of truth,
+        // and it can differ from the row: a manual close, a liquidation, or a second
+        // bot on the same key all show up here.
+        var position = await trading.GetPositionAsync(instrument.InstId, ct);
 
-        if (quantity < instrument.MinSize)
-            throw new InvalidOperationException(
-                $"Live trade {trade.Id} holds {trade.Quantity} {instrument.BaseCcy}, below OKX's " +
-                $"{instrument.MinSize} minimum order size. The bot cannot sell it; close it manually.");
-
-        // What the account actually holds wins over what the row says. A manual
-        // trade, a withdrawal or a second bot on the same key all show up here, and
-        // an oversized sell would be rejected outright — leaving the stop unfilled.
-        var available = await trading.GetAvailableAsync(instrument.BaseCcy, ct);
-        if (available < quantity)
+        if (position is null)
         {
-            var reduced = OkxSizing.FloorToStep(available, instrument.LotSize);
+            log.LogWarning(
+                "[OKX] Trade {Id} expects an open {Side} position on {InstId} but the exchange reports " +
+                "none — it was closed elsewhere (manual close, or liquidation). Settling the row at " +
+                "the current price so it stops being retried.",
+                trade.Id, trade.Side, instrument.InstId);
+
+            // No fill to read, so the reference price is the best available figure.
+            // Flagged in the close reason: this P&L is an estimate, not an exchange fill.
+            ApplyExit(trade, trade.Quantity, exitPrice, 0m, orderId: null, $"{reason}_UNCONFIRMED");
+            await repo.CloseTradeAsync(trade, ct);
+            return trade;
+        }
+
+        var contracts = OkxSizing.FloorToStep(
+            trade.Quantity / instrument.ContractValue, instrument.LotSize);
+
+        if (position.AbsContracts < contracts)
+        {
+            var reduced = OkxSizing.FloorToStep(position.AbsContracts, instrument.LotSize);
 
             log.LogWarning(
-                "[OKX] Trade {Id} expects {Expected} {Base} but only {Available} is available — " +
-                "selling {Reduced}. Something outside the bot moved this balance.",
-                trade.Id, quantity, instrument.BaseCcy, available, reduced);
+                "[OKX] Trade {Id} expects {Expected} contracts but the position holds {Actual} — " +
+                "closing {Reduced}. Something outside the bot changed this position.",
+                trade.Id, contracts, position.AbsContracts, reduced);
 
             if (reduced < instrument.MinSize)
                 throw new InvalidOperationException(
-                    $"Live trade {trade.Id} cannot be closed: only {available} {instrument.BaseCcy} " +
-                    $"is available, below the {instrument.MinSize} minimum order size.");
+                    $"Live trade {trade.Id} cannot be closed: the position holds " +
+                    $"{position.AbsContracts} contracts, below the {instrument.MinSize} minimum " +
+                    "order size.");
 
-            quantity = reduced;
+            contracts = reduced;
         }
 
-        var orderId = await trading.PlaceSpotMarketOrderAsync(instrument.InstId, "sell", quantity, ct);
-        var fill    = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
+        // Opposite side, reduce-only: this shrinks the position rather than opening
+        // a new one in the other direction.
+        var exitSide   = positionSide == "long" ? "sell" : "buy";
+        var payloadPos = config.IsHedgeMode ? positionSide : null;
 
-        if (fill.FilledBase < quantity)
+        var orderId = await trading.PlaceSwapMarketOrderAsync(
+            instrument.InstId, exitSide, payloadPos, contracts, reduceOnly: true, ct);
+
+        var fill       = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
+        var closedBase = fill.FilledContracts * instrument.ContractValue;
+
+        if (fill.FilledContracts < contracts)
             log.LogWarning(
-                "[OKX] Exit for trade {Id} sold {Sold} of {Asked} {Base}. The remaining " +
-                "{Residual} is still held and is no longer tracked by this trade.",
-                trade.Id, fill.FilledBase, quantity, instrument.BaseCcy,
-                quantity - fill.FilledBase);
+                "[OKX] Exit for trade {Id} closed {Closed} of {Asked} contracts. The remaining " +
+                "{Residual} is still an open position and is no longer tracked by this trade.",
+                trade.Id, fill.FilledContracts, contracts, contracts - fill.FilledContracts);
 
-        ApplyExit(trade, instrument, fill.FilledBase, fill.AveragePrice,
-            fill.FeeAbs, fill.FeeCcy, orderId, reason);
+        ApplyExit(trade, closedBase, fill.AveragePrice, fill.FeeAbs, orderId, reason);
 
         try
         {
@@ -411,11 +461,11 @@ public sealed class OkxOrderEngine(
         }
         catch (Exception ex)
         {
-            // The sell has happened. The row is now wrong in the safe direction —
-            // it still reads OPEN — so the next cycle will try to sell again and
-            // find no balance. Log everything needed to correct it by hand.
+            // The position is already closed. The row is now wrong in the safe
+            // direction — it still reads OPEN — so the next cycle will try again and
+            // find nothing open. Log everything needed to correct it by hand.
             log.LogCritical(ex,
-                "[OKX] SOLD BUT NOT RECORDED — trade {Id} was closed by order {OrdId} at {Price} " +
+                "[OKX] CLOSED BUT NOT RECORDED — trade {Id} was closed by order {OrdId} at {Price} " +
                 "(P&L {Pnl}), and the bot_trades update failed. The row still reads OPEN. " +
                 "Correct it before the bot retries the exit.",
                 trade.Id, orderId, fill.AveragePrice, trade.PnlUsd ?? 0m);
@@ -423,39 +473,49 @@ public sealed class OkxOrderEngine(
         }
 
         log.LogInformation(
-            "[OKX] CLOSE {Symbol} id={Id} sold {Qty} {Base} @ ${Price} reason={Reason} " +
-            "fee=${Fee} PnL={Pnl:+0.0000;-0.0000} USD ({PnlPct:P2}) (signal price ${Signal})",
-            trade.Symbol, trade.Id, fill.FilledBase, instrument.BaseCcy, fill.AveragePrice,
+            "[OKX] CLOSE {Side} {Symbol} id={Id} {Contracts} contracts @ ${Price} reason={Reason} " +
+            "fee=${Fee} PnL={Pnl:+0.0000;-0.0000} USD ({PnlPct:P2}) (signal ${Signal})",
+            trade.Side, trade.Symbol, trade.Id, fill.FilledContracts, fill.AveragePrice,
             reason, trade.FeeUsd ?? 0m, trade.PnlUsd ?? 0m, trade.PnlPct ?? 0m, exitPrice);
 
         return trade;
     }
 
     /// <summary>
-    /// Write an exit fill onto the trade. Shared by the bot-driven close and by
+    /// Write an exit onto the trade. Shared by the bot-driven close and by
     /// reconciliation of an exchange-driven one, so a position closed by the OCO is
     /// accounted for exactly like one the bot closed itself — the P&amp;L series
     /// stays comparable regardless of which side pulled the trigger.
+    ///
+    /// The direction term is the whole reason perps were worth the rework: a short
+    /// profits when price falls, so P&amp;L is signed by the side rather than always
+    /// measured upward. Getting this backwards would report every winning short as a
+    /// loss and vice versa, and the circuit breakers act on those numbers.
+    ///
+    /// Fees are quote-denominated on a linear perp, so both legs are already USD.
+    /// Funding is <em>not</em> included: OKX charges or pays it every eight hours
+    /// against the position, and it lands in the account bills rather than on either
+    /// order. A position held across funding will show a small unexplained gap
+    /// between this figure and the account balance.
     /// </summary>
     private static void ApplyExit(
-        BotTrade trade, OkxInstrument instrument, decimal filledBase, decimal averagePrice,
-        decimal feeAbs, string? feeCcy, string orderId, string reason)
+        BotTrade trade, decimal closedBase, decimal exitPrice, decimal exitFeeUsd,
+        string? orderId, string reason)
     {
-        // A spot sell is charged in the quote currency. The base-fee branch is kept
-        // so an unexpected fee currency is converted rather than counted as USD.
-        var feeInQuote = string.Equals(feeCcy, instrument.QuoteCcy, StringComparison.OrdinalIgnoreCase);
-        var exitFeeUsd = feeInQuote ? feeAbs : feeAbs * averagePrice;
+        var grossPnl = trade.Side == "SHORT"
+            ? (trade.EntryPrice - exitPrice) * closedBase
+            : (exitPrice - trade.EntryPrice) * closedBase;
 
-        var proceeds = filledBase * averagePrice - exitFeeUsd;
-        var pnlUsd   = Math.Round(proceeds - trade.NotionalUsd, 4);
+        var totalFeeUsd = (trade.FeeUsd ?? 0m) + exitFeeUsd;
+        var pnlUsd      = Math.Round(grossPnl - totalFeeUsd, 4);
 
-        trade.ExitPrice   = averagePrice;
+        trade.ExitPrice   = exitPrice;
         trade.PnlUsd      = pnlUsd;
         trade.PnlPct      = trade.NotionalUsd > 0m ? Math.Round(pnlUsd / trade.NotionalUsd, 6) : 0m;
         trade.Status      = "CLOSED";
         trade.ClosedAt    = DateTime.UtcNow;
         trade.CloseReason = reason;
         trade.ExitOrderId = orderId;
-        trade.FeeUsd      = Math.Round((trade.FeeUsd ?? 0m) + exitFeeUsd, 8);
+        trade.FeeUsd      = Math.Round(totalFeeUsd, 8);
     }
 }

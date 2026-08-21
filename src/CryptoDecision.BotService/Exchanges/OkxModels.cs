@@ -42,23 +42,96 @@ internal static class OkxNum
 /// minimum, is rejected outright.
 /// </summary>
 public sealed record OkxInstrument(
-    [property: JsonPropertyName("instId")]   string  InstId,
-    [property: JsonPropertyName("baseCcy")]  string  BaseCcy,
-    [property: JsonPropertyName("quoteCcy")] string  QuoteCcy,
-    [property: JsonPropertyName("lotSz")]    string? LotSzRaw,
-    [property: JsonPropertyName("minSz")]    string? MinSzRaw,
-    [property: JsonPropertyName("tickSz")]   string? TickSzRaw,
-    [property: JsonPropertyName("state")]    string? State
+    [property: JsonPropertyName("instId")]    string  InstId,
+    [property: JsonPropertyName("baseCcy")]   string? BaseCcyRaw,
+    [property: JsonPropertyName("quoteCcy")]  string? QuoteCcyRaw,
+    [property: JsonPropertyName("settleCcy")] string? SettleCcy,
+    [property: JsonPropertyName("ctVal")]     string? CtValRaw,
+    [property: JsonPropertyName("ctValCcy")]  string? CtValCcy,
+    [property: JsonPropertyName("lotSz")]     string? LotSzRaw,
+    [property: JsonPropertyName("minSz")]     string? MinSzRaw,
+    [property: JsonPropertyName("tickSz")]    string? TickSzRaw,
+    [property: JsonPropertyName("state")]     string? State
 )
 {
-    /// <summary>Size increment. Any order size must be a whole multiple of this.</summary>
+    /// <summary>Size increment, in contracts. Any order size must be a whole multiple of this.</summary>
     public decimal LotSize  => OkxNum.Parse(LotSzRaw);
-    /// <summary>Smallest order size the exchange will accept, in base currency.</summary>
+    /// <summary>Smallest order the exchange accepts, in contracts.</summary>
     public decimal MinSize  => OkxNum.Parse(MinSzRaw);
     /// <summary>Price increment.</summary>
     public decimal TickSize => OkxNum.Parse(TickSzRaw);
     /// <summary>OKX reports "live" for a tradable instrument; suspended ones are not.</summary>
     public bool    IsLive   => string.Equals(State, "live", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Base currency of the underlying. SWAP instruments leave baseCcy empty and
+    /// express the pair through ctValCcy/settleCcy instead, so it is derived from
+    /// the instId when absent.
+    /// </summary>
+    public string BaseCcy => !string.IsNullOrWhiteSpace(BaseCcyRaw)
+        ? BaseCcyRaw!
+        : !string.IsNullOrWhiteSpace(CtValCcy) ? CtValCcy!
+        : InstId.Split('-') is { Length: > 0 } parts ? parts[0] : InstId;
+
+    /// <summary>Currency the position is quoted and settled in — USDT for linear perps.</summary>
+    public string QuoteCcy => !string.IsNullOrWhiteSpace(QuoteCcyRaw)
+        ? QuoteCcyRaw!
+        : !string.IsNullOrWhiteSpace(SettleCcy) ? SettleCcy!
+        : InstId.Split('-') is { Length: > 1 } parts ? parts[1] : "USDT";
+
+    /// <summary>
+    /// Base-currency amount one contract represents — 0.01 BTC for BTC-USDT-SWAP.
+    ///
+    /// This is the conversion nothing else can be computed without: order sizes go
+    /// to OKX in contracts, while every risk figure the bot reasons about (notional,
+    /// stop distance, P&amp;L) is in base units. Falls back to 1 so a spot
+    /// instrument, which has no contract size, still behaves sensibly.
+    /// </summary>
+    public decimal ContractValue => OkxNum.Parse(CtValRaw) is var v && v > 0m ? v : 1m;
+}
+
+// ── Account configuration ────────────────────────────────────────────────────
+
+/// <summary>
+/// Account-level trading configuration. Only <see cref="PosMode"/> is read, and
+/// it decides whether an order must name which side of the book it belongs to:
+/// hedge mode ("long_short_mode") requires posSide, net mode rejects it. Getting
+/// this wrong has the exchange refuse every order.
+/// </summary>
+public sealed record OkxAccountConfig(
+    [property: JsonPropertyName("posMode")] string? PosMode,
+    [property: JsonPropertyName("acctLv")]  string? AccountLevel
+)
+{
+    public bool IsHedgeMode =>
+        string.Equals(PosMode, "long_short_mode", StringComparison.OrdinalIgnoreCase);
+}
+
+// ── Positions ────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// An open derivatives position as the exchange sees it. This — not a coin
+/// balance — is what says whether a futures position still exists.
+/// </summary>
+public sealed record OkxPosition(
+    [property: JsonPropertyName("instId")]  string? InstId,
+    [property: JsonPropertyName("posSide")] string? PosSide,
+    [property: JsonPropertyName("pos")]     string? PosRaw,
+    [property: JsonPropertyName("avgPx")]   string? AvgPxRaw,
+    [property: JsonPropertyName("upl")]     string? UplRaw,
+    [property: JsonPropertyName("liqPx")]   string? LiqPxRaw,
+    [property: JsonPropertyName("lever")]   string? LeverRaw
+)
+{
+    /// <summary>Signed contract count: positive long, negative short, zero flat.</summary>
+    public decimal Contracts => OkxNum.Parse(PosRaw);
+    /// <summary>Absolute contract count.</summary>
+    public decimal AbsContracts => Math.Abs(Contracts);
+    public decimal? AveragePrice => OkxNum.ParseOrNull(AvgPxRaw);
+    public decimal? UnrealisedPnl => OkxNum.ParseOrNull(UplRaw);
+    /// <summary>Estimated liquidation price, when OKX reports one.</summary>
+    public decimal? LiquidationPrice => OkxNum.ParseOrNull(LiqPxRaw);
+    public bool IsFlat => AbsContracts <= 0m;
 }
 
 // ── Order placement ──────────────────────────────────────────────────────────

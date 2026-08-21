@@ -5,9 +5,11 @@ namespace CryptoDecision.BotService.Exchanges;
 /// here is read back from OKX rather than assumed from the request — a market
 /// order's price and its fee are both unknown until it fills.
 /// </summary>
+/// <param name="FilledContracts">Contracts filled. Multiply by ctVal for base units.</param>
+/// <param name="FeeAbs">Fee charged, unsigned. Quote currency (USDT) on a linear perp.</param>
 public sealed record OkxFill(
     string   OrdId,
-    decimal  FilledBase,
+    decimal  FilledContracts,
     decimal  AveragePrice,
     decimal  FeeAbs,
     string?  FeeCcy,
@@ -15,23 +17,33 @@ public sealed record OkxFill(
 );
 
 /// <summary>
-/// Order placement and account reads against OKX spot.
+/// Order placement and account reads against OKX USDT-margined perpetual swaps.
 ///
-/// Spot only, tdMode=cash: no leverage, no borrowing, nothing that can go below
-/// zero. Sizes are always expressed in the base currency (tgtCcy=base_ccy) on
-/// both legs, so the amount bought is the amount later sold and the two legs are
-/// directly comparable. Quoting the buy in USDT and the sell in BTC would leave
-/// the fee haircut to be reconciled across two different units, on the one code
-/// path where a mistake spends real money.
+/// Three things differ from spot in ways that reach the money, and every method
+/// here is shaped by them:
+///
+///  - <b>Sizes are contracts, not coins.</b> One BTC-USDT-SWAP contract is 0.01
+///    BTC. Sending a base quantity where OKX expects contracts is off by a factor
+///    of a hundred, in the direction of a position a hundred times too large.
+///  - <b>Closing is reduceOnly, not selling.</b> There is no coin balance to sell;
+///    a plain opposite-side order would open a position the other way instead of
+///    closing this one. reduceOnly is what makes an exit an exit.
+///  - <b>posSide depends on account configuration.</b> Hedge mode requires it,
+///    net mode rejects it. It is read once from the account rather than assumed,
+///    because guessing wrong has every order refused.
 /// </summary>
 public sealed class OkxTradingClient(
     OkxSignedClient client,
     OkxOptions      opts,
     ILogger<OkxTradingClient> log)
 {
+    private OkxAccountConfig? _accountConfig;
+    private readonly SemaphoreSlim _configGate = new(1, 1);
+    private readonly HashSet<string> _leverageSet = new(StringComparer.OrdinalIgnoreCase);
+
     // ── Account ───────────────────────────────────────────────────────────────
 
-    /// <summary>Free balance of one currency — what a new order may actually commit.</summary>
+    /// <summary>Free margin balance of one currency — what a new position may commit.</summary>
     public async Task<decimal> GetAvailableAsync(string currency, CancellationToken ct)
     {
         var accounts = await client.GetPrivateAsync<OkxBalanceResponse>(
@@ -44,14 +56,93 @@ public sealed class OkxTradingClient(
         return detail?.Available ?? 0m;
     }
 
+    /// <summary>
+    /// Account trading configuration, fetched once. Read for posMode, which decides
+    /// whether orders must name a position side.
+    /// </summary>
+    public async Task<OkxAccountConfig> GetAccountConfigAsync(CancellationToken ct)
+    {
+        if (_accountConfig is not null) return _accountConfig;
+
+        await _configGate.WaitAsync(ct);
+        try
+        {
+            if (_accountConfig is not null) return _accountConfig;
+
+            var configs = await client.GetPrivateAsync<OkxAccountConfig>("/api/v5/account/config", ct);
+            _accountConfig = configs.FirstOrDefault()
+                ?? throw new OkxApiException("NO_ACCOUNT_CONFIG",
+                    "OKX returned no account configuration, so position mode is unknown.");
+
+            log.LogInformation(
+                "[OKX] Account config: posMode={PosMode} acctLv={Level} (hedge mode: {Hedge})",
+                _accountConfig.PosMode, _accountConfig.AccountLevel, _accountConfig.IsHedgeMode);
+
+            return _accountConfig;
+        }
+        finally
+        {
+            _configGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Set leverage for an instrument, once per process.
+    ///
+    /// OKX keeps leverage as instrument state, not an order parameter, so it
+    /// persists between sessions and from whatever was set last — possibly by hand,
+    /// possibly much higher. Setting it explicitly before the first order is what
+    /// makes the configured value the one actually in force.
+    /// </summary>
+    public async Task EnsureLeverageAsync(string instId, CancellationToken ct)
+    {
+        lock (_leverageSet)
+            if (_leverageSet.Contains(instId)) return;
+
+        var payload = new
+        {
+            instId,
+            lever   = OkxNum.Format(opts.Leverage),
+            mgnMode = opts.MarginMode,
+        };
+
+        await client.PostPrivateAsync<OkxAlgoAck>("/api/v5/account/set-leverage", payload, ct);
+
+        lock (_leverageSet)
+            _leverageSet.Add(instId);
+
+        log.LogInformation(
+            "[OKX] Leverage for {InstId} set to {Lever}x {Mode} margin.",
+            instId, opts.Leverage, opts.MarginMode);
+    }
+
+    /// <summary>
+    /// The open position on an instrument, or null when flat.
+    ///
+    /// For futures this — not a coin balance — is the answer to "do I still hold
+    /// this". A position closed by an exchange-side stop leaves no trace in any
+    /// balance the bot would otherwise check.
+    /// </summary>
+    public async Task<OkxPosition?> GetPositionAsync(string instId, CancellationToken ct)
+    {
+        var positions = await client.GetPrivateAsync<OkxPosition>(
+            $"/api/v5/account/positions?instType=SWAP&instId={instId}", ct);
+
+        return positions.FirstOrDefault(p => !p.IsFlat);
+    }
+
     // ── Order placement ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Place a spot market order sized in the base currency and return its
+    /// Place a market order on a perpetual swap, sized in contracts, and return its
     /// exchange order id. Placement only — the fill is read back separately.
     /// </summary>
-    public async Task<string> PlaceSpotMarketOrderAsync(
-        string instId, string side, decimal baseQuantity, CancellationToken ct)
+    /// <param name="side">"buy" or "sell" — the direction of the order, not of the position.</param>
+    /// <param name="positionSide">"long"/"short" in hedge mode; null in net mode.</param>
+    /// <param name="reduceOnly">True for an exit: the order may only shrink a position, never open one.</param>
+    public async Task<string> PlaceSwapMarketOrderAsync(
+        string instId, string side, string? positionSide, decimal contracts, bool reduceOnly,
+        CancellationToken ct)
     {
         // clOrdId is OKX-constrained to alphanumerics, 1-32 characters. A hex GUID
         // fits, and giving the order an id of ours is what makes a timed-out
@@ -59,16 +150,20 @@ public sealed class OkxTradingClient(
         // being re-sent blind.
         var clientOrderId = "cd" + Guid.NewGuid().ToString("N")[..24];
 
-        var payload = new
+        // Built as a dictionary because posSide must be absent in net mode, not
+        // present-and-null — OKX rejects the field outright when posMode is net.
+        var payload = new Dictionary<string, object>
         {
-            instId,
-            tdMode  = "cash",
-            side,                          // "buy" | "sell"
-            ordType = "market",
-            sz      = OkxNum.Format(baseQuantity),
-            tgtCcy  = "base_ccy",
-            clOrdId = clientOrderId,
+            ["instId"]  = instId,
+            ["tdMode"]  = opts.MarginMode,
+            ["side"]    = side,
+            ["ordType"] = "market",
+            ["sz"]      = OkxNum.Format(contracts),
+            ["clOrdId"] = clientOrderId,
         };
+
+        if (positionSide is not null) payload["posSide"]    = positionSide;
+        if (reduceOnly)               payload["reduceOnly"] = true;
 
         var acks = await client.PostPrivateAsync<OkxOrderAck>("/api/v5/trade/order", payload, ct);
 
@@ -87,8 +182,10 @@ public sealed class OkxTradingClient(
                 $"(clOrdId {clientOrderId}). Check the exchange before retrying.");
 
         log.LogInformation(
-            "[OKX] Placed {Side} market order {OrdId} on {InstId} sz={Qty} (clOrdId={ClOrdId}, demo={Demo})",
-            side, ack.OrdId, instId, OkxNum.Format(baseQuantity), clientOrderId, opts.DemoTrading);
+            "[OKX] Placed {Side} market order {OrdId} on {InstId} sz={Contracts} contracts " +
+            "posSide={PosSide} reduceOnly={ReduceOnly} (clOrdId={ClOrdId}, demo={Demo})",
+            side, ack.OrdId, instId, OkxNum.Format(contracts), positionSide ?? "(net)",
+            reduceOnly, clientOrderId, opts.DemoTrading);
 
         return ack.OrdId!;
     }
@@ -148,16 +245,16 @@ public sealed class OkxTradingClient(
 
         if (!complete)
             log.LogWarning(
-                "[OKX] Order {OrdId} on {InstId} filled {Filled} of {Requested} requested.",
+                "[OKX] Order {OrdId} on {InstId} filled {Filled} of {Requested} contracts.",
                 ordId, instId, filled, requested);
 
         return new OkxFill(
-            OrdId:        ordId,
-            FilledBase:   filled,
-            AveragePrice: price,
-            FeeAbs:       detail.FeeAbs,
-            FeeCcy:       detail.FeeCcy,
-            FullyFilled:  complete);
+            OrdId:           ordId,
+            FilledContracts: filled,
+            AveragePrice:    price,
+            FeeAbs:          detail.FeeAbs,
+            FeeCcy:          detail.FeeCcy,
+            FullyFilled:     complete);
     }
 
     /// <summary>Read one order's current state. Public so reconciliation can inspect a triggered OCO's fill.</summary>
@@ -168,40 +265,77 @@ public sealed class OkxTradingClient(
         return found.FirstOrDefault();
     }
 
+    /// <summary>
+    /// Best-effort cancel. A cancel that fails because the order just filled is
+    /// the expected race, not a problem, so the error is logged and swallowed —
+    /// the caller re-reads the order either way and works from what it says.
+    /// </summary>
+    private async Task TryCancelAsync(string instId, string ordId, CancellationToken ct)
+    {
+        try
+        {
+            await client.PostPrivateAsync<OkxOrderAck>(
+                "/api/v5/trade/cancel-order", new { instId, ordId }, ct);
+        }
+        catch (OkxApiException ex)
+        {
+            log.LogInformation(
+                "[OKX] Cancel of {OrdId} on {InstId} did not apply ({Code}: {Message}) — " +
+                "re-reading the order instead.", ordId, instId, ex.Code, ex.Message);
+        }
+    }
+
     // ── Exchange-side protective orders ───────────────────────────────────────
 
     /// <summary>
-    /// Place an OCO sell that takes profit or stops out, whichever triggers first.
+    /// Place a reduce-only OCO that takes profit or stops out, whichever triggers
+    /// first.
     ///
-    /// This is the only protection that survives this process dying. The bot's own
-    /// evaluation loop still runs trailing stops, breakeven and timeouts — those
-    /// need judgement the exchange cannot make — but the hard floor lives at OKX,
-    /// where it does not depend on a container being up or a price poll succeeding.
+    /// This is the only protection that survives this process dying, and on a
+    /// leveraged position that matters more than it does on spot: an unattended
+    /// spot position can only lose its own value, while an unattended perp can be
+    /// liquidated. The stop's job is to close the trade a long way before the
+    /// exchange closes it for you.
     ///
     /// Both legs use ordPx = -1, meaning "fill at market once triggered". A limit
     /// exit at a fixed price is the classic way a stop loss fails to stop
     /// anything: in the move that makes you want out, the limit never fills.
     /// </summary>
     public async Task<string> PlaceOcoExitAsync(
-        string instId, decimal baseQuantity, decimal takeProfitTrigger, decimal stopLossTrigger,
-        CancellationToken ct)
+        string instId, string? positionSide, decimal contracts,
+        decimal takeProfitTrigger, decimal stopLossTrigger, CancellationToken ct)
     {
         var clientOrderId = "cd" + Guid.NewGuid().ToString("N")[..24];
 
-        var payload = new
+        // Exit side is the opposite of the position: a long is closed by selling.
+        // In net mode posSide is absent and reduceOnly carries the intent instead.
+        var exitSide = positionSide switch
         {
-            instId,
-            tdMode      = "cash",
-            side        = "sell",
-            ordType     = "oco",
-            sz          = OkxNum.Format(baseQuantity),
-            tgtCcy      = "base_ccy",
-            algoClOrdId = clientOrderId,
-            tpTriggerPx = OkxNum.Format(takeProfitTrigger),
-            tpOrdPx     = "-1",
-            slTriggerPx = OkxNum.Format(stopLossTrigger),
-            slOrdPx     = "-1",
+            "long"  => "sell",
+            "short" => "buy",
+            _       => throw new ArgumentException(
+                           $"positionSide must be 'long' or 'short' to size an exit, got '{positionSide}'.",
+                           nameof(positionSide)),
         };
+
+        var payload = new Dictionary<string, object>
+        {
+            ["instId"]      = instId,
+            ["tdMode"]      = opts.MarginMode,
+            ["side"]        = exitSide,
+            ["ordType"]     = "oco",
+            ["sz"]          = OkxNum.Format(contracts),
+            ["reduceOnly"]  = true,
+            ["algoClOrdId"] = clientOrderId,
+            ["tpTriggerPx"] = OkxNum.Format(takeProfitTrigger),
+            ["tpOrdPx"]     = "-1",
+            ["slTriggerPx"] = OkxNum.Format(stopLossTrigger),
+            ["slOrdPx"]     = "-1",
+        };
+
+        // Only meaningful in hedge mode; the caller passes null for net accounts.
+        var config = await GetAccountConfigAsync(ct);
+        if (config.IsHedgeMode) payload["posSide"] = positionSide!;
 
         var acks = await client.PostPrivateAsync<OkxAlgoAck>("/api/v5/trade/order-algo", payload, ct);
 
@@ -220,8 +354,8 @@ public sealed class OkxTradingClient(
                 $"(algoClOrdId {clientOrderId}).");
 
         log.LogInformation(
-            "[OKX] OCO exit {AlgoId} on {InstId}: sz={Qty} TP={Tp} SL={Sl}",
-            ack.AlgoId, instId, OkxNum.Format(baseQuantity),
+            "[OKX] OCO exit {AlgoId} on {InstId}: {Side} {Contracts} contracts TP={Tp} SL={Sl}",
+            ack.AlgoId, instId, exitSide, OkxNum.Format(contracts),
             OkxNum.Format(takeProfitTrigger), OkxNum.Format(stopLossTrigger));
 
         return ack.AlgoId!;
@@ -240,8 +374,8 @@ public sealed class OkxTradingClient(
     ///
     /// Returns true when the order is cancelled or was already not live. A failure
     /// here is not swallowed the way an order cancel is: the caller is about to
-    /// sell the position by hand, and doing that while the OCO is still armed
-    /// leaves an order queued to sell coins that will no longer exist.
+    /// close the position by hand, and doing that while the OCO is still armed
+    /// leaves an order queued against a position that will no longer exist.
     /// </summary>
     public async Task<bool> TryCancelAlgoAsync(string instId, string algoId, CancellationToken ct)
     {
@@ -280,25 +414,5 @@ public sealed class OkxTradingClient(
         var tickers = await client.GetPublicAsync<OkxTicker>(
             $"/api/v5/market/ticker?instId={instId}", ct);
         return tickers.FirstOrDefault()?.Last;
-    }
-
-    /// <summary>
-    /// Best-effort cancel. A cancel that fails because the order just filled is
-    /// the expected race, not a problem, so the error is logged and swallowed —
-    /// the caller re-reads the order either way and works from what it says.
-    /// </summary>
-    private async Task TryCancelAsync(string instId, string ordId, CancellationToken ct)
-    {
-        try
-        {
-            await client.PostPrivateAsync<OkxOrderAck>(
-                "/api/v5/trade/cancel-order", new { instId, ordId }, ct);
-        }
-        catch (OkxApiException ex)
-        {
-            log.LogInformation(
-                "[OKX] Cancel of {OrdId} on {InstId} did not apply ({Code}: {Message}) — " +
-                "re-reading the order instead.", ordId, instId, ex.Code, ex.Message);
-        }
     }
 }

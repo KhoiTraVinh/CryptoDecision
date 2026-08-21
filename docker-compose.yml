@@ -206,6 +206,8 @@ services:
       Okx__DemoTrading:                "${OKX_DEMO_TRADING:-true}"
       Okx__EnableLiveTrading:          "${OKX_ENABLE_LIVE_TRADING:-false}"
       Okx__MaxOrderNotionalUsd:        "${OKX_MAX_ORDER_NOTIONAL_USD:-100}"
+      Okx__Leverage:                   "${OKX_LEVERAGE:-3}"
+      Okx__MarginMode:                 "${OKX_MARGIN_MODE:-isolated}"
     depends_on:
       postgres:
         condition: service_healthy
