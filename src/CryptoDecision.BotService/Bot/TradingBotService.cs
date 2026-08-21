@@ -334,7 +334,37 @@ public sealed class TradingBotService(
         // An exchange-side OCO can fire between cycles, or while the bot was down.
         // Settling those rows first keeps the exit evaluation below from working on
         // positions that no longer exist.
-        var openTrades = await ReconcileVenueClosuresAsync(state.GetOpenTrades(), ct);
+        var allOpen = await ReconcileVenueClosuresAsync(state.GetOpenTrades(), ct);
+
+        // ── Only manage positions in the instrument this cycle has a price for ──
+        //
+        // One price is fetched per cycle, for opts.Symbol. Applying it to a position
+        // in a different instrument is not an approximation, it is a different
+        // number entirely: a BTCUSDT entry at 77,382 measured against a SOL price of
+        // 92 reads as -99.9%, which trips a stop loss, a timeout close, or a
+        // breakeven exit on arithmetic that means nothing. It happened here — a
+        // paper BTC position left open when the symbol changed to SOL — and on a
+        // live account the same path would close a real position at a fabricated
+        // trigger, or record a fabricated loss large enough to trip the daily
+        // circuit breaker and halt a working bot.
+        //
+        // Positions in other instruments are left untouched and reported, because
+        // untouched is the safe state and silence is not: they still need an
+        // operator to close them.
+        var openTrades = allOpen
+            .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var strays = allOpen.Count - openTrades.Count;
+        if (strays > 0)
+            log.LogWarning(
+                "[TradingBot] {Strays} open position(s) are in an instrument other than {Symbol} and " +
+                "are NOT being managed — no stop loss, take profit or timeout applies to them. " +
+                "Close them manually, or point bot_config.symbol back at them. [{Detail}]",
+                strays, opts.Symbol,
+                string.Join("; ", allOpen
+                    .Where(t => !string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
+                    .Select(t => $"id={t.Id} {t.Mode} {t.Side} {t.Symbol}")));
 
         // Price comes from the venue orders are placed on — see PriceFeedResolver.
         var currentPrice = await strategy.GetCurrentPriceAsync(opts, ct);

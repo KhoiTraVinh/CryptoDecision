@@ -42,7 +42,7 @@ public sealed class BotController(
         {
             Enabled                  = true,
             PaperMode                = req.PaperMode,
-            Symbol                   = req.Symbol?.ToUpperInvariant() ?? "BTCUSDT",
+            Symbol                   = req.Symbol?.ToUpperInvariant() ?? "SOLUSDT",
             // Defaults to BINANCE, the price feed the strategies read. Live trading
             // requires setting this to OKX explicitly — the only venue with an order
             // engine — so going live is never something a default does for you. The
@@ -235,7 +235,7 @@ public sealed class BotController(
 
 public sealed record BotStartRequest(
     bool         PaperMode                = true,
-    string?      Symbol                   = "BTCUSDT",
+    string?      Symbol                   = "SOLUSDT",
     // Venue for live orders. Only OKX is implemented; ignored in paper mode.
     string?      Exchange                 = "BINANCE",
     List<string>? ActiveStrategies        = null,

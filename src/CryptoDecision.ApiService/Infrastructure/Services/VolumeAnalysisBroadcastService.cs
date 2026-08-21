@@ -16,7 +16,7 @@ public sealed class VolumeAnalysisBroadcastService(
     ILogger<VolumeAnalysisBroadcastService> logger)
     : BackgroundService
 {
-    private static readonly string[] Symbols  = ["BTCUSDT", "ETHUSDT"];
+    private static readonly string[] Symbols  = ["SOLUSDT"];
     private static readonly string[] Exchanges = ["BINANCE", "BYBIT", "OKX", "ALL"];
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(30);
 

@@ -18,7 +18,7 @@ public sealed class DashboardBroadcastService(
     ILogger<DashboardBroadcastService> logger) : BackgroundService
 {
     // The symbols we actively broadcast
-    private static readonly string[] ActiveSymbols = { "BTCUSDT", "ETHUSDT" };
+    private static readonly string[] ActiveSymbols = { "SOLUSDT" };
     
     // Default config values as used in web dashboards
     private const string Exchange = "ALL";

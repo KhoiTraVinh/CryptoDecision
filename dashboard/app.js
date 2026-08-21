@@ -10,7 +10,7 @@ const SERVER = (typeof window !== 'undefined' && window.SERVER_URL) ? window.SER
 const API = SERVER + '/api';
 const HUB_URL = SERVER + '/hubs/market';
 
-let activeSymbol = 'BTCUSDT';
+let activeSymbol = 'SOLUSDT';
 let hubConn = null;
 let botRunning = false;
 let volumeData = null;

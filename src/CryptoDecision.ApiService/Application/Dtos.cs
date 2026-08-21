@@ -4,8 +4,14 @@ namespace CryptoDecision.ApiService.Application;
 
 internal static class SupportedSymbols
 {
+    // Must match what the pipeline actually ingests: IngestionService's
+    // MarketSubscription pairs, the processor's topics, and PredictionService's
+    // SYMBOLS. A symbol here that nothing ingests returns empty data; a symbol the
+    // bot trades that is missing here returns 400 for every market endpoint, which
+    // is what silently blanked the dashboard when trading moved to SOL — the bot
+    // reads Postgres directly and kept working, so nothing failed loudly.
     public static readonly IReadOnlySet<string> All =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "BTCUSDT", "ETHUSDT" };
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SOLUSDT" };
 
     public static string ValidationMessage =>
         $"Symbol must be one of: {string.Join(", ", All)}";
