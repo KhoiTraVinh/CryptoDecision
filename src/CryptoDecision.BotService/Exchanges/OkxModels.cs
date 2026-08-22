@@ -228,6 +228,34 @@ public sealed record OkxAlgoOrder(
         || string.Equals(State, "pause", StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// A position the exchange has already closed, from positions-history.
+///
+/// <see cref="RealisedPnl"/> is the exchange's own figure and includes everything
+/// a reconstruction from prices would miss — the actual liquidation fill, the
+/// liquidation fee, and the funding paid over the position's life.
+/// </summary>
+public sealed record OkxPositionHistory(
+    [property: JsonPropertyName("instId")]      string? InstId,
+    [property: JsonPropertyName("posSide")]     string? PosSide,
+    [property: JsonPropertyName("realizedPnl")] string? RealisedPnlRaw,
+    [property: JsonPropertyName("closeAvgPx")]  string? CloseAvgPxRaw,
+    [property: JsonPropertyName("openAvgPx")]   string? OpenAvgPxRaw,
+    [property: JsonPropertyName("type")]        string? CloseType,
+    [property: JsonPropertyName("uTime")]       string? UpdatedAtRaw
+)
+{
+    public decimal? RealisedPnl  => OkxNum.ParseOrNull(RealisedPnlRaw);
+    public decimal? CloseAvgPx   => OkxNum.ParseOrNull(CloseAvgPxRaw);
+
+    /// <summary>
+    /// OKX close-type code. "3" is partial liquidation and "4" full liquidation;
+    /// "2" is a full close by the trader. Surfaced so a liquidation is named as one
+    /// in the trade record rather than filed as an ordinary close.
+    /// </summary>
+    public bool WasLiquidated => CloseType is "3" or "4";
+}
+
 // ── Market data ──────────────────────────────────────────────────────────────
 
 public sealed record OkxTicker(

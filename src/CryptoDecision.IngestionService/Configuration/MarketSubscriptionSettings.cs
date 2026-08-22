@@ -44,6 +44,27 @@ public sealed class MarketSubscriptionSettings
     /// trade arrives twice, and every buy/sell ratio computed from it counts that
     /// trade twice. Cheap to guard against here, invisible if it happens.
     /// </summary>
+    /// <summary>
+    /// Throw if nothing is configured.
+    ///
+    /// An empty list is not a quiet no-op, it is the worst kind of failure this
+    /// service has: both clients would send a subscribe frame with an empty args
+    /// array, both connections would succeed, the channel health check would report
+    /// healthy because the channels are empty rather than backed up, and the
+    /// container would sit green forever with no data reaching Postgres. The bot
+    /// downstream then reads an empty order book and never leaves the dead zone,
+    /// with nothing anywhere saying why. Failing at startup is the only version of
+    /// this that an operator can see.
+    /// </summary>
+    public void Validate()
+    {
+        if (!Normalised.Any())
+            throw new InvalidOperationException(
+                $"No market pairs configured. Set {Section}:Pairs to at least one pair in dashed " +
+                "form, e.g. [\"SOL-USDT\"]. Without it the exchange clients would connect, subscribe " +
+                "to nothing, and report healthy while ingesting no data.");
+    }
+
     private IEnumerable<string> Normalised => Pairs
         .Where(p => !string.IsNullOrWhiteSpace(p))
         .Select(p => p.Trim().ToUpperInvariant())

@@ -101,6 +101,31 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Shrink a still-open trade to what it actually holds, after an exit filled
+    /// only part of it, and carry the fee already paid.
+    ///
+    /// The row deliberately stays OPEN. Closing it on a partial fill would abandon
+    /// the remainder — still a leveraged position, its protective order cancelled by
+    /// the exit attempt, and nothing left referring to it.
+    /// </summary>
+    public async Task UpdateOpenQuantityAsync(
+        long tradeId, decimal quantity, decimal feeUsd, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_trades
+            SET quantity = @qty, fee_usd = @feeUsd
+            WHERE id = @id AND status = 'OPEN'
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("qty",    NpgsqlDbType.Numeric, quantity);
+        cmd.Parameters.AddWithValue("feeUsd", NpgsqlDbType.Numeric, feeUsd);
+        cmd.Parameters.AddWithValue("id",     tradeId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Open positions ────────────────────────────────────────────────────────
 
     /// <summary>

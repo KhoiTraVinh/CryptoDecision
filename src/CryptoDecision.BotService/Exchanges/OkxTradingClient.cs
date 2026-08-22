@@ -123,12 +123,59 @@ public sealed class OkxTradingClient(
     /// this". A position closed by an exchange-side stop leaves no trace in any
     /// balance the bot would otherwise check.
     /// </summary>
-    public async Task<OkxPosition?> GetPositionAsync(string instId, CancellationToken ct)
+    /// <param name="positionSide">
+    /// "long" or "short". Required, not optional: in hedge mode both sides exist on
+    /// the same instrument at once, so "the position on SOL-USDT-SWAP" is not a
+    /// question with one answer. Taking the first non-flat row meant closing a long
+    /// could size itself from the short's contract count, or find the short and
+    /// conclude the long was still open.
+    /// </param>
+    public async Task<OkxPosition?> GetPositionAsync(
+        string instId, string positionSide, CancellationToken ct)
     {
         var positions = await client.GetPrivateAsync<OkxPosition>(
             $"/api/v5/account/positions?instType=SWAP&instId={instId}", ct);
 
-        return positions.FirstOrDefault(p => !p.IsFlat);
+        var config = await GetAccountConfigAsync(ct);
+
+        // Net mode reports a single row with posSide "net" and a signed size, so the
+        // side is carried by the sign rather than the field.
+        if (!config.IsHedgeMode)
+        {
+            var net = positions.FirstOrDefault(p => !p.IsFlat);
+            if (net is null) return null;
+
+            var netIsLong = net.Contracts > 0m;
+            return netIsLong == (positionSide == "long") ? net : null;
+        }
+
+        return positions.FirstOrDefault(p =>
+            !p.IsFlat && string.Equals(p.PosSide, positionSide, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Realised P&amp;L of the most recent closed position on an instrument, as the
+    /// exchange computed it, or null when it has no record.
+    ///
+    /// This exists because a position can leave without the bot placing the order
+    /// that removed it — a liquidation, or a manual close. Settling that row from a
+    /// reference price invents a number, and the invented one is always smaller than
+    /// a liquidation's real loss, which is the direction that matters: the daily-loss
+    /// circuit breaker sums these values, so understating them keeps a bot trading
+    /// through exactly the run of losses the breaker exists to stop.
+    /// </summary>
+    public async Task<OkxPositionHistory?> GetLastClosedPositionAsync(
+        string instId, string positionSide, CancellationToken ct)
+    {
+        var history = await client.GetPrivateAsync<OkxPositionHistory>(
+            $"/api/v5/account/positions-history?instType=SWAP&instId={instId}&limit=10", ct);
+
+        var config = await GetAccountConfigAsync(ct);
+
+        return config.IsHedgeMode
+            ? history.FirstOrDefault(h =>
+                  string.Equals(h.PosSide, positionSide, StringComparison.OrdinalIgnoreCase))
+            : history.FirstOrDefault();
     }
 
     // ── Order placement ───────────────────────────────────────────────────────

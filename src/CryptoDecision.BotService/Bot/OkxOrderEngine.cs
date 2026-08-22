@@ -67,9 +67,11 @@ public sealed class OkxOrderEngine(
         if (opts.StopLossPct > maxStop)
             return $"a {opts.StopLossPct:P2} stop loss at {okxOptions.Leverage}x leverage sits past " +
                    $"{MaxStopShareOfLiquidation:P0} of the ~{liquidationDistance:P1} distance to " +
-                   $"liquidation. Lower the leverage to about " +
+                   $"liquidation. Lower the leverage below " +
                    $"{decimal.Floor(MaxStopShareOfLiquidation / Math.Max(opts.StopLossPct, 0.0001m))}x " +
-                   $"or tighten the stop below {maxStop:P2}.";
+                   $"— well below, not to it, since that figure puts the stop exactly on the " +
+                   $"boundary this margin exists to keep clear of — or tighten the stop under " +
+                   $"{maxStop:P2}.";
 
         return null;
     }
@@ -136,6 +138,15 @@ public sealed class OkxOrderEngine(
                 $"${notional} at {price} is {contracts} contracts of {instrument.InstId} " +
                 $"({instrument.ContractValue} {instrument.BaseCcy} each), under OKX's " +
                 $"{instrument.MinSize} minimum. Raise the position size.");
+
+        // Re-check the floor against what will actually be sent, not what was asked
+        // for. Flooring onto the lot grid only ever shrinks the order, so checking
+        // the request let the real notional slip under the configured minimum.
+        var actualNotional = contracts * instrument.ContractValue * price;
+        if (actualNotional < okxOptions.MinOrderNotionalUsd)
+            throw new InvalidOperationException(
+                $"After flooring to the {instrument.LotSize} lot grid the order is ${actualNotional:F2}, " +
+                $"below the ${okxOptions.MinOrderNotionalUsd} minimum. Raise capital_usd or position_pct.");
 
         // ── Is there margin for it? ──
         var marginNeeded = notional / okxOptions.Leverage;
@@ -284,17 +295,117 @@ public sealed class OkxOrderEngine(
         }
     }
 
+    /// <summary>
+    /// Close the row for a position the exchange no longer has, using the
+    /// exchange's own realised P&amp;L rather than a price-derived guess.
+    ///
+    /// The guess is not merely imprecise, it is biased: a liquidation removes the
+    /// position at a price far past the stop, but by the time the next cycle
+    /// notices, the market price used for the estimate has often recovered most of
+    /// the way back. That understates the loss, and the daily-loss circuit breaker
+    /// sums exactly these numbers — so the estimate would keep a bot trading
+    /// through the run of losses the breaker exists to stop.
+    /// </summary>
+    private async Task SettleVanishedPositionAsync(
+        BotTrade trade, OkxInstrument instrument, string positionSide, string reason,
+        CancellationToken ct)
+    {
+        OkxPositionHistory? history = null;
+        try
+        {
+            history = await trading.GetLastClosedPositionAsync(instrument.InstId, positionSide, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning(ex,
+                "[OKX] Could not read position history for trade {Id}; falling back to an estimate.",
+                trade.Id);
+        }
+
+        if (history?.RealisedPnl is { } realised)
+        {
+            // The exchange figure already nets fees and funding, so it replaces the
+            // computed P&L outright instead of being adjusted by it.
+            trade.ExitPrice   = history.CloseAvgPx ?? trade.EntryPrice;
+            trade.PnlUsd      = Math.Round(realised, 4);
+            trade.PnlPct      = trade.NotionalUsd > 0m ? Math.Round(realised / trade.NotionalUsd, 6) : 0m;
+            trade.Status      = "CLOSED";
+            trade.ClosedAt    = DateTime.UtcNow;
+            trade.CloseReason = history.WasLiquidated ? "LIQUIDATED" : $"{reason}_EXTERNAL";
+            trade.ExitOrderId = null;
+            trade.ExitAlgoId  = null;
+
+            await repo.CloseTradeAsync(trade, ct);
+
+            if (history.WasLiquidated)
+                log.LogCritical(
+                    "[OKX] Trade {Id} was LIQUIDATED on {InstId} at {Price}. Realised P&L {Pnl} USD " +
+                    "(exchange figure, includes the liquidation fee and funding). Review leverage and " +
+                    "stop distance before the bot opens another position.",
+                    trade.Id, instrument.InstId, trade.ExitPrice, trade.PnlUsd);
+            else
+                log.LogWarning(
+                    "[OKX] Trade {Id} was closed outside the bot on {InstId} at {Price}. " +
+                    "Realised P&L {Pnl} USD (exchange figure).",
+                    trade.Id, instrument.InstId, trade.ExitPrice, trade.PnlUsd);
+
+            return;
+        }
+
+        // No history to read. The row still has to close or it is retried forever,
+        // but the number is a guess and the close reason says so — nothing should
+        // read _UNCONFIRMED as a settled result.
+        log.LogError(
+            "[OKX] Trade {Id} has no position on {InstId} and no history entry to settle it from. " +
+            "Closing at the entry price with zero P&L so it stops being retried; the real result is " +
+            "not recorded. Reconcile this row against the exchange by hand.",
+            trade.Id, instrument.InstId);
+
+        trade.ExitPrice   = trade.EntryPrice;
+        trade.PnlUsd      = 0m;
+        trade.PnlPct      = 0m;
+        trade.Status      = "CLOSED";
+        trade.ClosedAt    = DateTime.UtcNow;
+        trade.CloseReason = $"{reason}_UNCONFIRMED";
+        trade.ExitAlgoId  = null;
+
+        await repo.CloseTradeAsync(trade, ct);
+    }
+
     // ── Reconciliation ────────────────────────────────────────────────────────
 
     public async Task<BotTrade?> ReconcileAsync(BotTrade trade, CancellationToken ct)
     {
-        var algoId = trade.ExitAlgoId;
-        if (string.IsNullOrEmpty(algoId)) return null;
-
-        // Without credentials the exchange cannot be asked. Reporting "not closed"
-        // is the safe answer: the trade stays open and the operator sees the
-        // start-up refusal instead.
         if (okxOptions.DescribeRefusal() is not null) return null;
+
+        var algoId = trade.ExitAlgoId;
+
+        // ── No exchange-side guard on a live position: put one back ──
+        //
+        // Arming the OCO is best-effort at entry, because the fill has already
+        // happened and unwinding it over a transient API error would be worse. That
+        // made a failed arm permanent: nothing re-tried it, and this method used to
+        // return immediately on a null algoId, so the gap was never noticed either.
+        // A leveraged position with no stop at the exchange is the one state worth
+        // spending a request per cycle to get out of.
+        if (string.IsNullOrEmpty(algoId))
+        {
+            var positionSide = trade.Side == "SHORT" ? "short" : "long";
+            var instr        = await instruments.GetSwapAsync(trade.Symbol, ct);
+            var live         = await trading.GetPositionAsync(instr.InstId, positionSide, ct);
+
+            if (live is null)
+            {
+                await SettleVanishedPositionAsync(trade, instr, positionSide, "RECONCILE", ct);
+                return trade;
+            }
+
+            log.LogWarning(
+                "[OKX] Trade {Id} is open with no exchange-side stop — re-arming its OCO.", trade.Id);
+
+            await ArmProtectiveExitAsync(trade, instr, positionSide, live.AbsContracts, ct);
+            return null;
+        }
 
         var algo = await trading.ReadAlgoOrderAsync(algoId, ct);
 
@@ -398,20 +509,11 @@ public sealed class OkxOrderEngine(
         // For futures the position — not any coin balance — is the source of truth,
         // and it can differ from the row: a manual close, a liquidation, or a second
         // bot on the same key all show up here.
-        var position = await trading.GetPositionAsync(instrument.InstId, ct);
+        var position = await trading.GetPositionAsync(instrument.InstId, positionSide, ct);
 
         if (position is null)
         {
-            log.LogWarning(
-                "[OKX] Trade {Id} expects an open {Side} position on {InstId} but the exchange reports " +
-                "none — it was closed elsewhere (manual close, or liquidation). Settling the row at " +
-                "the current price so it stops being retried.",
-                trade.Id, trade.Side, instrument.InstId);
-
-            // No fill to read, so the reference price is the best available figure.
-            // Flagged in the close reason: this P&L is an estimate, not an exchange fill.
-            ApplyExit(trade, trade.Quantity, exitPrice, 0m, orderId: null, $"{reason}_UNCONFIRMED");
-            await repo.CloseTradeAsync(trade, ct);
+            await SettleVanishedPositionAsync(trade, instrument, positionSide, reason, ct);
             return trade;
         }
 
@@ -447,11 +549,32 @@ public sealed class OkxOrderEngine(
         var fill       = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
         var closedBase = fill.FilledContracts * instrument.ContractValue;
 
+        // ── A partial close leaves the trade open, not closed ──
+        //
+        // Marking the row CLOSED on a partial fill abandons the remainder: it is
+        // still a leveraged position, its OCO was cancelled above, and nothing in
+        // state or the database would refer to it again. Instead the trade keeps
+        // what it still holds and stays OPEN, so the next cycle tries again — and
+        // the protective order is re-armed for the remainder in the meantime,
+        // because that remainder may be carried for another 30 seconds or longer.
         if (fill.FilledContracts < contracts)
+        {
+            var residualBase = trade.Quantity - closedBase;
+
             log.LogWarning(
-                "[OKX] Exit for trade {Id} closed {Closed} of {Asked} contracts. The remaining " +
-                "{Residual} is still an open position and is no longer tracked by this trade.",
-                trade.Id, fill.FilledContracts, contracts, contracts - fill.FilledContracts);
+                "[OKX] Exit for trade {Id} closed {Closed} of {Asked} contracts. Keeping the trade " +
+                "OPEN with the remaining {Residual} {Base} and retrying next cycle.",
+                trade.Id, fill.FilledContracts, contracts, residualBase, instrument.BaseCcy);
+
+            trade.Quantity = residualBase;
+            trade.FeeUsd   = Math.Round((trade.FeeUsd ?? 0m) + fill.FeeAbs, 8);
+            await repo.UpdateOpenQuantityAsync(trade.Id, residualBase, trade.FeeUsd.Value, ct);
+
+            await ArmProtectiveExitAsync(
+                trade, instrument, positionSide, contracts - fill.FilledContracts, ct);
+
+            return trade;   // Status is still OPEN — the caller must not record a close.
+        }
 
         ApplyExit(trade, closedBase, fill.AveragePrice, fill.FeeAbs, orderId, reason);
 

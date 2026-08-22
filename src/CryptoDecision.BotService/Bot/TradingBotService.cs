@@ -396,9 +396,18 @@ public sealed class TradingBotService(
                 try
                 {
                     var closed = await orderEngine.CloseTradeAsync(trade, currentPrice.Value, decision.Reason!, ct);
-                    state.RemoveOpenTrade(trade.Id);
-                    state.SetLastClosedAt(DateTime.UtcNow);
-                    state.RecordClose(closed.PnlUsd ?? 0m);
+
+                    // An exit that only partially filled returns the trade still
+                    // OPEN, holding what is left. Recording a close here would drop
+                    // the remainder from management while it is still a real
+                    // position, so the status decides, not the fact that the call
+                    // returned.
+                    if (closed.Status == "CLOSED" || closed.Status == "STOPPED")
+                    {
+                        state.RemoveOpenTrade(trade.Id);
+                        state.SetLastClosedAt(DateTime.UtcNow);
+                        state.RecordClose(closed.PnlUsd ?? 0m);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

@@ -36,6 +36,13 @@ try
         builder.Configuration.GetSection(KafkaProducerSettings.Section));
     builder.Services.Configure<MarketSubscriptionSettings>(
         builder.Configuration.GetSection(MarketSubscriptionSettings.Section));
+
+    // Fail here rather than run healthy with nothing subscribed — see Validate().
+    var subscription = builder.Configuration
+        .GetSection(MarketSubscriptionSettings.Section)
+        .Get<MarketSubscriptionSettings>() ?? new MarketSubscriptionSettings();
+    subscription.Validate();
+    Log.Information("Market subscription: {Pairs}", string.Join(", ", subscription.Pairs));
     builder.Services.Configure<BatchSettings>(
         builder.Configuration.GetSection(BatchSettings.Section));
 

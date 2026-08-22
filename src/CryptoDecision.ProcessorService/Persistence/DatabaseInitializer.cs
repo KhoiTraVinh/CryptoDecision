@@ -34,6 +34,7 @@ public sealed class DatabaseInitializer(
             await CreateDailyFeatureTableAsync(conn, ct);
             await CreatePredictionTableAsync(conn, ct);
             await EnsureBotConfigColumnsAsync(conn, ct);
+            await EnsureBotTradesAsync(conn, ct);
             await EnsureDailyPartitionsAsync(conn, ct);
             await EnsureDedupIndexAsync(conn, ct);
             await tx.CommitAsync(ct);
@@ -167,6 +168,70 @@ public sealed class DatabaseInitializer(
                 END IF;
             END
             $$;
+            """, ct);
+    }
+
+    /// <summary>
+    /// Create bot_trades and every column newer bot builds read.
+    ///
+    /// This table was only ever created by sql/008_bot_trades.sql, which — unlike
+    /// 001-005 and 009-011 — is not mounted into docker-entrypoint-initdb.d, and
+    /// nothing created it at runtime. So a clean postgres_data volume had no
+    /// bot_trades at all: the bot's startup recovery reads it, that read is
+    /// deliberately fatal, and the container crash-looped with no way out short of
+    /// applying migrations by hand. The running database only worked because it had
+    /// been migrated manually.
+    ///
+    /// Everything here is IF NOT EXISTS, so it is equally correct on a fresh volume
+    /// and on one that already has the columns from sql/014-016.
+    /// </summary>
+    private static async Task EnsureBotTradesAsync(NpgsqlConnection conn, CancellationToken ct)
+    {
+        await Exec(conn, """
+            CREATE TABLE IF NOT EXISTS bot_trades (
+                id           BIGSERIAL      PRIMARY KEY,
+                symbol       TEXT           NOT NULL,
+                side         TEXT           NOT NULL DEFAULT 'BUY',
+                entry_price  NUMERIC(18, 8) NOT NULL,
+                exit_price   NUMERIC(18, 8),
+                quantity     NUMERIC(18, 8) NOT NULL,
+                notional_usd NUMERIC(10, 4) NOT NULL,
+                pnl_usd      NUMERIC(10, 4),
+                pnl_pct      NUMERIC(8,  6),
+                status       TEXT           NOT NULL DEFAULT 'OPEN',
+                opened_at    TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+                closed_at    TIMESTAMPTZ,
+                close_reason TEXT,
+                strategy     TEXT           NOT NULL DEFAULT 'UNKNOWN',
+                peak_price   NUMERIC(20, 8)
+            );
+            """, ct);
+
+        await Exec(conn, """
+            ALTER TABLE bot_trades
+                ADD COLUMN IF NOT EXISTS peak_price     NUMERIC(20, 8),
+                ADD COLUMN IF NOT EXISTS mode           TEXT NOT NULL DEFAULT 'PAPER',
+                ADD COLUMN IF NOT EXISTS exchange       TEXT NOT NULL DEFAULT 'BINANCE',
+                ADD COLUMN IF NOT EXISTS entry_order_id TEXT,
+                ADD COLUMN IF NOT EXISTS exit_order_id  TEXT,
+                ADD COLUMN IF NOT EXISTS fee_usd        NUMERIC(18, 8),
+                ADD COLUMN IF NOT EXISTS exit_algo_id   TEXT,
+                ADD COLUMN IF NOT EXISTS leverage       NUMERIC(6, 2),
+                ADD COLUMN IF NOT EXISTS margin_mode    TEXT;
+            """, ct);
+
+        await Exec(conn, """
+            CREATE INDEX IF NOT EXISTS idx_bot_trades_symbol ON bot_trades(symbol);
+            """, ct);
+        await Exec(conn, """
+            CREATE INDEX IF NOT EXISTS idx_bot_trades_status ON bot_trades(status);
+            """, ct);
+        await Exec(conn, """
+            CREATE INDEX IF NOT EXISTS idx_bot_trades_open ON bot_trades(opened_at) WHERE status = 'OPEN';
+            """, ct);
+        await Exec(conn, """
+            CREATE INDEX IF NOT EXISTS idx_bot_trades_exit_algo_id
+                ON bot_trades(exit_algo_id) WHERE exit_algo_id IS NOT NULL;
             """, ct);
     }
 
