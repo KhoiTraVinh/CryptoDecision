@@ -13,6 +13,21 @@ Normalising by the participating weight rather than the configured total matters
 if Ollama is down, the LLM's absence must not drag the verdict toward NEUTRAL as
 though it had voted NEUTRAL. A missing model abstains; it does not vote.
 
+That renormalisation has a second-order effect worth naming, because it is not
+obvious and it cost real money to notice: dividing the excess among the survivors
+promotes them. With xgboost abstaining for want of a trained model.pkl, the
+configured 0.35/0.35/0.30 quietly became llm 0.538 / heuristic 0.462 — a single 7B
+model holding the majority and setting direction alone whenever the heuristic
+disagreed. No operator chose that; it fell out of the arithmetic and the only
+visible trace was a model_version string reading `ensemble-heuristic+llm`.
+
+So a share ceiling (max_single_weight) is applied after renormalisation: no single
+model outvotes the rest combined. Excess above the cap is redistributed in
+proportion to the remaining shares, repeatedly, since absorbing excess can push
+another model over. The cap binds only while models are missing — at the full
+three-way split the largest share is 0.35 — so it lifts itself once xgboost trains
+and there is nothing to remember to revert.
+
 The raw score is then adjusted for agreement. Independent models landing on the
 same side is genuine corroboration, so confidence is nudged up; models pulling in
 opposite directions is a real warning, so it is damped. Both adjustments are
@@ -66,6 +81,7 @@ class Ensemble:
         agreement_bonus: float = 0.10,
         conflict_penalty: float = 0.25,
         degraded_weight_factor: float = 0.5,
+        max_single_weight: float = 0.50,
     ) -> None:
         self._models = models
         self._weights = weights
@@ -73,9 +89,85 @@ class Ensemble:
         self._agreement_bonus = agreement_bonus
         self._conflict_penalty = conflict_penalty
         self._degraded_weight_factor = degraded_weight_factor
+        self._max_single_weight = max_single_weight
 
     def weight_for(self, model_name: str) -> float:
         return max(0.0, float(self._weights.get(model_name, 0.0)))
+
+    # ── Weighting ─────────────────────────────────────────────────────────────
+
+    def _effective_shares(
+        self, contributors: list[ModelResult]
+    ) -> tuple[dict[str, float], bool]:
+        """
+        Each contributor's final share of the vote, summing to 1.0.
+
+        Configured weight → halved if the result is degraded → normalised over the
+        models that answered → capped so no one model outvotes the rest.
+
+        Returns the shares and whether the cap actually bound, so the caller can
+        say so out loud instead of leaving a silent reweighting in the arithmetic.
+        """
+        raw: dict[str, float] = {}
+        for result in contributors:
+            weight = self.weight_for(result.model_name)
+            if result.degraded:
+                weight *= self._degraded_weight_factor
+            raw[result.model_name] = weight
+
+        total = sum(raw.values())
+
+        # Every participating model has zero weight. An equal split is the honest
+        # reading of "these all answered and none was told it mattered more".
+        if total <= 0.0:
+            return {name: 1.0 / len(raw) for name in raw}, False
+
+        shares = {name: weight / total for name, weight in raw.items()}
+
+        cap = self._max_single_weight
+        # A ceiling below an equal split cannot be satisfied — one lone model must
+        # hold the whole vote whatever the cap says. Leave the shares untouched
+        # rather than manufacturing a split that does not exist.
+        if cap <= 0.0 or cap * len(shares) < 1.0:
+            return shares, False
+
+        # Known consequence, accepted deliberately: with exactly two participants a
+        # 0.50 cap forces 50/50, which erases both the configured weight difference
+        # and the degraded halving above. Those requirements are contradictory at two
+        # models — "neither may outvote the other" has only one solution — and of the
+        # two, the one that stops a single model deciding direction alone is the one
+        # worth keeping. Restoring a trained xgboost puts all of it back.
+
+        capped = False
+        # Models already pinned at the cap are excluded from further redistribution;
+        # letting them absorb someone else's excess would lift them back over it.
+        pinned: set[str] = set()
+
+        # Bounded by the model count: each pass pins at least one model at the cap.
+        for _ in range(len(shares)):
+            over = [
+                name for name, s in shares.items()
+                if name not in pinned and s > cap + 1e-12
+            ]
+            if not over:
+                break
+            capped = True
+
+            excess = sum(shares[name] - cap for name in over)
+            for name in over:
+                shares[name] = cap
+                pinned.add(name)
+
+            under = [name for name in shares if name not in pinned]
+            if not under:
+                break
+
+            under_total = sum(shares[name] for name in under)
+            for name in under:
+                share = shares[name] / under_total if under_total > 0.0 else 1.0 / len(under)
+                shares[name] += excess * share
+
+        return shares, capped
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -119,22 +211,10 @@ class Ensemble:
     def _combine(
         self, ctx: MarketContext, contributors: list[ModelResult]
     ) -> EnsembleResult:
-        weighted_sum = 0.0
-        weight_total = 0.0
+        shares, weight_capped = self._effective_shares(contributors)
 
-        for result in contributors:
-            weight = self.weight_for(result.model_name)
-            if result.degraded:
-                weight *= self._degraded_weight_factor
-            weighted_sum += weight * result.signed_score
-            weight_total += weight
-
-        # Guard against a configuration where every participating model has zero
-        # weight; fall back to an unweighted mean rather than dividing by zero.
-        if weight_total <= 0.0:
-            score = sum(r.signed_score for r in contributors) / len(contributors)
-        else:
-            score = weighted_sum / weight_total
+        # Shares already sum to 1.0, so this is the weighted mean outright.
+        score = sum(shares[r.model_name] * r.signed_score for r in contributors)
 
         direction, confidence = score_to_direction(score, self._dead_zone)
         confidence, agreement = self._apply_agreement(
@@ -142,7 +222,24 @@ class Ensemble:
         )
 
         rationale = self._build_rationale(direction, contributors)
-        signals = self._build_signals(ctx, score, agreement, contributors)
+        signals = self._build_signals(
+            ctx, score, agreement, contributors, shares, weight_capped
+        )
+
+        if weight_capped:
+            # Said out loud because it means the ensemble is running degraded: the
+            # configured split is not the split in force, and which models are
+            # missing is the actual news.
+            log.warning(
+                "ensemble_weight_capped",
+                symbol=ctx.symbol,
+                cap=self._max_single_weight,
+                configured={c.model_name: self.weight_for(c.model_name)
+                            for c in contributors},
+                effective={name: round(s, 4) for name, s in shares.items()},
+                absent=[m.name for m in self._models
+                        if m.name not in shares and self.weight_for(m.name) > 0.0],
+            )
 
         log.info(
             "ensemble_verdict",
@@ -152,6 +249,8 @@ class Ensemble:
             score=round(score, 4),
             agreement=agreement,
             models=[c.model_name for c in contributors],
+            effective_weights={name: round(s, 4) for name, s in shares.items()},
+            weight_capped=weight_capped,
         )
 
         return EnsembleResult(
@@ -223,17 +322,31 @@ class Ensemble:
         score: float,
         agreement: str,
         contributors: list[ModelResult],
+        shares: dict[str, float],
+        weight_capped: bool,
     ) -> dict:
         """Everything an audit of this prediction would need, for Kafka and JSONB."""
         return {
             "ensemble_score": round(score, 4),
             "agreement": agreement,
             "dead_zone": self._dead_zone,
+            # Which models were configured to vote but did not answer. Reading this
+            # off a stored prediction is how you tell a full run from a degraded one
+            # without having to still have the logs.
+            "absent_models": sorted(
+                m.name for m in self._models
+                if m.name not in shares and self.weight_for(m.name) > 0.0
+            ),
+            "weight_capped": weight_capped,
+            "max_single_weight": self._max_single_weight,
             "models": {
                 c.model_name: {
                     "direction": c.direction,
                     "confidence": round(c.confidence, 4),
                     "weight": self.weight_for(c.model_name),
+                    # What the model's vote was actually worth here, after
+                    # abstentions were renormalised away and the cap applied.
+                    "effective_weight": round(shares.get(c.model_name, 0.0), 4),
                     "signed_score": round(c.signed_score, 4),
                     "version": c.model_version,
                     "latency_ms": round(c.latency_ms, 1),

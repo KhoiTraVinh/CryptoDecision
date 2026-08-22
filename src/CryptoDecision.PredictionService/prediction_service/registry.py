@@ -57,13 +57,19 @@ def _build() -> tuple[Ensemble, LlmModel | None]:
         dead_zone=settings.ensemble_dead_zone,
         agreement_bonus=settings.ensemble_agreement_bonus,
         conflict_penalty=settings.ensemble_conflict_penalty,
+        max_single_weight=settings.ensemble_max_single_weight,
     )
 
+    # available_at_build is not the same as "will vote": XgboostModel reports
+    # unavailable until a model.pkl exists, so logging the model list alone made a
+    # permanently-abstaining model look like a participant.
     log.info(
         "ensemble_built",
         models=[m.name for m in models],
+        available=[m.name for m in models if m.is_available()],
         weights=settings.ensemble_weights(),
         dead_zone=settings.ensemble_dead_zone,
+        max_single_weight=settings.ensemble_max_single_weight,
     )
     return ensemble, llm
 

@@ -131,6 +131,23 @@ class Settings:
     ensemble_conflict_penalty: float = field(
         default_factory=lambda: _env_float("ENSEMBLE_CONFLICT_PENALTY", 0.25)
     )
+    #: Ceiling on any one model's share of the vote after abstentions are
+    #: renormalised away.
+    #:
+    #: Renormalising over the models that answered is correct — an absent model
+    #: must not drag the verdict toward NEUTRAL — but it silently promotes whoever
+    #: is left. With xgboost abstaining for want of a trained model.pkl, the
+    #: configured 0.35/0.35/0.30 became llm 0.538 / heuristic 0.462: a single 7B
+    #: model holding the majority and deciding direction on its own whenever the
+    #: heuristic disagreed. Nobody chose that; it fell out of the arithmetic.
+    #:
+    #: The cap makes the intent explicit instead — no single model outvotes the
+    #: rest combined. It binds only while models are missing: at the configured
+    #: three-way split the largest share is 0.35, well under the ceiling, so a
+    #: trained xgboost lifts the cap on its own with nothing to revert.
+    ensemble_max_single_weight: float = field(
+        default_factory=lambda: _env_float("ENSEMBLE_MAX_SINGLE_WEIGHT", 0.50)
+    )
 
     # ── Health server ─────────────────────────────────────────────────────────
     health_port: int = field(

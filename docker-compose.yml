@@ -304,7 +304,12 @@ services:
       POSTGRES_URL:             "postgresql://crypto:crypto@postgres:5432/crypto"
       KAFKA_BOOTSTRAP_SERVERS:  "kafka:9092"
       SYMBOLS:                  "SOLUSDT"
-      PREDICTION_INTERVAL_SECONDS: "300"
+      # 150s, down from 300s. The bot evaluates every 30s, so at 300s it read the
+      # same AI direction for ten consecutive cycles. The floor here is LLM
+      # latency, not preference: Qwen 2.5-7B on CPU has been measured at 47-77s
+      # per generation, so a cycle much under ~150s would spend most of itself
+      # waiting and the scheduler would simply run late.
+      PREDICTION_INTERVAL_SECONDS: "150"
       CONTEXT_HISTORY_DAYS:     "7"
 
       # ── LLM (Ollama / Qwen 2.5) ──
@@ -323,6 +328,12 @@ services:
       ENSEMBLE_WEIGHT_HEURISTIC: "0.30"
       # |score| below this is reported NEUTRAL rather than a weak directional call.
       ENSEMBLE_DEAD_ZONE:        "0.15"
+      # Ceiling on one model's share of the vote after abstentions renormalise
+      # away. xgboost abstains until it has a trained model.pkl, and without this
+      # the renormalisation handed the LLM 0.538 — a single 7B model outvoting
+      # everything else. Binds only while models are missing; the full three-way
+      # split tops out at 0.35 and lifts the cap on its own.
+      ENSEMBLE_MAX_SINGLE_WEIGHT: "0.50"
     volumes:
       - prediction_models:/app/models
     depends_on:

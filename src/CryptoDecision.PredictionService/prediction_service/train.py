@@ -78,6 +78,39 @@ def _fetch_data() -> tuple[list[list[float]], list[str]]:
     return X, y
 
 
+def readiness() -> tuple[int, int, int]:
+    """
+    Labeled samples available, the minimum required, and how many symbols supply them.
+
+    Split out so startup can report it without importing xgboost or touching the
+    model file. The weekly retrain already logged its refusal to train, but it
+    only speaks at 02:00 on a Sunday — so XGBoost abstained from every prediction
+    for six days and the only trace was a model_version string. Asking this
+    question on every boot makes a permanently-absent model say so.
+
+    The symbol count matters for reading the shortfall, and is easy to get wrong:
+    _SQL deliberately does not filter by symbol, so every symbol with features
+    contributes a row per day. With three symbols the table gains three samples a
+    day, not one, and "27 samples short" is nine days away rather than twenty-seven.
+
+    Labels need the *following* day's return, so N days of features yield at most
+    N-1 samples per symbol; that is why this counts the join, not the feature table.
+    """
+    import psycopg2
+
+    X, _ = _fetch_data()
+
+    conn = psycopg2.connect(POSTGRES_URL)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(DISTINCT symbol) FROM daily_feature_table")
+            symbols = int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+    return len(X), MIN_SAMPLES, symbols
+
+
 def train() -> None:
     log.info("Fetching training data from PostgreSQL (%s)...", POSTGRES_URL)
     X, y = _fetch_data()
