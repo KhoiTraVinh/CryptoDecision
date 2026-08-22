@@ -154,6 +154,14 @@ else
             "[Startup] OKX credentials authenticated. Account level {Level}, position mode {PosMode}.",
             config.AccountLevel, config.PosMode);
 
+        if (!config.CanTrade)
+            startupLog.LogCritical(
+                "[Startup] This OKX API key is READ-ONLY (perm={Perm}). It authenticates and reads " +
+                "balances fine, but every order will be refused with code 50123. Enable the Trade " +
+                "permission on the key in the OKX API settings, or create one that has it. The bot " +
+                "will refuse to start in live mode until then.",
+                config.Permissions);
+
         // Account level 1 is spot-only and cannot hold a swap position, so every
         // order this bot places would be refused. Worth saying now, in the words
         // of the setting the operator has to change.
@@ -199,6 +207,8 @@ static string DescribeAuthFailure(string code, bool demoTrading) => code switch
     "50110" => "The caller IP is not on this key's allowlist. Add the host's public IP to the " +
                "key in the OKX API settings, or remove the IP restriction.",
     "50119" => "API key does not exist.",
+    "50123" => "This key is read-only. Enable the Trade permission on it in the OKX API settings, " +
+               "or create a key that has it.",
     _       => "See the OKX API error code reference for this code.",
 };
 

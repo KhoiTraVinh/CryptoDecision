@@ -41,6 +41,14 @@ public sealed class OkxTradingClient(
     private readonly SemaphoreSlim _configGate = new(1, 1);
     private readonly HashSet<string> _leverageSet = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Null until the account config has been read; then whether this key may place
+    /// orders. Exposed so the engine's synchronous refusal check can consult it
+    /// without an API call, which is what lets the bot refuse to start on a
+    /// read-only key rather than discovering it one signal at a time.
+    /// </summary>
+    public bool? CanTrade => _accountConfig?.CanTrade;
+
     // ── Account ───────────────────────────────────────────────────────────────
 
     /// <summary>Free margin balance of one currency — what a new position may commit.</summary>
@@ -75,8 +83,10 @@ public sealed class OkxTradingClient(
                     "OKX returned no account configuration, so position mode is unknown.");
 
             log.LogInformation(
-                "[OKX] Account config: posMode={PosMode} acctLv={Level} (hedge mode: {Hedge})",
-                _accountConfig.PosMode, _accountConfig.AccountLevel, _accountConfig.IsHedgeMode);
+                "[OKX] Account config: posMode={PosMode} acctLv={Level} perm={Perm} " +
+                "(hedge mode: {Hedge}, can trade: {CanTrade})",
+                _accountConfig.PosMode, _accountConfig.AccountLevel, _accountConfig.Permissions,
+                _accountConfig.IsHedgeMode, _accountConfig.CanTrade);
 
             return _accountConfig;
         }

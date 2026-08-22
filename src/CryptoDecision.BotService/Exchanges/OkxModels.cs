@@ -100,11 +100,27 @@ public sealed record OkxInstrument(
 /// </summary>
 public sealed record OkxAccountConfig(
     [property: JsonPropertyName("posMode")] string? PosMode,
-    [property: JsonPropertyName("acctLv")]  string? AccountLevel
+    [property: JsonPropertyName("acctLv")]  string? AccountLevel,
+    [property: JsonPropertyName("perm")]    string? Permissions
 )
 {
     public bool IsHedgeMode =>
         string.Equals(PosMode, "long_short_mode", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether this key may place orders.
+    ///
+    /// Authenticating and being allowed to trade are different questions, and the
+    /// gap between them is invisible from any read call: a read_only key passes a
+    /// credential check, reports the account level, returns balances and max order
+    /// sizes, and is refused only at the moment an order is submitted — as code
+    /// 50123, once per signal, in a catch block designed to keep one bad order from
+    /// killing the cycle. So it is asked here instead, from the permission list OKX
+    /// returns alongside everything else.
+    /// </summary>
+    public bool CanTrade =>
+        Permissions is not null
+        && Permissions.Split(',').Any(p => p.Trim().Equals("trade", StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>

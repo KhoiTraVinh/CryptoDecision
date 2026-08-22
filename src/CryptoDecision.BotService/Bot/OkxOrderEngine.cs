@@ -54,6 +54,21 @@ public sealed class OkxOrderEngine(
         var configRefusal = okxOptions.DescribeRefusal();
         if (configRefusal is not null) return configRefusal;
 
+        // ── Can this key actually place an order? ──
+        //
+        // A read_only key authenticates, reports the account level, returns balances
+        // and max order sizes, and is refused only when an order is submitted — as
+        // code 50123, once per signal, inside the catch that keeps one bad order
+        // from killing the cycle. So the bot logged an error every 30 seconds and
+        // looked healthy while placing nothing. Asked here instead, from the
+        // permission list the account config already carries, it blocks the start
+        // with something an operator can act on. Null means the config has not been
+        // read yet, which is not a refusal — the startup probe fills it in.
+        if (trading.CanTrade == false)
+            return "this OKX API key is read-only. Enable the Trade permission on it in the OKX API " +
+                   "settings, or create a key that has it — a read-only key authenticates fine and " +
+                   "is refused only at the moment an order is placed (code 50123).";
+
         // ── Would the stop loss actually get there first? ──
         //
         // This is the failure mode leverage introduces and spot does not have. With
