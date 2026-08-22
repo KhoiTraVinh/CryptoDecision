@@ -121,12 +121,68 @@ public sealed class OkxSignedClient(
                 $"with a body that is not an OKX envelope: {Truncate(text)}");
 
         if (envelope.Code != "0")
+        {
+            // The outer code is often the useless half of the answer. OKX reports a
+            // batch that failed as code "1" with msg "All operations failed", and puts
+            // the reason a caller can act on in data[0].sCode / sMsg — so throwing on
+            // the outer pair alone reported every rejected order, whatever the cause,
+            // as "All operations failed". PlaceSwapMarketOrderAsync has a per-entry
+            // check for exactly this, and it never ran: this throw fires first.
+            var entryCode    = (string?)null;
+            var entryMessage = (string?)null;
+
+            if (DescribePerEntryFailure(text) is { } detail)
+            {
+                entryCode    = detail.Code;
+                entryMessage = detail.Message;
+            }
+
             throw new OkxApiException(
-                envelope.Code,
+                entryCode ?? envelope.Code,
                 $"OKX rejected {method.Method} {pathWithQuery}: code={envelope.Code} " +
-                $"msg={envelope.Msg ?? "(none)"}");
+                $"msg={envelope.Msg ?? "(none)"}" +
+                (entryCode is not null ? $" — sCode={entryCode} sMsg={entryMessage}" : "") +
+                $" [raw: {Truncate(text)}]");
+        }
 
         return envelope.Data ?? [];
+    }
+
+    /// <summary>
+    /// Pull the first per-entry failure out of a response body, if it has one.
+    ///
+    /// Read from the raw JSON rather than the typed envelope because the entry shape
+    /// differs per endpoint and the failure fields are the same everywhere. Returns
+    /// null when there is no nested reason, which is the normal case for an
+    /// envelope-level rejection like a bad signature.
+    /// </summary>
+    private static (string Code, string Message)? DescribePerEntryFailure(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+
+            if (!doc.RootElement.TryGetProperty("data", out var data)
+                || data.ValueKind != JsonValueKind.Array)
+                return null;
+
+            foreach (var entry in data.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object) continue;
+
+                var sCode = entry.TryGetProperty("sCode", out var c) ? c.GetString() : null;
+                if (string.IsNullOrEmpty(sCode) || sCode == "0") continue;
+
+                var sMsg = entry.TryGetProperty("sMsg", out var m) ? m.GetString() : null;
+                return (sCode, sMsg ?? "(no sMsg)");
+            }
+        }
+        catch (JsonException)
+        {
+            // Already reported through the raw body in the caller's message.
+        }
+
+        return null;
     }
 
     private static string Truncate(string s, int max = 300)
