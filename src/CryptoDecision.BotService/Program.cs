@@ -109,8 +109,12 @@ builder.Services.AddSingleton<TradingAgent>();
 
 
 // ─── Health Checks ─────────────────────────────────────────────────────────────
+// Two checks, because "can this process reach the database" and "is this process
+// trading" are different questions and only the first was ever asked. See
+// TradingLoopHealthCheck for the 64 minutes that bought.
 builder.Services.AddHealthChecks()
-    .AddNpgSql(pgConnStr, name: "postgres", tags: ["db"]);
+    .AddNpgSql(pgConnStr, name: "postgres", tags: ["db"])
+    .AddCheck<TradingLoopHealthCheck>("trading_loop", tags: ["bot"]);
 builder.Services.AddHostedService<HealthCheckHttpServer>();
 
 var host = builder.Build();

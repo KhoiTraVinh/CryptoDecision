@@ -14,6 +14,7 @@ public sealed class BotStateService
     private List<BotTrade>   _openTrades   = new();
     private DateTime?        _lastEvalAt   = null;
     private DateTime?        _lastClosedAt = null;
+    private DateTime?        _runningSince = null;
     private Dictionary<string, DateTime> _lastEntryAtByStrategy = new();
 
     // Aggregate stats (in-memory, reconciled from DB on start)
@@ -28,15 +29,29 @@ public sealed class BotStateService
 
     public void Start(BotOptions opts)
     {
-        lock (_lock) { _isRunning = true; Options = opts; }
+        lock (_lock)
+        {
+            // Stamped only on the transition into running. The worker calls Start on
+            // every cycle to pick up configuration changes, so stamping it
+            // unconditionally would push the clock forward forever — and a loop that
+            // hung before completing its very first cycle would look freshly started
+            // for as long as it stayed hung.
+            if (!_isRunning) _runningSince = DateTime.UtcNow;
+
+            _isRunning = true;
+            Options    = opts;
+        }
     }
 
     public void Stop()
     {
-        lock (_lock) { _isRunning = false; }
+        lock (_lock) { _isRunning = false; _runningSince = null; }
     }
 
     public bool IsRunning { get { lock (_lock) return _isRunning; } }
+
+    /// <summary>When the bot last went from stopped to running, or null if stopped.</summary>
+    public DateTime? RunningSince { get { lock (_lock) return _runningSince; } }
 
     // ── Open trades ───────────────────────────────────────────────────────────
 

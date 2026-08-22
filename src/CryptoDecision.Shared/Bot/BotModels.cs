@@ -204,6 +204,27 @@ public sealed record BotStatus(
 
 public sealed record EntryDecision(bool Pass, string Side = "BUY", decimal Confidence = 1.0m, string? Rationale = null);
 
+/// <summary>
+/// How long the bot may go without starting an evaluation before it is stalled
+/// rather than merely between cycles.
+///
+/// One definition, because there are now two callers with different views of the
+/// same fact — the API judging a heartbeat column, and the bot's own health check
+/// judging its in-process clock — and two copies of this arithmetic would drift
+/// into disagreeing about whether the bot is alive.
+///
+/// The window has to cover a whole cycle, not a fixed minute. With the AI agent
+/// enabled one cycle is the eval interval plus three sequential LLM tool calls,
+/// which on CPU runs 60-90s, so a flat 60s threshold reported a perfectly healthy
+/// bot as dead between heartbeats. Four intervals with a 180s floor covers that
+/// while still noticing a genuinely stopped loop within a few minutes.
+/// </summary>
+public static class BotLiveness
+{
+    public static TimeSpan StaleAfter(int evalIntervalSeconds) =>
+        TimeSpan.FromSeconds(Math.Max(180, evalIntervalSeconds * 4));
+}
+
 // ── API DTO ───────────────────────────────────────────────────────────────────
 
 public sealed record BotTradeDto(

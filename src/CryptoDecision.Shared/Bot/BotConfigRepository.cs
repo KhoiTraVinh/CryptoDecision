@@ -353,14 +353,9 @@ public sealed class BotConfigStatus
     /// <summary>
     /// Whether the bot worker is still alive, judged from its last heartbeat.
     ///
-    /// The window has to cover a whole evaluation cycle, not a fixed minute. With the
-    /// AI agent enabled a single cycle is the eval interval plus three sequential LLM
-    /// tool calls, which on CPU runs 60-90s — so a flat 60s threshold reported a
-    /// perfectly healthy bot as STOPPED between heartbeats, and the dashboard flipped
-    /// back and forth.
-    ///
-    /// Four intervals with a 180s floor covers an agent cycle comfortably while still
-    /// noticing a genuinely dead worker within a few minutes.
+    /// The staleness window lives in <see cref="BotLiveness"/> — the bot's own health
+    /// check asks the same question of its in-process clock, and the two answers
+    /// disagreeing about whether the bot is alive would be worse than either alone.
     /// </summary>
     public bool IsWorkerAlive
     {
@@ -368,8 +363,8 @@ public sealed class BotConfigStatus
         {
             if (!LastHeartbeat.HasValue) return false;
 
-            var window = Math.Max(180, EvalIntervalSeconds * 4);
-            return (DateTime.UtcNow - LastHeartbeat.Value).TotalSeconds < window;
+            return DateTime.UtcNow - LastHeartbeat.Value
+                   < BotLiveness.StaleAfter(EvalIntervalSeconds);
         }
     }
 }
