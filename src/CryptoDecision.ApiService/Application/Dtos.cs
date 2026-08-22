@@ -64,7 +64,19 @@ public sealed record DashboardDto(
     decimal? Confidence,
     string?  Rationale,
     string?  ModelVersion,
-    DateTime AsOf
+    DateTime AsOf,
+
+    // How the verdict was reached, and what was missing when it was. A confidence
+    // number on its own cannot distinguish three models agreeing from one model
+    // being the only one that took a side.
+    string?   Agreement    = null,
+    string[]? AbsentModels = null,
+    bool      WeightCapped = false,
+
+    // When the prediction was made, not when it was fetched. The prediction cycle
+    // runs every 150s while the bot evaluates every 30s, so a displayed signal is
+    // routinely a few minutes old and the age is part of reading it honestly.
+    DateTime? PredictedAt  = null
 );
 
 public sealed record MomentumDto(

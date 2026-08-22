@@ -19,7 +19,21 @@ public sealed record Prediction(
     decimal  Confidence,
     string   ModelVersion,
     string   Rationale,
-    DateTime CreatedAt
+    DateTime CreatedAt,
+
+    // Read out of the signals JSONB, because how the verdict was reached decides
+    // how much to trust it. "unanimous" across three models and "insufficient"
+    // because only one model took a side are very different claims that were
+    // rendering as the same confidence percentage.
+    string?  Agreement    = null,
+
+    // Models configured to vote that did not answer. XGBoost abstained for six days
+    // for want of a trained model.pkl, and the only trace was model_version quietly
+    // reading `ensemble-heuristic+llm`.
+    string[]? AbsentModels = null,
+
+    // Whether a single model's share had to be capped because others abstained.
+    bool     WeightCapped = false
 );
 
 public sealed record MomentumData(

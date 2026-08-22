@@ -87,7 +87,11 @@ public sealed class MarketQueries(
             Confidence:         prediction?.Confidence,
             Rationale:          prediction?.Rationale,
             ModelVersion:       prediction?.ModelVersion,
-            AsOf:               DateTime.UtcNow);
+            AsOf:               DateTime.UtcNow,
+            Agreement:          prediction?.Agreement,
+            AbsentModels:       prediction?.AbsentModels,
+            WeightCapped:       prediction?.WeightCapped ?? false,
+            PredictedAt:        prediction?.CreatedAt);
     }
 
     // ── Momentum ──────────────────────────────────────────────────────────────

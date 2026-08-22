@@ -167,6 +167,40 @@ main {
 .risk-line.warn { border-left-color: var(--warn); color: var(--text); }
 .risk-line.bad  { border-left-color: var(--down); color: var(--down); }
 
+/* Sizing and refusals share the risk line's shape: same column, same rhythm, so
+   the three read as one stack of "what the bot is about to do and why". */
+.sizing-line,
+.refusal-line {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border-left: 3px solid var(--muted);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+}
+
+.sizing-line:empty { display: none; }
+
+.sizing-line.warn  { border-left-color: var(--warn); color: var(--text); }
+.refusal-line.warn { border-left-color: var(--warn); color: var(--text); }
+.refusal-line.bad  { border-left-color: var(--down); color: var(--down); }
+
+/* Wraps rather than truncates: a refusal reason carries the exchange's own words
+   and the useful half is usually at the end. */
+.refusal-line { overflow-wrap: anywhere; }
+
+/* A degraded ensemble is not an error, so it does not get the red treatment — but
+   it changes what the confidence figure above it means, so it cannot be muted
+   into the background either. */
+.signal-warn {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--warn);
+}
+
 /* ── Configuration ────────────────────────────────────────────────────────── */
 
 .config { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }

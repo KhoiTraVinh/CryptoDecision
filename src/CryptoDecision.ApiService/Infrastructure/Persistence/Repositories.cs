@@ -79,8 +79,18 @@ public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredict
 {
     public async Task<Prediction?> GetLatestAsync(string symbol, CancellationToken ct = default)
     {
+        // The agreement/absent-model fields are pulled out of the signals JSONB in
+        // SQL rather than deserialised here: three scalars are wanted, not the whole
+        // audit blob, and postgres already knows how to read them.
         const string sql = """
-            SELECT symbol, date, direction, confidence, model_version, rationale, created_at
+            SELECT symbol, date, direction, confidence, model_version, rationale, created_at,
+                   signals->>'agreement' AS agreement,
+                   COALESCE((signals->>'weight_capped')::boolean, FALSE) AS weight_capped,
+                   COALESCE(
+                       ARRAY(SELECT jsonb_array_elements_text(
+                                        COALESCE(signals->'absent_models', '[]'::jsonb))),
+                       '{}'::text[]
+                   ) AS absent_models
             FROM prediction_table
             WHERE symbol = @symbol
             ORDER BY date DESC, created_at DESC
@@ -101,6 +111,9 @@ public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredict
         var ordModel   = reader.GetOrdinal("model_version");
         var ordRat     = reader.GetOrdinal("rationale");
         var ordCreated = reader.GetOrdinal("created_at");
+        var ordAgree   = reader.GetOrdinal("agreement");
+        var ordCapped  = reader.GetOrdinal("weight_capped");
+        var ordAbsent  = reader.GetOrdinal("absent_models");
 
         return new Prediction(
             Symbol:       reader.GetString(ordSymbol),
@@ -109,7 +122,10 @@ public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredict
             Confidence:   reader.GetDecimal(ordConf),
             ModelVersion: reader.GetString(ordModel),
             Rationale:    reader.IsDBNull(ordRat) ? string.Empty : reader.GetString(ordRat),
-            CreatedAt:    reader.GetDateTime(ordCreated)
+            CreatedAt:    reader.GetDateTime(ordCreated),
+            Agreement:    reader.IsDBNull(ordAgree) ? null : reader.GetString(ordAgree),
+            AbsentModels: reader.IsDBNull(ordAbsent) ? [] : reader.GetFieldValue<string[]>(ordAbsent),
+            WeightCapped: !reader.IsDBNull(ordCapped) && reader.GetBoolean(ordCapped)
         );
     }
 }

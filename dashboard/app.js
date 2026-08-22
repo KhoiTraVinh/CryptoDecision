@@ -334,6 +334,85 @@ function renderStatus(status) {
             ? 'last check ' + new Date(status.lastEvalAt).toLocaleTimeString()
             : '';
     }
+
+    renderSizingLine(status);
+    renderRefusalLine(status);
+}
+
+// ── Sizing ────────────────────────────────────────────────────────────────────
+
+// Both numbers, because they answer different questions. The API re-derives what
+// sizing asks for through the same PositionSizer the bot calls; the note is what
+// the last real order came out as after the venue's lot grid took its cut. Showing
+// only the first hides the grid; only the second hides why.
+function renderSizingLine(status) {
+    const line = el('sizing-line');
+    if (!line) return;
+
+    const notional = status?.sizingNotionalUsd;
+    if (notional == null) { line.textContent = ''; return; }
+
+    const vol = status.volatility;
+    const scalar = status.volatilityScalar;
+    const pct = loadedConfig.positionPctOfCapital;
+    const cap = status.capitalUsd;
+
+    let text = `Next order ${usd(notional)}`;
+    if (pct != null && cap != null) text += ` — ${(pct * 100).toFixed(0)}% of ${usd(cap, 0)}`;
+
+    // Only worth explaining when it actually moved the number.
+    if (scalar != null && scalar < 0.999 && vol != null) {
+        text += `, cut to ${(scalar * 100).toFixed(0)}% by ${Number(vol).toFixed(1)}% volatility`;
+        // The scalar floors at 0.5, and the daily high-low range it reads only ever
+        // widens until 00:00 UTC — so at the floor the size cannot recover today.
+        if (scalar <= 0.501) text += ' (at the floor — no lower, and it holds until 00:00 UTC)';
+    } else if (vol != null) {
+        text += ` at ${Number(vol).toFixed(1)}% volatility`;
+    }
+    text += '.';
+
+    if (status.lastSizingNote) text += ` Last order: ${status.lastSizingNote}.`;
+
+    line.textContent = text;
+    line.className = 'sizing-line' + (scalar != null && scalar <= 0.501 ? ' warn' : '');
+}
+
+// ── Refusals ──────────────────────────────────────────────────────────────────
+
+function renderRefusalLine(status) {
+    const line = el('refusal-line');
+    if (!line) return;
+
+    const count = status?.refusalsToday || 0;
+    const reason = status?.lastRefusalReason;
+
+    // Nothing refused today and nothing on record — stay out of the way.
+    if (!count && !reason) { line.hidden = true; return; }
+
+    const when = status.lastRefusalAt
+        ? new Date(status.lastRefusalAt).toLocaleTimeString()
+        : null;
+
+    let text = count === 1 ? '1 entry refused today' : `${count} entries refused today`;
+    if (!count && reason) text = 'No entries refused today; last refusal';
+    if (when) text += ` · ${when}`;
+    if (reason) text += ` — ${reason}`;
+
+    line.textContent = text;
+    line.hidden = false;
+    // Refusals in a run are the shape worth reacting to: one is a short signal on a
+    // spot account, twenty in a row is the bot unable to trade at all.
+    line.className = 'refusal-line' + (count >= 3 ? ' bad' : count > 0 ? ' warn' : '');
+}
+
+// Short relative age, for values that are routinely minutes old and read wrong
+// without it — the prediction cycle is 150s while the bot evaluates every 30s.
+function ago(iso) {
+    if (!iso) return null;
+    const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    return `${Math.floor(secs / 3600)}h ago`;
 }
 
 // ── Open positions ────────────────────────────────────────────────────────────
@@ -383,7 +462,38 @@ function renderSignal(d) {
     // modelVersion encodes which models actually voted, e.g. ensemble-heuristic+llm.
     // Worth showing: it is how you tell a full run from one made while Ollama was down.
     const model = el('sig-model');
-    if (model) model.textContent = d?.modelVersion ? 'model: ' + d.modelVersion : '';
+    if (model) {
+        const bits = [];
+        if (d?.modelVersion) bits.push('model: ' + d.modelVersion);
+        // "unanimous" across three models and "insufficient" because only one model
+        // took a side render as the same confidence percentage otherwise.
+        if (d?.agreement) bits.push('agreement: ' + d.agreement);
+        const age = ago(d?.predictedAt);
+        if (age) bits.push(age);
+        model.textContent = bits.join(' · ');
+    }
+
+    // An abstaining model is invisible in the verdict but changes what the verdict
+    // means: the survivors' weights are renormalised over them, which is how a 0.35
+    // LLM quietly became a 0.538 majority holder for six days.
+    const warn = el('sig-warn');
+    if (warn) {
+        const absent = d?.absentModels || [];
+        if (absent.length === 0 && !d?.weightCapped) {
+            warn.hidden = true;
+        } else {
+            const parts = [];
+            if (absent.length) {
+                parts.push(
+                    `${absent.join(', ')} did not vote — the remaining models carry the whole verdict`);
+            }
+            if (d?.weightCapped) {
+                parts.push('one model’s share was capped so it cannot outvote the rest');
+            }
+            warn.textContent = parts.join('; ') + '.';
+            warn.hidden = false;
+        }
+    }
 }
 
 // ── Trades ────────────────────────────────────────────────────────────────────

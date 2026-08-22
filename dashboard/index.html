@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0d1117" />
   <title>CryptoDecision</title>
-  <link rel="stylesheet" href="style.css?v=23" />
+  <link rel="stylesheet" href="style.css?v=24" />
 </head>
 
 <body>
@@ -60,6 +60,18 @@
            bot refuses to start on one — so it belongs on screen, not in a log. -->
       <p class="risk-line" id="risk-line"></p>
 
+      <!-- Why the next order will be the size it is. Volatility silently halves
+           position size above the calibration point, and for a whole session the
+           only place that number appeared was the paper engine's log — the one
+           mode where it is not moving real money. A configured $15 order became a
+           refused $4 one with nothing on screen changing. -->
+      <p class="sizing-line" id="sizing-line"></p>
+
+      <!-- A refused entry is a normal outcome, so it was logged and left there.
+           That made a bot which had refused every entry for hours look exactly
+           like one patiently waiting for a signal: RUNNING, healthy, silent. -->
+      <p class="refusal-line" id="refusal-line" hidden></p>
+
       <!-- Read-only. The bot reads its configuration from bot_config, and this
            panel had been static HTML defaults that never matched it — capital 1000
            against an actual 40, ten percent against twenty-five. Worse than a wrong
@@ -91,7 +103,13 @@
         <span class="muted" id="sig-confidence"></span>
       </div>
       <p class="rationale" id="sig-rationale">Waiting for a prediction...</p>
+
+      <!-- Which models actually voted, how much they agreed, and how old the call
+           is. modelVersion alone said `ensemble-heuristic+llm` for six days while
+           XGBoost abstained for want of a trained model.pkl — technically on
+           screen, in practice unreadable. -->
       <p class="muted small" id="sig-model"></p>
+      <p class="signal-warn" id="sig-warn" hidden></p>
     </section>
 
     <!-- ── Where the money is flowing ────────────────────────────────────── -->
@@ -153,7 +171,7 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@8.0.7/dist/browser/signalr.min.js"></script>
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=24"></script>
 </body>
 
 </html>
