@@ -180,39 +180,6 @@ main {
     align-items: center;
 }
 
-.config-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
-    margin: 12px 0;
-}
-
-.config-grid label,
-.toggles label {
-    display: flex;
-    font-size: 13px;
-    color: var(--muted);
-}
-
-.config-grid label { flex-direction: column; gap: 6px; }
-
-.config-grid input[type="number"] {
-    min-height: 46px;
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--text);
-    /* 16px keeps iOS Safari from zooming the page on focus. */
-    font: inherit;
-    font-size: 16px;
-}
-.config-grid input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-
-.toggles { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
-.toggles label { align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
-.toggles input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); }
 
 /* ── Positions ────────────────────────────────────────────────────────────── */
 
@@ -266,16 +233,34 @@ td {
 
 /* ── Desktop ──────────────────────────────────────────────────────────────── */
 
+/* Tablet and small laptops: two columns.
+
+   The P&L headline and the trade table always span the full row. The table has
+   six columns and was being squeezed into half the width while leaving an empty
+   cell beside it. */
 @media (min-width: 720px) {
-    main { grid-template-columns: 1fr 1fr; padding: 24px; }
-    /* Full-width rows: the P&L headline at the top, and the trade table at the
-       bottom. The table has six columns and was being squeezed into half the
-       width while leaving an empty cell beside it. */
+    main { grid-template-columns: 1fr 1fr; max-width: 1040px; padding: 24px; }
     .pnl-card,
     .card.wide { grid-column: 1 / -1; }
-    .config-grid { grid-template-columns: repeat(3, 1fr); }
-    .toggles { flex-direction: row; gap: 20px; flex-wrap: wrap; }
     .pnl-total { font-size: 48px; }
+}
+
+/* Desktop: three columns, and let the page actually use the monitor.
+
+   At the previous 900px cap this read as a phone screen centred in a sea of
+   empty margin — the cards were narrow enough that the volume bars and the
+   six-column trade table both wrapped, on a display with room to spare.
+
+   Volume flow takes two columns because it carries tabs, a split bar and three
+   stat tiles; everything else is comfortable in one. */
+@media (min-width: 1200px) {
+    main { grid-template-columns: repeat(3, 1fr); max-width: 1480px; gap: 20px; }
+    .flow-card { grid-column: span 2; }
+    .pnl-total { font-size: 56px; }
+}
+
+@media (min-width: 1700px) {
+    main { max-width: 1680px; }
 }
 
 /* ── Volume flow ──────────────────────────────────────────────────────────── */
