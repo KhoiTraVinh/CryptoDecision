@@ -1,4 +1,4 @@
-namespace CryptoDecision.BotService.Bot;
+namespace CryptoDecision.Shared.Bot;
 
 /// <summary>The size an order should be, and the reasoning that produced it.</summary>
 /// <param name="NotionalUsd">USD to commit, after every adjustment.</param>

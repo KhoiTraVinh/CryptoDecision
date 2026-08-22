@@ -130,6 +130,25 @@ public sealed class OkxOrderEngine(
 
         var notional = size.NotionalUsd;
 
+        // Say what sizing did, on the same terms PaperOrderEngine does.
+        //
+        // The paper engine logged the volatility haircut and this one did not, so
+        // the single mode where the number moves real money was the mode where it
+        // was invisible. On a 15.8% volatility day the scalar sat pinned at its 0.5
+        // floor, halving every order, and nothing in the log or on the dashboard
+        // said so — the size just quietly stopped matching the configuration.
+        if (size.VolatilityScalar < 1.0)
+            log.LogInformation(
+                "[OKX] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional=${Notional} " +
+                "(from {Pct:P0} of ${Capital})",
+                feature?.Volatility ?? (decimal)PositionSizer.BaseVolatilityPct,
+                size.VolatilityScalar, notional, positionPct, capitalUsd);
+
+        if (useAiSizing && size.ConfidenceScalar != 1.0m)
+            log.LogInformation(
+                "[OKX] AI-sized: confidence={Conf:P0} scalar={Scalar:F2} adjustedPct={Pct:P1}",
+                confidence, size.ConfidenceScalar, size.AdjustedPct);
+
         if (notional > okxOptions.MaxOrderNotionalUsd)
         {
             log.LogWarning(
@@ -158,19 +177,57 @@ public sealed class OkxOrderEngine(
         // for. Flooring onto the lot grid only ever shrinks the order, so checking
         // the request let the real notional slip under the configured minimum.
         var actualNotional = contracts * instrument.ContractValue * price;
+
+        // A request that cleared the minimum and was pushed under it purely by the
+        // grid is the grid's granularity talking, not a risk decision — so round up
+        // rather than refuse.
+        //
+        // This is not hypothetical. With the volatility scalar pinned at its 0.5
+        // floor the request landed on exactly $5.00, the configured minimum: the
+        // pre-floor check passed on `5.00 < 5.00` being false, then flooring to the
+        // 0.01 SOL grid produced $4.02 and the order was refused. Every entry for
+        // hours, while the bot reported RUNNING and every health check stayed green.
+        //
+        // Stepping up is bounded by the per-order ceiling — it may round up to reach
+        // the floor, never past the cap. If one lot up would breach the ceiling the
+        // two limits genuinely cannot both be met, and refusing is then correct.
+        if (actualNotional < okxOptions.MinOrderNotionalUsd
+            && notional >= okxOptions.MinOrderNotionalUsd)
+        {
+            var steppedContracts = contracts + instrument.LotSize;
+            var steppedNotional  = steppedContracts * instrument.ContractValue * price;
+
+            if (steppedNotional <= okxOptions.MaxOrderNotionalUsd)
+            {
+                log.LogInformation(
+                    "[OKX] ${Asked} floors to {Floored} contracts (${FlooredNotional:F2}), under the " +
+                    "${Min} minimum — stepping up one {Lot} lot to {Stepped} contracts " +
+                    "(${SteppedNotional:F2}).",
+                    notional, contracts, actualNotional, okxOptions.MinOrderNotionalUsd,
+                    instrument.LotSize, steppedContracts, steppedNotional);
+
+                contracts      = steppedContracts;
+                actualNotional = steppedNotional;
+            }
+        }
+
         if (actualNotional < okxOptions.MinOrderNotionalUsd)
             throw new InvalidOperationException(
                 $"After flooring to the {instrument.LotSize} lot grid the order is ${actualNotional:F2}, " +
-                $"below the ${okxOptions.MinOrderNotionalUsd} minimum. Raise capital_usd or position_pct.");
+                $"below the ${okxOptions.MinOrderNotionalUsd} minimum, and one lot up would breach the " +
+                $"${okxOptions.MaxOrderNotionalUsd} per-order ceiling. Raise capital_usd or position_pct.");
 
         // ── Is there margin for it? ──
-        var marginNeeded = notional / okxOptions.Leverage;
+        // Off the order actually being sent, not the request. Flooring shrinks it and
+        // the step-up above can nudge it back over, so sizing off `notional` checked
+        // margin against a number that was never placed.
+        var marginNeeded = actualNotional / okxOptions.Leverage;
         var available    = await trading.GetAvailableAsync(instrument.QuoteCcy, ct);
 
         if (available < marginNeeded * 1.05m)
             throw new InvalidOperationException(
                 $"OKX {instrument.QuoteCcy} available balance is {available:F2}, short of the " +
-                $"{marginNeeded:F2} margin this ${notional} position needs at " +
+                $"{marginNeeded:F2} margin this ${actualNotional:F2} position needs at " +
                 $"{okxOptions.Leverage}x. Fund the account or lower the position size.");
 
         // ── Cleared. Place it. ──
