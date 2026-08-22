@@ -255,7 +255,16 @@ td {
    stat tiles; everything else is comfortable in one. */
 @media (min-width: 1200px) {
     main { grid-template-columns: repeat(3, 1fr); max-width: 1480px; gap: 20px; }
-    .flow-card { grid-column: span 2; }
+
+    /* Volume flow takes the whole row rather than two of three columns.
+       Spanning two left a hole: with only one column free after control and
+       positions, the two-column card could not fit beside them and dropped to
+       the next row, taking Signal down with it and leaving the third slot of
+       row two empty. Signal now sits in that slot — it is a one-column card and
+       belongs beside the position it explains — and flow gets a full row, which
+       the split bar and its three stat tiles use better than two columns did. */
+    .flow-card { grid-column: 1 / -1; }
+
     .pnl-total { font-size: 56px; }
 }
 
