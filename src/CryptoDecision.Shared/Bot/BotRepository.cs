@@ -199,17 +199,33 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
 
     // ── Daily P&L for loss limit check ────────────────────────────────────────
 
-    public async Task<decimal> GetTodayPnlAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Today's realised P&amp;L, optionally narrowed to one instrument and one
+    /// execution mode.
+    ///
+    /// The narrowing matters because this number is what the daily-loss circuit
+    /// breaker acts on. Summed across modes, a run of simulated profits offsets real
+    /// losses and the limit never trips; summed across symbols, results from an
+    /// instrument the bot is no longer trading decide whether it may keep trading
+    /// the one it is. Both arguments default to null so existing display callers,
+    /// which do want the whole picture, are unaffected.
+    /// </summary>
+    public async Task<decimal> GetTodayPnlAsync(
+        string? symbol = null, string? mode = null, CancellationToken ct = default)
     {
         const string sql = """
             SELECT COALESCE(SUM(pnl_usd), 0)
             FROM bot_trades
             WHERE DATE(closed_at AT TIME ZONE 'UTC') = CURRENT_DATE
               AND status IN ('CLOSED','STOPPED')
+              AND (@symbol IS NULL OR symbol = @symbol)
+              AND (@mode   IS NULL OR mode   = @mode)
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("symbol", symbol ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("mode",   mode   ?? (object)DBNull.Value);
         return (decimal)(await cmd.ExecuteScalarAsync(ct))!;
     }
 

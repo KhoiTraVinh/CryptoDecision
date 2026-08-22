@@ -107,6 +107,22 @@ public sealed record OkxAccountConfig(
         string.Equals(PosMode, "long_short_mode", StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>
+/// What set-leverage echoes back. Typed rather than reusing an order ack so the
+/// confirmed values can be read: the request can succeed while applying to a
+/// different posSide than intended, and an ack shape with no lever field would
+/// hide that.
+/// </summary>
+public sealed record OkxLeverageAck(
+    [property: JsonPropertyName("instId")]  string? InstId,
+    [property: JsonPropertyName("lever")]   string? LeverRaw,
+    [property: JsonPropertyName("mgnMode")] string? MarginMode,
+    [property: JsonPropertyName("posSide")] string? PosSide
+)
+{
+    public decimal? Leverage => OkxNum.ParseOrNull(LeverRaw);
+}
+
 // ── Positions ────────────────────────────────────────────────────────────────
 
 /// <summary>

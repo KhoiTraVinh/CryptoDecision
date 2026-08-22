@@ -165,7 +165,8 @@ public sealed class GetAccountStateTool(BotRepository repo, AgentContext context
         try
         {
             var opts     = context.Options;
-            var todayPnl = await repo.GetTodayPnlAsync(ct);
+            var todayPnl = await repo.GetTodayPnlAsync(
+                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE", ct);
             var exposure = context.OpenTrades.Sum(t => t.NotionalUsd);
             var limitUsd = opts.CapitalUsd * opts.DailyLossLimitPct;
             var headroom = limitUsd + todayPnl;   // todayPnl is negative when losing
@@ -271,9 +272,15 @@ public sealed class OpenPositionTool(
         // ── Gate 4: circuit breakers on realised history ──
         try
         {
-            var todayPnl = await repo.GetTodayPnlAsync(ct);
+            // Same narrowing as the deterministic loop: the breakers must judge this
+            // instrument in this execution mode, not whatever else is in the table.
+            var mode     = opts.PaperMode ? "PAPER" : "LIVE";
+            var todayPnl = await repo.GetTodayPnlAsync(opts.Symbol, mode, ct);
             var closed   = (await repo.GetRecentTradesAsync(500, ct))
-                .Where(t => t.Status == "CLOSED").ToList();
+                .Where(t => t.Status is "CLOSED" or "STOPPED")
+                .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
+                .Where(t => string.Equals(t.Mode, mode, StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
             var breach = RiskEngine.CheckCircuitBreakers(closed, opts, todayPnl);
             if (breach is not null)

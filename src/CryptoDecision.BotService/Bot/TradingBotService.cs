@@ -22,9 +22,28 @@ public sealed class TradingBotService(
     {
         log.LogInformation("[TradingBot] Worker Service started. Polling bot_config for commands...");
 
-        // Seed in-memory stats from DB on startup
-        var history = await repo.GetRecentTradesAsync(500, stoppingToken);
-        state.SeedStats(history);
+        // ── Seed in-memory stats from the DB ──
+        //
+        // Narrowed to the configured instrument and execution mode, because these
+        // counters are what the dashboard shows as the bot's record. Unfiltered they
+        // blend simulated results into a live P&L figure, which is the one number an
+        // operator is most likely to act on. Reading the config first is what makes
+        // the narrowing possible at all — Options is still at its defaults here.
+        var seedConfig = await configRepo.GetConfigAsync(stoppingToken);
+        var history    = await repo.GetRecentTradesAsync(500, stoppingToken);
+
+        if (seedConfig is not null)
+        {
+            var seedMode = seedConfig.PaperMode ? "PAPER" : "LIVE";
+            state.SeedStats(history
+                .Where(t => string.Equals(t.Symbol, seedConfig.Symbol, StringComparison.OrdinalIgnoreCase))
+                .Where(t => string.Equals(t.Mode, seedMode, StringComparison.OrdinalIgnoreCase))
+                .ToList());
+        }
+        else
+        {
+            state.SeedStats(history);
+        }
 
         // Take over anything still open before the loop can open more.
         await RecoverOpenPositionsAsync(stoppingToken);
@@ -316,9 +335,20 @@ public sealed class TradingBotService(
         // ── 1. Circuit breakers ───────────────────────────────────────────────
         // Daily loss limit, consecutive-loss streak and realised drawdown. Any
         // breach stops the bot rather than letting a losing regime compound.
-        var todayPnl     = await repo.GetTodayPnlAsync(ct);
+        // Narrowed to this instrument and this execution mode on purpose.
+        //
+        // Unfiltered, the breakers read whatever is in the table: a paper session's
+        // simulated profits offset real losses so the daily limit never trips, a
+        // paper losing streak halts a live bot that has done nothing wrong, and
+        // results from a symbol the bot no longer trades decide whether it may keep
+        // trading the one it does. The breakers should judge the account they are
+        // protecting, and nothing else.
+        var mode         = opts.PaperMode ? "PAPER" : "LIVE";
+        var todayPnl     = await repo.GetTodayPnlAsync(opts.Symbol, mode, ct);
         var closedTrades = (await repo.GetRecentTradesAsync(500, ct))
-            .Where(t => t.Status == "CLOSED")
+            .Where(t => t.Status is "CLOSED" or "STOPPED")
+            .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
+            .Where(t => string.Equals(t.Mode, mode, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var breach = RiskEngine.CheckCircuitBreakers(closedTrades, opts, todayPnl);

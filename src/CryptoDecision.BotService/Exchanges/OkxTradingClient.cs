@@ -99,21 +99,42 @@ public sealed class OkxTradingClient(
         lock (_leverageSet)
             if (_leverageSet.Contains(instId)) return;
 
-        var payload = new
-        {
-            instId,
-            lever   = OkxNum.Format(opts.Leverage),
-            mgnMode = opts.MarginMode,
-        };
+        var config = await GetAccountConfigAsync(ct);
 
-        await client.PostPrivateAsync<OkxAlgoAck>("/api/v5/account/set-leverage", payload, ct);
+        // Isolated margin in hedge mode keeps leverage per position side, so the
+        // request is rejected outright without posSide — verified against the live
+        // account: HTTP 400 without it, code 0 with it. Both sides are set, because
+        // the strategy trades both and discovering the gap at the first SHORT signal
+        // means losing that signal.
+        //
+        // Cross margin and net mode keep one leverage per instrument, and reject
+        // posSide, so the field has to be absent rather than empty there.
+        var needsPositionSide = config.IsHedgeMode
+            && string.Equals(opts.MarginMode, "isolated", StringComparison.OrdinalIgnoreCase);
+
+        var sides = needsPositionSide ? new[] { "long", "short" } : [null];
+
+        foreach (var side in sides)
+        {
+            var payload = new Dictionary<string, object>
+            {
+                ["instId"]  = instId,
+                ["lever"]   = OkxNum.Format(opts.Leverage),
+                ["mgnMode"] = opts.MarginMode,
+            };
+
+            if (side is not null) payload["posSide"] = side;
+
+            await client.PostPrivateAsync<OkxLeverageAck>("/api/v5/account/set-leverage", payload, ct);
+        }
 
         lock (_leverageSet)
             _leverageSet.Add(instId);
 
         log.LogInformation(
-            "[OKX] Leverage for {InstId} set to {Lever}x {Mode} margin.",
-            instId, opts.Leverage, opts.MarginMode);
+            "[OKX] Leverage for {InstId} set to {Lever}x {Mode} margin{Sides}.",
+            instId, opts.Leverage, opts.MarginMode,
+            needsPositionSide ? " (long and short)" : "");
     }
 
     /// <summary>
