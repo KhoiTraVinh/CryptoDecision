@@ -178,7 +178,28 @@ public sealed record BotStatus(
     int       WinCount,
     int       LossCount,
     int       OpenTradeCount,
-    DateTime? LastEvalAt
+    DateTime? LastEvalAt,
+
+    // Everything below defaults, so the three call sites that build a BotStatus
+    // keep compiling and each fills in only what it can actually see: the API
+    // reads the persisted refusal trail, the bot's own in-process status cannot.
+    //
+    // These exist because "is it running?" and "is it doing anything?" turned out
+    // to be different questions. A bot refusing every entry answered yes to the
+    // first and nothing on screen answered the second.
+    string?   LastRefusalReason = null,
+    DateTime? LastRefusalAt     = null,
+    int       RefusalsToday     = 0,
+
+    // What sizing is asking for right now, re-derived from the same PositionSizer
+    // the bot uses rather than reimplemented — one copy of the arithmetic.
+    decimal?  Volatility        = null,
+    double?   VolatilityScalar  = null,
+    decimal?  SizingNotionalUsd = null,
+
+    // What the last real attempt produced, which only the bot can know: the venue's
+    // lot grid is applied there, not here.
+    string?   LastSizingNote    = null
 );
 
 public sealed record EntryDecision(bool Pass, string Side = "BUY", decimal Confidence = 1.0m, string? Rationale = null);

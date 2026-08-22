@@ -492,6 +492,16 @@ public sealed class TradingBotService(
 
                             state.AddOpenTrade(trade);
                             state.SetLastEntryAt(strat, DateTime.UtcNow);
+
+                            // Recorded so the dashboard can show what sizing actually
+                            // produced, not only what it asked for. The venue's lot
+                            // grid is applied inside the order engine, so this is the
+                            // only place the surviving number is known.
+                            await SafeRecordAsync(
+                                configRepo.RecordSizingNoteAsync(
+                                    $"{trade.Quantity} {opts.Symbol} @ ${trade.EntryPrice} " +
+                                    $"= ${trade.NotionalUsd:F2} ({strat} {decision.Side})", ct),
+                                "sizing note");
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -503,10 +513,40 @@ public sealed class TradingBotService(
                             log.LogError(ex,
                                 "[TradingBot] Entry for {Strat} ({Side}) was not placed: {Message}",
                                 strat, decision.Side, ex.Message);
+
+                            // Normal does not mean invisible. Logging alone left a bot
+                            // that had refused every entry for hours looking identical
+                            // to one waiting for a signal — RUNNING, healthy, silent.
+                            // Persisting it puts the reason where the operator is
+                            // already looking.
+                            await SafeRecordAsync(
+                                configRepo.RecordEntryRefusalAsync(
+                                    $"{strat} {decision.Side}: {ex.Message}", ct),
+                                "entry refusal");
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Await a bookkeeping write, swallowing its failure.
+    ///
+    /// These writes exist to make the bot's behaviour visible; none of them is worth
+    /// stopping trading over. The refusal case matters most: it runs inside a catch
+    /// block, so an exception escaping here would replace the real reason an entry
+    /// was refused with a database error and lose the thing being reported.
+    /// </summary>
+    private async Task SafeRecordAsync(Task write, string what)
+    {
+        try
+        {
+            await write;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning(ex, "[TradingBot] Could not persist {What}.", what);
         }
     }
 }

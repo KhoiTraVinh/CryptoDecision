@@ -161,6 +161,68 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Record that an entry was not placed, and why (used by Bot worker).
+    ///
+    /// A refused entry is a normal outcome — a short signal on a spot account, an
+    /// order under the exchange minimum — so it was logged at Error and left there.
+    /// That is exactly the failure shape worth surfacing: the bot reported RUNNING,
+    /// every health check passed, and it had refused every entry for hours with the
+    /// only evidence buried in `docker compose logs`. The operator's first sign of
+    /// trouble was noticing on the exchange that nothing had traded.
+    ///
+    /// Written to bot_config because the API is a separate process and cannot read
+    /// the worker's memory. The counter resets on date change rather than being
+    /// cleared by anyone, so a quiet morning cannot hide behind yesterday's total.
+    /// </summary>
+    public async Task RecordEntryRefusalAsync(
+        string reason, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_config
+            SET last_refusal_reason = @reason,
+                last_refusal_at     = NOW(),
+                refusal_count       = CASE
+                                          WHEN refusal_count_date = CURRENT_DATE
+                                          THEN refusal_count + 1
+                                          ELSE 1
+                                      END,
+                refusal_count_date  = CURRENT_DATE,
+                updated_at          = NOW()
+            WHERE id = 1
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        // Truncated: this lands on a dashboard line, and an exception message with a
+        // stack-trace tail would push the reason itself off the screen.
+        cmd.Parameters.AddWithValue("reason",
+            reason.Length > 300 ? reason[..300] : reason);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Record what the last sizing decision actually produced (used by Bot worker).
+    ///
+    /// The API can re-derive what <see cref="PositionSizer"/> would ask for, but not
+    /// what survived the venue's lot grid — so the number that was really sent has
+    /// to come from the process that sent it.
+    /// </summary>
+    public async Task RecordSizingNoteAsync(string note, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_config
+            SET last_sizing_note = @note, updated_at = NOW()
+            WHERE id = 1
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("note", note.Length > 300 ? note[..300] : note);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     /// <summary>Write stop command to DB (used by API).</summary>
     public async Task StopBotAsync(CancellationToken ct = default)
     {
@@ -174,11 +236,15 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     public async Task<BotConfigStatus> GetStatusAsync(CancellationToken ct = default)
     {
         const string sql = """
-            SELECT enabled, paper_mode, symbol, capital_usd, 
+            SELECT enabled, paper_mode, symbol, capital_usd,
                    last_heartbeat, last_eval_at, open_trade_count,
                    total_trades, total_pnl_usd, win_count, loss_count,
                    active_strategies, max_open_trades_per_strategy,
-                   position_pct, cooldown_seconds, eval_interval_seconds
+                   position_pct, cooldown_seconds, eval_interval_seconds,
+                   take_profit_pct, stop_loss_pct,
+                   last_refusal_reason, last_refusal_at,
+                   COALESCE(refusal_count, 0) AS refusal_count,
+                   refusal_count_date, last_sizing_note
             FROM bot_config WHERE id = 1
             """;
 
@@ -188,24 +254,56 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         if (!await r.ReadAsync(ct))
             return new BotConfigStatus();
 
+        // By name, for the same reason GetConfigAsync is: this method read by ordinal,
+        // so adding a column anywhere but the end renumbered every field after it and
+        // fed the wrong number into a status display. Names make that impossible and
+        // cost one dictionary lookup each.
+        decimal? Nullable(string column)
+        {
+            var i = r.GetOrdinal(column);
+            return r.IsDBNull(i) ? null : r.GetDecimal(i);
+        }
+
+        DateTime? Stamp(string column)
+        {
+            var i = r.GetOrdinal(column);
+            return r.IsDBNull(i) ? null : r.GetDateTime(i);
+        }
+
+        string? Text(string column)
+        {
+            var i = r.GetOrdinal(column);
+            return r.IsDBNull(i) ? null : r.GetString(i);
+        }
+
         return new BotConfigStatus
         {
-            Enabled              = r.GetBoolean(0),
-            PaperMode            = r.GetBoolean(1),
-            Symbol               = r.GetString(2),
-            CapitalUsd           = r.GetDecimal(3),
-            LastHeartbeat        = r.IsDBNull(4) ? null : r.GetDateTime(4),
-            LastEvalAt           = r.IsDBNull(5) ? null : r.GetDateTime(5),
-            OpenTradeCount       = r.GetInt32(6),
-            TotalTrades          = r.GetInt32(7),
-            TotalPnlUsd          = r.GetDecimal(8),
-            WinCount             = r.GetInt32(9),
-            LossCount            = r.GetInt32(10),
-            ActiveStrategies     = ((string[])r.GetValue(11)).ToList(),
-            MaxOpenTradesPerStrategy = r.GetInt32(12),
-            PositionPctOfCapital = r.GetDecimal(13),
-            CooldownSeconds      = r.GetInt32(14),
-            EvalIntervalSeconds  = r.GetInt32(15),
+            Enabled              = r.GetBoolean(r.GetOrdinal("enabled")),
+            PaperMode            = r.GetBoolean(r.GetOrdinal("paper_mode")),
+            Symbol               = r.GetString(r.GetOrdinal("symbol")),
+            CapitalUsd           = r.GetDecimal(r.GetOrdinal("capital_usd")),
+            LastHeartbeat        = Stamp("last_heartbeat"),
+            LastEvalAt           = Stamp("last_eval_at"),
+            OpenTradeCount       = r.GetInt32(r.GetOrdinal("open_trade_count")),
+            TotalTrades          = r.GetInt32(r.GetOrdinal("total_trades")),
+            TotalPnlUsd          = r.GetDecimal(r.GetOrdinal("total_pnl_usd")),
+            WinCount             = r.GetInt32(r.GetOrdinal("win_count")),
+            LossCount            = r.GetInt32(r.GetOrdinal("loss_count")),
+            ActiveStrategies     = ((string[])r.GetValue(r.GetOrdinal("active_strategies"))).ToList(),
+            MaxOpenTradesPerStrategy = r.GetInt32(r.GetOrdinal("max_open_trades_per_strategy")),
+            PositionPctOfCapital = r.GetDecimal(r.GetOrdinal("position_pct")),
+            CooldownSeconds      = r.GetInt32(r.GetOrdinal("cooldown_seconds")),
+            EvalIntervalSeconds  = r.GetInt32(r.GetOrdinal("eval_interval_seconds")),
+            TakeProfitPct        = Nullable("take_profit_pct") ?? 0m,
+            StopLossPct          = Nullable("stop_loss_pct")   ?? 0m,
+            LastRefusalReason    = Text("last_refusal_reason"),
+            LastRefusalAt        = Stamp("last_refusal_at"),
+            RefusalCount         = r.GetInt32(r.GetOrdinal("refusal_count")),
+            RefusalCountDate     = r.IsDBNull(r.GetOrdinal("refusal_count_date"))
+                                       ? null
+                                       : DateOnly.FromDateTime(
+                                             r.GetDateTime(r.GetOrdinal("refusal_count_date"))),
+            LastSizingNote       = Text("last_sizing_note"),
         };
     }
 }
@@ -229,6 +327,28 @@ public sealed class BotConfigStatus
     public decimal      PositionPctOfCapital { get; init; } = 0.10m;
     public int          CooldownSeconds      { get; init; } = 120;
     public int          EvalIntervalSeconds  { get; init; } = 30;
+    public decimal      TakeProfitPct        { get; init; }
+    public decimal      StopLossPct          { get; init; }
+
+    /// <summary>Why the last entry was not placed, or null if none has been refused.</summary>
+    public string?      LastRefusalReason    { get; init; }
+    public DateTime?    LastRefusalAt        { get; init; }
+
+    /// <summary>Entries refused on <see cref="RefusalCountDate"/>; see the property below.</summary>
+    public int          RefusalCount         { get; init; }
+    public DateOnly?    RefusalCountDate     { get; init; }
+    public string?      LastSizingNote       { get; init; }
+
+    /// <summary>
+    /// Refusals today, as opposed to whenever the counter was last touched.
+    ///
+    /// The stored counter resets lazily — on the next refusal after a date change —
+    /// so reading it raw would report yesterday's tally all morning until something
+    /// happened to reset it. That is precisely the kind of stale-but-plausible
+    /// number that gets trusted.
+    /// </summary>
+    public int RefusalCountToday =>
+        RefusalCountDate == DateOnly.FromDateTime(DateTime.UtcNow) ? RefusalCount : 0;
 
     /// <summary>
     /// Whether the bot worker is still alive, judged from its last heartbeat.

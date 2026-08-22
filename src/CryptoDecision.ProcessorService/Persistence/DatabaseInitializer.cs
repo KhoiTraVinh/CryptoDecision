@@ -164,7 +164,22 @@ public sealed class DatabaseInitializer(
             BEGIN
                 IF to_regclass('public.bot_config') IS NOT NULL THEN
                     ALTER TABLE bot_config
-                        ADD COLUMN IF NOT EXISTS use_ai_agent BOOLEAN NOT NULL DEFAULT FALSE;
+                        ADD COLUMN IF NOT EXISTS use_ai_agent BOOLEAN NOT NULL DEFAULT FALSE,
+                        -- Why the last entry was not placed, and how many the bot has
+                        -- refused today. A refused entry is a normal outcome and was
+                        -- logged as one, which meant a bot that had refused every
+                        -- entry for hours was indistinguishable on screen from a bot
+                        -- waiting patiently for a signal. Persisted rather than held
+                        -- in memory because the API is a separate process and cannot
+                        -- see the worker's state.
+                        ADD COLUMN IF NOT EXISTS last_refusal_reason TEXT,
+                        ADD COLUMN IF NOT EXISTS last_refusal_at     TIMESTAMPTZ,
+                        ADD COLUMN IF NOT EXISTS refusal_count       INTEGER NOT NULL DEFAULT 0,
+                        ADD COLUMN IF NOT EXISTS refusal_count_date  DATE,
+                        -- What the last real sizing decision produced. The dashboard
+                        -- can compute what sizing *would* ask for, but only the bot
+                        -- knows what survived the exchange's lot grid.
+                        ADD COLUMN IF NOT EXISTS last_sizing_note    TEXT;
                 END IF;
             END
             $$;

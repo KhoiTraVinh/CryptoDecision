@@ -1,3 +1,4 @@
+using CryptoDecision.ApiService.Domain.Interfaces;
 using CryptoDecision.ApiService.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 using CryptoDecision.Shared.Bot;
@@ -8,7 +9,8 @@ namespace CryptoDecision.ApiService.Bot;
 [Route("api/bot")]
 public sealed class BotController(
     BotConfigRepository  configRepo,
-    BotRepository        repo) : ControllerBase
+    BotRepository        repo,
+    IFeatureRepository   featureRepo) : ControllerBase
 {
     // GET /api/bot/status
     [HttpGet("status")]
@@ -16,6 +18,18 @@ public sealed class BotController(
     {
         var cfg = await configRepo.GetStatusAsync(ct);
         var cap = cfg.CapitalUsd;
+
+        // Re-derive the sizing the bot is working with, through the same
+        // PositionSizer it calls. Volatility silently halves position size above the
+        // calibration point and there was no way to see that from outside the bot's
+        // log — which is how a configured $15 order became a refused $4 one without
+        // anybody changing a risk parameter.
+        var feature = await featureRepo.GetTodayAsync(cfg.Symbol, ct);
+        var size    = PositionSizer.Resolve(
+            cap, cfg.PositionPctOfCapital,
+            (double)(feature?.Volatility ?? (decimal)PositionSizer.BaseVolatilityPct),
+            confidence: 1.0m, useAiSizing: false);
+
         return Ok(new BotStatus(
             IsRunning      : cfg.Enabled && cfg.IsWorkerAlive,
             PaperMode      : cfg.PaperMode,
@@ -27,7 +41,16 @@ public sealed class BotController(
             WinCount       : cfg.WinCount,
             LossCount      : cfg.LossCount,
             OpenTradeCount : cfg.OpenTradeCount,
-            LastEvalAt     : cfg.LastEvalAt));
+            LastEvalAt     : cfg.LastEvalAt,
+
+            LastRefusalReason : cfg.LastRefusalReason,
+            LastRefusalAt     : cfg.LastRefusalAt,
+            RefusalsToday     : cfg.RefusalCountToday,
+
+            Volatility        : feature?.Volatility,
+            VolatilityScalar  : size.VolatilityScalar,
+            SizingNotionalUsd : size.NotionalUsd,
+            LastSizingNote    : cfg.LastSizingNote));
     }
 
     // GET /api/bot/config
