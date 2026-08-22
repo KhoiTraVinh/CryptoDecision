@@ -404,3 +404,18 @@ main > .card:nth-child(6) { animation-delay: 300ms; }
         transition-duration: 0.01ms !important;
     }
 }
+
+/* Execution mode: shown in the config panel, never editable there. Colour-coded
+   because "is real money at stake" should be answerable at a glance. */
+.mode-line       { margin: 0 0 12px; font-size: 13px; }
+.mode-line span  { font-weight: 600; letter-spacing: .02em; }
+.mode-live       { color: #ff5c5c; }
+.mode-paper      { color: #7aa2f7; }
+
+/* Read-only configuration view. Two columns so label and value stay associated
+   at a glance; the old form's inputs are gone because they were editable and
+   wrong, which is the worst combination. */
+.config-view          { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
+                        margin: 0 0 12px; font-size: 13px; }
+.config-view dt       { color: var(--muted, #8b949e); }
+.config-view dd       { margin: 0; font-variant-numeric: tabular-nums; }

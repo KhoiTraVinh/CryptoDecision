@@ -30,6 +30,25 @@ public sealed class BotController(
             LastEvalAt     : cfg.LastEvalAt));
     }
 
+    // GET /api/bot/config
+    /// <summary>
+    /// The configuration the bot is actually running, straight from bot_config.
+    ///
+    /// The dashboard needs this because its form was static HTML defaults —
+    /// capital 1000, position 10%, three slots — while the bot ran on 40, 25% and
+    /// two. That is worse than a wrong display: pressing Start posted those
+    /// defaults back, so reading the screen and clicking one button silently
+    /// rewrote the live configuration.
+    /// </summary>
+    [HttpGet("config")]
+    public async Task<IActionResult> GetConfig(CancellationToken ct = default)
+    {
+        var cfg = await configRepo.GetConfigAsync(ct);
+        return cfg is null
+            ? NotFound(new { message = "bot_config row 1 does not exist." })
+            : Ok(cfg);
+    }
+
     // POST /api/bot/start
     [HttpPost("start")]
     public async Task<IActionResult> Start([FromBody] BotStartRequest req, CancellationToken ct = default)

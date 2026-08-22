@@ -60,26 +60,19 @@
            bot refuses to start on one — so it belongs on screen, not in a log. -->
       <p class="risk-line" id="risk-line"></p>
 
+      <!-- Read-only. The bot reads its configuration from bot_config, and this
+           panel had been static HTML defaults that never matched it — capital 1000
+           against an actual 40, ten percent against twenty-five. Worse than a wrong
+           display: pressing Start posted those defaults back, silently rewriting a
+           live configuration and flipping it to paper mode. Configuration changes
+           belong to POST /api/bot/start; this shows what is in force. -->
       <details class="config" id="config">
         <summary>Configuration</summary>
-        <div class="config-grid">
-          <label>Capital (USD)<input type="number" id="cfg-capital" value="1000" min="10" step="10" /></label>
-          <label>Position size %<input type="number" id="cfg-position-pct" value="10" min="1" max="100" step="1" /></label>
-          <label>Take profit %<input type="number" id="cfg-tp" value="2" min="0.5" step="0.1" /></label>
-          <label>Stop loss %<input type="number" id="cfg-sl" value="1.5" min="0.5" step="0.1" /></label>
-          <label>Trailing stop %<input type="number" id="cfg-trailing-pct" value="1.2" min="0.1" step="0.1" /></label>
-          <label>Max positions<input type="number" id="cfg-max-slots" value="3" min="1" max="20" step="1" /></label>
-          <label>Cooldown (s)<input type="number" id="cfg-cooldown" value="120" min="0" step="10" /></label>
-        </div>
-        <div class="toggles">
-          <label><input type="checkbox" id="cfg-trailing" checked /> Trailing stop</label>
-          <label><input type="checkbox" id="cfg-breakeven" checked /> Breakeven stop</label>
-          <label><input type="checkbox" id="cfg-ai-agent" /> Autonomous AI agent</label>
-        </div>
+        <p class="mode-line">Mode: <span id="cfg-mode">loading…</span></p>
+        <dl class="config-view" id="config-view"></dl>
         <p class="muted small">
-          The agent decides entries only. Stop loss, take profit and trailing exits
-          stay automatic, and every order it proposes is checked against the risk
-          limits before it reaches the market.
+          Read-only. Change it with POST /api/bot/start — deliberately not from here,
+          so no click can move a live bot to simulation or resize a position.
         </p>
       </details>
     </section>

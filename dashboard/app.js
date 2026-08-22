@@ -16,6 +16,11 @@ let botRunning = false;
 let volumeData = null;
 let activeWindow = '1h';
 
+// The configuration the bot is actually running, fetched from /bot/config. The
+// form used to show static HTML defaults regardless of it, which made the panel
+// not merely wrong but destructive — Start posted those defaults back.
+let loadedConfig = {};
+
 // Whale trade ids already shown, so a poll that returns the same trade does not
 // toast it twice. Bounded because this page is left open for hours.
 const seenWhales = new Set();
@@ -273,8 +278,10 @@ function renderEquity(trades) {
  * refuses.
  */
 function renderRiskLine() {
-    const tp = (Number(el('cfg-tp')?.value) || 0) / 100;
-    const sl = (Number(el('cfg-sl')?.value) || 0) / 100;
+    // From the running configuration, not from form fields — there are none now.
+    const tp = loadedConfig.takeProfitPct ?? 0;
+    const sl = loadedConfig.stopLossPct   ?? 0;
+    if (!tp && !sl) return;
     const line = el('risk-line');
     if (!line) return;
 
@@ -456,27 +463,35 @@ async function toggleBot() {
         if (botRunning) {
             await fetch(`${API}/bot/stop`, { method: 'POST' });
         } else {
-            const num = (id, fallback) => Number(el(id)?.value) || fallback;
-            const chk = id => !!el(id)?.checked;
-
             const res = await fetch(`${API}/bot/start`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                // Execution mode and venue are carried over from the loaded config,
+                // never taken from the page. paperMode was hardcoded true here, so
+                // pressing Start on a live bot silently moved it to simulation while
+                // the header still read RUNNING. Whether real money is at stake is
+                // not a decision a dashboard button should be able to make by
+                // accident — it stays an explicit API call.
                 body: JSON.stringify({
-                    paperMode: true,
+                    paperMode: loadedConfig.paperMode ?? true,
+                    exchange:  loadedConfig.exchange  ?? 'BINANCE',
                     symbol: activeSymbol,
                     activeStrategies: ['MOMENTUM'],
-                    capitalUsd: num('cfg-capital', 1000),
-                    maxOpenTradesPerStrategy: num('cfg-max-slots', 3),
-                    positionPct: num('cfg-position-pct', 10) / 100,
-                    takeProfitPct: num('cfg-tp', 2) / 100,
-                    stopLossPct: num('cfg-sl', 1.5) / 100,
-                    trailingStopPct: num('cfg-trailing-pct', 1.2) / 100,
-                    cooldownSeconds: num('cfg-cooldown', 120),
-                    useTrailingStop: chk('cfg-trailing'),
-                    useBreakevenStop: chk('cfg-breakeven'),
-                    breakevenTriggerPct: 0.008,
-                    useAiAgent: chk('cfg-ai-agent'),
+                    capitalUsd:               loadedConfig.capitalUsd,
+                    maxOpenTradesPerStrategy: loadedConfig.maxOpenTradesPerStrategy,
+                    positionPct:              loadedConfig.positionPctOfCapital,
+                    takeProfitPct:            loadedConfig.takeProfitPct,
+                    stopLossPct:              loadedConfig.stopLossPct,
+                    trailingStopPct:          loadedConfig.trailingStopPct,
+                    cooldownSeconds:          loadedConfig.cooldownSeconds,
+                    useTrailingStop:          loadedConfig.useTrailingStop,
+                    useBreakevenStop:         loadedConfig.useBreakevenStop,
+                    breakevenTriggerPct:      loadedConfig.breakevenTriggerPct,
+                    useAiFilter:              loadedConfig.useAiFilter,
+                    minAiConfidence:          loadedConfig.minAiConfidence,
+                    useAiSizing:              loadedConfig.useAiSizing,
+                    useDynamicTpSl:           loadedConfig.useDynamicTpSl,
+                    useAiAgent:               loadedConfig.useAiAgent,
                 }),
             });
             if (!res.ok) throw new Error('start failed: HTTP ' + res.status);
@@ -540,11 +555,73 @@ async function connectHub() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
+// Pull the running configuration into the form, so what is on screen is what the
+// bot is doing. Execution mode and venue are shown but not editable — those are
+// deliberate decisions, not form fields, and a dashboard that can flip a live bot
+// to simulation with one click is a worse hazard than one that cannot.
+async function loadConfig() {
+    try {
+        const res = await fetch(`${API}/bot/config`);
+        if (!res.ok) return;
+
+        loadedConfig = await res.json();
+
+        const c = loadedConfig;
+        const pct = v => v == null ? '—' : `${round2(v * 100)}%`;
+        const onOff = v => v ? 'on' : 'off';
+
+        const rows = [
+            ['Symbol',          c.symbol ?? '—'],
+            ['Venue',           c.exchange ?? '—'],
+            ['Capital',         c.capitalUsd == null ? '—' : `$${c.capitalUsd}`],
+            ['Per position',    `${pct(c.positionPctOfCapital)} → $${round2((c.capitalUsd ?? 0) * (c.positionPctOfCapital ?? 0))}`],
+            ['Max positions',   c.maxOpenTradesPerStrategy ?? '—'],
+            ['Take profit',     pct(c.takeProfitPct)],
+            ['Stop loss',       pct(c.stopLossPct)],
+            ['Trailing stop',   c.useTrailingStop ? pct(c.trailingStopPct) : 'off'],
+            ['Breakeven stop',  c.useBreakevenStop ? `arms at ${pct(c.breakevenTriggerPct)}` : 'off'],
+            ['Max hold',        c.maxHoldMinutes == null ? '—' : `${c.maxHoldMinutes} min`],
+            ['Cooldown',        c.cooldownSeconds == null ? '—' : `${c.cooldownSeconds}s`],
+            ['Daily loss limit', c.dailyLossLimitPct == null ? '—'
+                : `${pct(c.dailyLossLimitPct)} → $${round2((c.capitalUsd ?? 0) * c.dailyLossLimitPct)}`],
+            ['Eval interval',   c.evalIntervalSeconds == null ? '—' : `${c.evalIntervalSeconds}s`],
+            ['Strategies',      (c.activeStrategies ?? []).join(', ') || '—'],
+            ['AI agent',        onOff(c.useAiAgent)],
+            ['AI filter',       c.useAiFilter ? `on, min confidence ${pct(c.minAiConfidence)}` : 'off'],
+            ['AI sizing',       onOff(c.useAiSizing)],
+            ['Dynamic TP/SL',   onOff(c.useDynamicTpSl)],
+        ];
+
+        const view = el('config-view');
+        if (view)
+            view.innerHTML = rows
+                .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
+                .join('');
+
+        const mode = el('cfg-mode');
+        if (mode) {
+            const live = loadedConfig.paperMode === false;
+            mode.textContent = live
+                ? `LIVE — ${loadedConfig.exchange} · real funds`
+                : `PAPER — simulated, priced from ${loadedConfig.exchange}`;
+            mode.className = live ? 'mode-live' : 'mode-paper';
+        }
+
+        if (loadedConfig.symbol) activeSymbol = loadedConfig.symbol;
+
+        renderRiskLine();
+    } catch (e) {
+        console.error('loadConfig:', e);
+    }
+}
+
+const round2 = n => Math.round(n * 100) / 100;
+
 document.addEventListener('DOMContentLoaded', () => {
     el('bot-btn')?.addEventListener('click', toggleBot);
 
-    ['cfg-tp', 'cfg-sl'].forEach(id => el(id)?.addEventListener('input', renderRiskLine));
     renderRiskLine();
+    loadConfig();
 
     document.querySelectorAll('#symbol-tabs .tab').forEach(btn => {
         btn.addEventListener('click', () => {
