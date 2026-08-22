@@ -20,9 +20,18 @@ namespace CryptoDecision.BotService.Strategies;
 /// than snapping. Weighting overlapping windows is the point: agreement across
 /// nested horizons is what distinguishes a trend from a single burst.
 ///
-/// LONG entry:  compositeScore >= 65 (bullish bias across timeframes)
-/// SHORT entry: compositeScore <= 35 (bearish bias)
-/// Dead zone:   35-65 (mixed signals, no entry)
+/// LONG entry:  compositeScore >= LongThreshold  (bullish bias across timeframes)
+/// SHORT entry: compositeScore <= ShortThreshold (bearish bias)
+/// Dead zone:   between the two (mixed signals, no entry)
+///
+/// The thresholds are named rather than written out here because this comment had
+/// drifted to 65 / 35 / "35-65" against constants of 62 / 38 — a live risk boundary
+/// documented three points away from where it actually sat.
+///
+/// Note the boundary is a cliff, not a band: a composite of 37.9 and one of 38.1
+/// produce opposite trades with equal conviction, and one of the entries on
+/// 2026-08-22 cleared ShortThreshold by 0.1. The ensemble feeding this has an
+/// explicit dead_zone for exactly that reason; this does not.
 ///
 /// Exit: TP, trailing stop (momentum-aware tightening), SL.
 /// </summary>
@@ -195,13 +204,13 @@ public sealed class MomentumStrategy(
             if (composite >= LongThreshold)
             {
                 log.LogInformation("[MomentumV2] LONG signal: composite={Score:F1} confidence={Conf:P0}", composite, entryConfidence);
-                return new EntryDecision(true, "LONG", entryConfidence, rationale);
+                return new EntryDecision(true, "LONG", entryConfidence, rationale, composite);
             }
 
             if (composite <= ShortThreshold)
             {
                 log.LogInformation("[MomentumV2] SHORT signal: composite={Score:F1} confidence={Conf:P0}", composite, entryConfidence);
-                return new EntryDecision(true, "SHORT", entryConfidence, rationale);
+                return new EntryDecision(true, "SHORT", entryConfidence, rationale, composite);
             }
 
             return new EntryDecision(false, Rationale: $"Dead zone ({composite:F1}): {rationale}");

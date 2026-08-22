@@ -6,6 +6,41 @@ namespace CryptoDecision.Shared.Bot;
 /// <summary>Persists paper/real trades to the bot_trades table.</summary>
 public sealed class BotRepository(NpgsqlDataSource dataSource)
 {
+    /// <summary>
+    /// Attach the strategy's reasoning to a trade that has just been opened.
+    ///
+    /// Written as a second statement rather than threaded through
+    /// IOrderEngine.OpenPositionAsync, because the reasoning belongs to the strategy
+    /// and the engine's job is to place orders — adding it to that signature would
+    /// have touched three implementations to carry a value none of them use.
+    ///
+    /// Entries happen a few times an hour, so one extra UPDATE costs nothing, and
+    /// failing it must never cost a position: the caller swallows the error.
+    /// </summary>
+    public async Task RecordEntryEvidenceAsync(
+        long tradeId, decimal? composite, decimal confidence, string? rationale,
+        CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_trades
+            SET entry_composite  = @composite,
+                entry_confidence = @confidence,
+                entry_rationale  = @rationale
+            WHERE id = @id
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", tradeId);
+        cmd.Parameters.AddWithValue("composite",
+            composite.HasValue ? composite.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("confidence", NpgsqlDbType.Numeric, confidence);
+        cmd.Parameters.AddWithValue("rationale",
+            string.IsNullOrWhiteSpace(rationale) ? DBNull.Value : rationale);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Insert a new trade ────────────────────────────────────────────────────
 
     public async Task<long> InsertTradeAsync(BotTrade t, CancellationToken ct = default)

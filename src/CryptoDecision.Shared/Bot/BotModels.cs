@@ -202,7 +202,24 @@ public sealed record BotStatus(
     string?   LastSizingNote    = null
 );
 
-public sealed record EntryDecision(bool Pass, string Side = "BUY", decimal Confidence = 1.0m, string? Rationale = null);
+/// <param name="Composite">
+/// The strategy's headline score at the moment of the decision, as a number rather
+/// than buried in the Rationale text.
+///
+/// It is separate because the question it answers is a SQL question: after four
+/// losses in a row, "were these entries taken close to the threshold?" needed a
+/// numeric column and there wasn't one. The rationale string carried the score, the
+/// container log carried the rest, and the container log died with the container —
+/// so the four winning trades that morning could not be compared with the four
+/// losers on the one dimension that mattered. Nullable because not every strategy
+/// reduces its decision to a single score.
+/// </param>
+public sealed record EntryDecision(
+    bool     Pass,
+    string   Side       = "BUY",
+    decimal  Confidence = 1.0m,
+    string?  Rationale  = null,
+    decimal? Composite  = null);
 
 /// <summary>
 /// How long the bot may go without starting an evaluation before it is stalled

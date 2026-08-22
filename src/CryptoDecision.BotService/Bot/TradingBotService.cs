@@ -1,4 +1,5 @@
 using CryptoDecision.BotService.Agent;
+using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.Shared.Bot;
 
 namespace CryptoDecision.BotService.Bot;
@@ -14,6 +15,7 @@ public sealed class TradingBotService(
     IOrderEngine          orderEngine,
     BotRepository         repo,
     BotConfigRepository   configRepo,
+    IFeatureRepository    featureRepo,
     TradingAgent          agent,
     AgentContext          agentContext,
     ILogger<TradingBotService> log) : BackgroundService
@@ -65,7 +67,7 @@ public sealed class TradingBotService(
                     // API sent start command → validate the risk profile before
                     // committing capital to it. A configuration that cannot profit
                     // arithmetically will not be rescued by a good entry signal.
-                    if (!PassesRiskGate(dbConfig))
+                    if (!await PassesRiskGateAsync(dbConfig, stoppingToken))
                     {
                         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
                         continue;
@@ -230,7 +232,7 @@ public sealed class TradingBotService(
     /// start. The config stays Enabled in the database, so this re-evaluates every
     /// 30 seconds and the bot starts on its own once the operator fixes the setup.
     /// </summary>
-    private bool PassesRiskGate(BotOptions opts)
+    private async Task<bool> PassesRiskGateAsync(BotOptions opts, CancellationToken ct)
     {
         // ── Can the configured execution mode actually be honoured? ──
         //
@@ -254,7 +256,20 @@ public sealed class TradingBotService(
                 "Capital ${Capital}, {Pct:P0} per position, up to {Max} positions per strategy.",
                 opts.Exchange, opts.CapitalUsd, opts.PositionPctOfCapital, opts.MaxOpenTradesPerStrategy);
 
-        var assessment = RiskEngine.Validate(opts);
+        // Today's realised range, so the gate can judge the trailing stop against the
+        // market rather than only against fees. Best-effort: a missing feature row
+        // must not stop the bot, it just costs one warning.
+        decimal? volatility = null;
+        try
+        {
+            volatility = (await featureRepo.GetTodayAsync(opts.Symbol, ct))?.Volatility;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("[Risk] Could not read today's volatility: {Err}", ex.Message);
+        }
+
+        var assessment = RiskEngine.Validate(opts, realizedVolatilityPct: volatility);
         var profile    = assessment.Expectancy;
 
         log.LogInformation(
@@ -502,6 +517,17 @@ public sealed class TradingBotService(
                                     $"{trade.Quantity} {opts.Symbol} @ ${trade.EntryPrice} " +
                                     $"= ${trade.NotionalUsd:F2} ({strat} {decision.Side})", ct),
                                 "sizing note");
+
+                            // Why this trade exists, stored next to the trade. Exit
+                            // reasons were always recorded and entry reasons never
+                            // were, which made a losing run describable but not
+                            // explainable — the score lived in a container log that
+                            // does not survive the container.
+                            await SafeRecordAsync(
+                                repo.RecordEntryEvidenceAsync(
+                                    trade.Id, decision.Composite, decision.Confidence,
+                                    decision.Rationale, ct),
+                                "entry evidence");
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {

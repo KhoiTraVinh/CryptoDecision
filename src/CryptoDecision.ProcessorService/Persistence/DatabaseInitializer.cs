@@ -232,7 +232,21 @@ public sealed class DatabaseInitializer(
                 ADD COLUMN IF NOT EXISTS fee_usd        NUMERIC(18, 8),
                 ADD COLUMN IF NOT EXISTS exit_algo_id   TEXT,
                 ADD COLUMN IF NOT EXISTS leverage       NUMERIC(6, 2),
-                ADD COLUMN IF NOT EXISTS margin_mode    TEXT;
+                ADD COLUMN IF NOT EXISTS margin_mode    TEXT,
+                -- Why the trade was entered, kept with the trade.
+                --
+                -- Every exit reason was recorded and no entry reason was, so a
+                -- losing run could be described but not explained: the score and
+                -- the component breakdown lived only in the container log, and
+                -- that log dies with the container. On 2026-08-22 four losses in
+                -- a row could not be compared against the four winners earlier
+                -- the same morning, because the winners' logs were gone.
+                --
+                -- entry_composite is numeric so "were these taken near the
+                -- threshold?" is a SQL question rather than a text search.
+                ADD COLUMN IF NOT EXISTS entry_composite  NUMERIC(8, 3),
+                ADD COLUMN IF NOT EXISTS entry_confidence NUMERIC(6, 4),
+                ADD COLUMN IF NOT EXISTS entry_rationale  TEXT;
             """, ct);
 
         await Exec(conn, """
