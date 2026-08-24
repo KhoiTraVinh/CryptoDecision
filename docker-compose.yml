@@ -119,6 +119,18 @@ services:
       # collapsed to a single $ and Compose resolved it to an empty string, giving
       # `pg_isready -U ""`. That fails, postgres never reports healthy, and every
       # service that waits on it never starts. Same source of truth either way.
+      # pg_isready, not a query.
+      #
+      # It is tempting to make this authenticate — a password mismatch leaves postgres
+      # reporting healthy while every client fails to log in, and the first symptom is
+      # "container processor is unhealthy" three services downstream. But a healthcheck
+      # running inside this container cannot test that: the official image's pg_hba
+      # grants `trust` to local-socket and loopback connections, so psql succeeds here
+      # whatever the password is. A check that always passes is worse than one with a
+      # known blind spot.
+      #
+      # The credentials are verified where they can be — db-migrate connects over TCP
+      # from another container and therefore actually authenticates. See sql/migrate.sh.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crypto} -d ${POSTGRES_DB:-crypto}"]
       interval: 10s
       timeout: 5s
