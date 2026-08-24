@@ -1,0 +1,7 @@
+# Shell scripts and SQL run on Linux, and this repo is edited on Windows.
+# Without this, a checkout with core.autocrlf=true rewrites them with CRLF and
+# the host fails at the shebang -- `bad interpreter: /usr/bin/env bash^M` --
+# which reads like a missing binary rather than a line-ending problem.
+# Both current scripts happen to be LF today; this stops that being luck.
+*.sh   text eol=lf
+*.sql  text eol=lf
