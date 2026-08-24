@@ -67,6 +67,22 @@ if ! $PSQL -c 'SELECT 1' >/dev/null 2>&1; then
     exit 1
 fi
 
+# Stop here when running as the credential canary.
+#
+# The check above is the most useful diagnostic in this script, and until now it sat
+# behind the schema migration — which waits on ProcessorService, which is itself the
+# first thing to fail on a bad password. So the clear message was unreachable: the
+# operator saw "container processor is unhealthy" and nothing about credentials.
+#
+# Compose runs this same script twice: once as db-check (CHECK_ONLY=1, depends on
+# postgres alone, gates everything else) and once as db-migrate (full run, after the
+# base schema exists). One script, so the two cannot drift about what a working
+# connection means.
+if [ "${CHECK_ONLY:-0}" = "1" ]; then
+    echo "migrate: credentials verified for ${PGUSER}@${PGHOST}/${PGDATABASE}"
+    exit 0
+fi
+
 # The ledger itself, created outside the ledger — it cannot record its own creation.
 $PSQL <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (

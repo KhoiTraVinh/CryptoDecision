@@ -137,6 +137,44 @@ services:
       retries: 5
       start_period: 20s
 
+  # ── Credential canary ─────────────────────────────────────────────────────
+  #
+  # Verifies that the configured credentials actually log in, before anything else
+  # starts. Depends on postgres alone, so it has no schema prerequisites and cannot
+  # be blocked by the services it protects.
+  #
+  # This exists because the diagnostic was previously unreachable. A password
+  # mismatch — the most likely reason the database is unusable, since
+  # POSTGRES_PASSWORD only applies to an empty volume — failed first inside
+  # ProcessorService, and the operator saw "container processor is unhealthy" with
+  # nothing about credentials. The clear message lived in db-migrate, which waits on
+  # processor, so it never ran.
+  #
+  # The postgres healthcheck cannot cover this: the official image grants `trust` to
+  # local-socket and loopback connections, so a query run inside that container
+  # succeeds whatever the password is. This container connects over TCP.
+  db-check:
+    image: postgres:16
+    container_name: db-check
+    mem_limit: 64m
+    environment:
+      PGHOST:     postgres
+      PGPORT:     "5432"
+      PGUSER:     "${POSTGRES_USER:-crypto}"
+      PGPASSWORD: "${POSTGRES_PASS:-crypto}"
+      PGDATABASE: "${POSTGRES_DB:-crypto}"
+      SQL_DIR:    /sql
+      # Same script as db-migrate, stopping after the credential check. One script so
+      # the two cannot disagree about what a working connection is.
+      CHECK_ONLY: "1"
+    volumes:
+      - ./sql:/sql:ro
+    entrypoint: ["/bin/sh", "/sql/migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # ── Schema migrations ─────────────────────────────────────────────────────
   #
   # Applies sql/*.sql in filename order, once each, recorded in schema_migrations.
@@ -197,6 +235,10 @@ services:
       # Binance uses public stream — no auth needed
     depends_on:
       kafka-init:
+        condition: service_completed_successfully
+      # Gated on the credential canary so a bad password reports itself instead of
+      # surfacing here as an unhealthy container with a stack trace.
+      db-check:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
