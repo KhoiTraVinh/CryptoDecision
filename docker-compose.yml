@@ -314,24 +314,6 @@ services:
       # healthy and then refused every entry on a chat call for a missing tag.
       Agent__Model:                    "${OLLAMA_MODEL:-qwen2.5:3b}"
 
-      # ── Flow signal tuning ──
-      #
-      # BaselineBars 44, not the 96 the code defaults to, and this is a concession
-      # with a stated cost rather than a tuned value.
-      #
-      # The baseline is what turns a raw imbalance into "this is 1.6 sigma from
-      # normal", so its length is the length of the sample the median and MAD are
-      # estimated from. 96 bars gives 93 rolling samples; 44 gives 41. Forty-one is
-      # thin — a noisier sigma means noisier z-scores means more marginal signals —
-      # but it is a real estimate, not a guess, and it is what the data on hand can
-      # support: only ~56 buckets per venue exist, because the 21-22 August history is
-      # itself 47% complete and the continuous run restarted on the 23rd.
-      #
-      # The alternative was eleven more hours of ingestion before the strategy could
-      # score anything at all, which is a real cost in power on this host. This value
-      # is provisional: the backtester sweeps BaselineBars, and this should be revisited
-      # from that sweep rather than left because it worked.
-      FlowStrategy__Signal__BaselineBars: "44"
     depends_on:
       postgres:
         condition: service_healthy

@@ -22,3 +22,6 @@ src/*/venv/
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# pg_dump output — data, not code. Regenerate with the pg_dump in the runbook.
+seed.sql
