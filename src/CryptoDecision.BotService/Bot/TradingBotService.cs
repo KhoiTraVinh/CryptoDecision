@@ -536,8 +536,41 @@ public sealed class TradingBotService(
         var breach = RiskEngine.CheckCircuitBreakers(closedTrades, opts, todayPnl);
         if (breach is not null)
         {
-            log.LogWarning("[TradingBot] Circuit breaker {Code} tripped: {Message} Stopping bot.",
+            // Persisted to bot_config, not only to memory.
+            //
+            // state.Stop() alone did not stop anything. It clears the in-process flag,
+            // and the very next loop iteration sees bot_config.enabled still TRUE with
+            // IsRunning now false — which is exactly the "operator pressed start"
+            // condition — so it called Start() again and carried on trading. The breaker
+            // halted the bot for one cycle and then logged "Stopping bot" every minute
+            // forever while doing nothing. The daily loss limit, the consecutive-loss
+            // streak and the max-drawdown breaker were all inoperative, and all three
+            // logged as though they had worked.
+            //
+            // A breaker a restart clears is not a breaker either, which is why this
+            // writes to the database rather than holding a flag: a loss limit has to
+            // survive a container restart and require a person to look before trading
+            // resumes.
+            log.LogError(
+                "[TradingBot] Circuit breaker {Code} tripped: {Message} Disabling the bot in " +
+                "bot_config — it will NOT restart on its own. Review the trades, then re-arm " +
+                "with: UPDATE bot_config SET enabled = true WHERE id = 1;",
                 breach.Code, breach.Message);
+
+            try
+            {
+                await configRepo.StopBotAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // The write is what makes the halt stick. If it fails, say so loudly —
+                // the in-memory stop below will be undone by the next poll.
+                log.LogCritical(ex,
+                    "[TradingBot] Circuit breaker {Code} tripped but bot_config could not be " +
+                    "updated. The next poll will restart trading. Set enabled = false by hand.",
+                    breach.Code);
+            }
+
             state.Stop();
             return;
         }
