@@ -266,8 +266,39 @@ if log_has processor 1h '42883: function'; then
     printf '        after the deploy, db-migrate did NOT apply -- check that first.\n'
 fi
 
-# --------------------------------------------------------------- 8 resources
-title "8. Host resources"
+# --------------------------------------------------------------- 8 arming
+title "8. Live-trading gates (all three, by name)"
+# `Okx__Passphrase` was empty on this host for a whole deployment. The compose
+# file reads ${OKX_PASSPHRASE:-} while the workflow wrote OKX_PASS=, and a
+# defaulted substitution is silent -- so the credentials were simply absent,
+# every other check was green, and the bot logged "credentials are not
+# configured" once at startup where nobody was looking. Nothing would have
+# surfaced it until the first real order failed to place.
+for v in Okx__ApiKey Okx__ApiSecret Okx__Passphrase; do
+    val=$(docker exec bot printenv "$v" 2>/dev/null || true)
+    if [ -n "$val" ]; then
+        ok "$v: set (${#val} chars)"
+    else
+        warn "$v: EMPTY -- no OKX order can be placed, whatever the other switches say"
+    fi
+done
+# Three independent switches gate real money. Print all three together: knowing
+# two of them is how you convince yourself you are safe when you are not, or
+# that you are trading when you are not.
+pm=$($PSQL -c "SELECT paper_mode FROM bot_config WHERE id = 1;" 2>/dev/null)
+lt=$(docker exec bot printenv Okx__EnableLiveTrading 2>/dev/null || echo "unset")
+dt=$(docker exec bot printenv Okx__DemoTrading 2>/dev/null || echo "unset")
+printf '        bot_config.paper_mode   = %s   (true = internal simulation, OKX never called)\n' "${pm:-?}"
+printf '        Okx__EnableLiveTrading  = %s   (the arm switch)\n' "${lt:-unset}"
+printf '        Okx__DemoTrading        = %s   (true = OKX simulated endpoint, not real funds)\n' "${dt:-unset}"
+if [ "${pm:-t}" = "f" ] && [ "${lt:-}" = "true" ] && [ "${dt:-}" = "false" ]; then
+    warn "all three gates open: this is REAL MONEY"
+else
+    ok "real money is NOT reachable in this configuration"
+fi
+
+# --------------------------------------------------------------- 9 resources
+title "9. Host resources"
 df -h / | awk 'NR == 2 { u = $5 + 0; printf "  %s    disk %s used of %s\n", (u > 85 ? "\033[31mFAIL\033[0m" : (u > 70 ? "\033[33mWARN\033[0m" : "\033[32mOK\033[0m  ")), $5, $2 }'
 if command -v free >/dev/null 2>&1; then
     free -m | awk 'NR == 2 { p = int(100 * ($2 - $7) / $2); printf "  %s    memory %d%% committed (%d MB available of %d MB)\n", (p > 92 ? "\033[31mFAIL\033[0m" : (p > 85 ? "\033[33mWARN\033[0m" : "\033[32mOK\033[0m  ")), p, $7, $2 }'

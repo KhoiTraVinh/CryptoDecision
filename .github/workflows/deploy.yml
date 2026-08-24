@@ -194,7 +194,7 @@ jobs:
 
           OKX_API_KEY=${{ secrets.OKX_API_KEY }}
           OKX_API_SECRET=${{ secrets.OKX_API_SECRET }}
-          OKX_PASS=${{ secrets.OKX_PASSPHRASE }}
+          OKX_PASSPHRASE=${{ secrets.OKX_PASSPHRASE }}
 
           OKX_DEMO_TRADING=${{ vars.OKX_DEMO_TRADING || 'true' }}
           OKX_ENABLE_LIVE_TRADING=${{ vars.OKX_ENABLE_LIVE_TRADING || 'false' }}
