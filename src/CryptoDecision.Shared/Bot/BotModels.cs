@@ -75,8 +75,57 @@ public sealed record BotTrade
     public decimal?  Leverage    { get; init; }
     public string?   MarginMode  { get; init; }
 
+    // ── Exit geometry, fixed at entry ──
+    //
+    // Absolute prices rather than percentages, and stored on the row rather than
+    // re-derived from configuration every cycle. Two reasons, both learned the hard
+    // way:
+    //
+    //   • Once the stop is scaled to measured volatility it is a fact about the
+    //     moment of entry. Recomputing it later moves the stop under the position it
+    //     exists to protect, because the ATR has moved since.
+    //   • Percentages read live from bot_config made a config edit retroactive. A
+    //     widened stop_loss_pct silently moved the stop on positions already open,
+    //     which is the one thing a stop must never do.
+    //
+    // Null means this row predates volatility-scaled exits, and the configured
+    // percentages apply — which is what every trade opened before it needs.
+
+    /// <summary>Price at which this position closes for a loss. Null = use config.</summary>
+    public decimal? StopPrice     { get; set; }
+
+    /// <summary>Price at which this position closes for a profit. Null = use config.</summary>
+    public decimal? TargetPrice   { get; set; }
+
+    /// <summary>
+    /// ATR as a percent of price when the geometry was set.
+    ///
+    /// Recorded because without it a losing trade cannot be attributed: a stop that
+    /// was too tight and a market that moved further than usual look identical on the
+    /// row, and telling them apart is the entire reason the stop stopped being a
+    /// constant.
+    /// </summary>
+    public decimal? AtrPctAtEntry { get; init; }
+
+    /// <summary>
+    /// How this entry got past the gate: APPROVED, APPROVED_DEGRADED, or NOT_GATED.
+    ///
+    /// Only ever set on entries that happened. A refused candidate produces no row —
+    /// the refusal trail on bot_config is where those live.
+    /// </summary>
+    public string? GateVerdict { get; set; }
+
+    /// <summary>What the gate said, in its own words.</summary>
+    public string? GateReason  { get; set; }
+
     /// <summary>True when this trade committed real funds.</summary>
     public bool IsLive => Mode == "LIVE";
+
+    /// <summary>
+    /// Whether this position carries volatility-scaled exit levels, as opposed to
+    /// falling back to the configured percentages.
+    /// </summary>
+    public bool HasGeometry => StopPrice is > 0m && TargetPrice is > 0m;
 }
 
 // ── Bot configuration ─────────────────────────────────────────────────────────
@@ -94,6 +143,22 @@ public sealed class BotOptions
     public int          MaxOpenTradesPerStrategy { get; set; } = 5;
     
     public decimal PositionPctOfCapital{ get; set; } = 0.10m;   // 10% per trade (1/10th)
+
+    /// <summary>
+    /// Fraction of capital to lose if the stop is hit — the sizing rule used whenever
+    /// the strategy supplies a stop distance.
+    ///
+    /// Replaces PositionPctOfCapital for those strategies rather than joining it.
+    /// Sizing a fraction of capital and then shrinking it for volatility made sense
+    /// while the stop was a constant; once the stop is itself a multiple of measured
+    /// volatility, the two compound and risk per trade wanders with the regime instead
+    /// of staying put. See PositionSizer.ResolveByRisk.
+    ///
+    /// Okx:MaxOrderNotionalUsd still caps the notional this produces and on a small
+    /// account will bind first — which lowers the realised risk below this number,
+    /// never raises it.
+    /// </summary>
+    public decimal RiskPctPerTrade    { get; set; } = 0.01m;    // 1% of capital at risk
 
     // ── Take profit / stop loss ──
     //
@@ -163,6 +228,49 @@ public sealed class BotOptions
     /// explicitly rather than inherit.
     /// </summary>
     public bool    UseAiAgent          { get; set; } = false;
+
+    // ── Entry gate ──
+
+    /// <summary>
+    /// Require the AI gate to approve before any entry is placed.
+    ///
+    /// Defaults to true, unlike every other AI switch above, and the asymmetry is the
+    /// reason. The others add the model's opinion to a decision that happens anyway,
+    /// so off is the conservative default. This one can only ever *prevent* an entry,
+    /// so on is the conservative default — and it is the switch that makes the
+    /// discipline real: no position is opened that the gate did not approve, while
+    /// sizing, stops, exits and circuit breakers stay entirely deterministic and out
+    /// of the model's reach.
+    /// </summary>
+    public bool    RequireAiGate          { get; set; } = true;
+
+    /// <summary>
+    /// Whether an unreachable gate falls back to the deterministic signal alone.
+    ///
+    /// False by default: a gate that cannot be reached stops entries rather than
+    /// silently reverting to ungated trading. The alternative failure mode is a
+    /// deployment where the gate has been dead for a week and nothing looks any
+    /// different, which is the exact shape of every expensive bug in this codebase so
+    /// far.
+    /// </summary>
+    public bool    AllowEntryWithoutGate  { get; set; } = false;
+
+    /// <summary>
+    /// Hard ceiling on entries opened per UTC day, for this symbol and execution mode.
+    /// Zero disables the cap.
+    ///
+    /// This bounds cost rather than risk, and it is the guard that was missing. The
+    /// daily loss limit caps how much a losing day can lose, and the concurrency limit
+    /// caps how much is at risk at once, but nothing capped how many round trips the
+    /// bot could pay for. Over 2026-08-22 it opened ten positions in under seven
+    /// hours, four of them riding a single 6% move — for a signal whose horizon is
+    /// hours, that is not ten decisions, it is a handful of decisions billed ten times.
+    ///
+    /// Six is deliberately generous against an expected two or three, so it only binds
+    /// when something is wrong: a signal firing every bucket, a stop far too tight, or
+    /// a cooldown that is not doing its job.
+    /// </summary>
+    public int     MaxEntriesPerDay       { get; set; } = 6;
 }
 
 // ── Runtime status ────────────────────────────────────────────────────────────
@@ -214,12 +322,29 @@ public sealed record BotStatus(
 /// losers on the one dimension that mattered. Nullable because not every strategy
 /// reduces its decision to a single score.
 /// </param>
+/// <param name="Geometry">
+/// Where the stop and target go, if this strategy scales them to measured
+/// volatility. Null means the configured percentages apply.
+///
+/// Carried on the decision rather than recomputed at the point of order placement
+/// because it was derived from the volatility reading that justified this entry, and
+/// a second reading a moment later is a different number. The pair has to travel
+/// together or the position ends up sized against one stop and protected by another.
+/// </param>
+/// <param name="Flow">
+/// The cross-venue flow verdict behind this decision, when there was one. Passed
+/// through so the entry gate can be shown the actual per-venue evidence rather than
+/// a summary of it — the failure worth catching is a headline consensus resting on
+/// one venue while the others were excluded, and that is invisible in an aggregate.
+/// </param>
 public sealed record EntryDecision(
     bool     Pass,
     string   Side       = "BUY",
     decimal  Confidence = 1.0m,
     string?  Rationale  = null,
-    decimal? Composite  = null);
+    decimal? Composite  = null,
+    CryptoDecision.Shared.Signals.StopGeometry? Geometry = null,
+    CryptoDecision.Shared.Signals.FlowVerdict?  Flow     = null);
 
 /// <summary>
 /// How long the bot may go without starting an evaluation before it is stalled
@@ -240,6 +365,26 @@ public static class BotLiveness
 {
     public static TimeSpan StaleAfter(int evalIntervalSeconds) =>
         TimeSpan.FromSeconds(Math.Max(180, evalIntervalSeconds * 4));
+}
+
+/// <summary>
+/// How old the AI prediction may be before it stops being an opinion and becomes a
+/// leftover row.
+///
+/// One definition, in Shared, because there are two consumers with the same question
+/// — the deterministic strategy's composite and the agent's market snapshot — and a
+/// second copy of this number is a second place for it to drift. The codebase has
+/// already paid for that: the entry thresholds sat at 62/38 while the comment
+/// documenting them said 65/35, three points away from the live risk boundary.
+///
+/// The prediction service runs on a 150-second cadence, so this tolerates roughly
+/// five missed cycles — enough to cover a restart or a slow LLM generation, far short
+/// of the hours a deliberately switched-off service would leave the last row sitting
+/// in prediction_table looking current.
+/// </summary>
+public static class PredictionFreshness
+{
+    public static readonly TimeSpan MaxAge = TimeSpan.FromMinutes(15);
 }
 
 // ── API DTO ───────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 using CryptoDecision.Shared.Bot;
+using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Bot;
 
@@ -62,13 +63,15 @@ public sealed class RoutingOrderEngine(
 
     public Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
-        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false)
+        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        StopGeometry? geometry = null)
     {
         var opts = state.Options;
 
         if (opts.PaperMode)
             return paper.OpenPositionAsync(
-                symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing);
+                symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing,
+                geometry);
 
         var venue = ResolveVenue(opts.Exchange);
 
@@ -82,7 +85,8 @@ public sealed class RoutingOrderEngine(
             venue, symbol, strategy, side);
 
         return okx.OpenPositionAsync(
-            symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing);
+            symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing,
+            geometry);
     }
 
     public Task<BotTrade> CloseTradeAsync(

@@ -5,7 +5,19 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>CS8602;CS8604</NoWarn>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- Workstation GC, not Server GC.
+         Server GC allocates a heap and a dedicated thread per core and sizes its
+         allocation budgets for throughput on a large heap. This container is capped
+         at 256 MB on a 12-core host, so Server GC was standing up six GC threads
+         inside it. Observed live at 128 MB: the process sat at 92 MB (72% of the
+         cap), CPU at 0%, and every managed thread parked in futex_wait — the
+         trading loop stopped starting cycles while the health endpoint kept
+         answering. That is the same silent stall that halted trading for 64 minutes
+         on 2026-08-22 and was never explained.
+         Workstation GC is the documented choice for a memory-capped container, and
+         a bot whose cycle is 30 seconds has no throughput reason to want the other. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <RootNamespace>CryptoDecision.BotService</RootNamespace>
     <AssemblyName>CryptoDecision.BotService</AssemblyName>
   </PropertyGroup>

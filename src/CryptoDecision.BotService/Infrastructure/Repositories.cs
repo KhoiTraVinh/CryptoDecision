@@ -129,10 +129,19 @@ public sealed class MomentumRepository(NpgsqlDataSource dataSource) : IMomentumR
 
 // ── PredictionRepository (reads AI prediction from prediction_table) ─────────
 
-public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredictionRepository
+public sealed class PredictionRepository(
+    NpgsqlDataSource dataSource,
+    ILogger<PredictionRepository> log) : IPredictionRepository
 {
-    public async Task<PredictionSnapshot?> GetLatestAsync(string symbol, CancellationToken ct = default)
+    public async Task<PredictionSnapshot?> GetLatestAsync(
+        string symbol, TimeSpan maxAge, CancellationToken ct = default)
     {
+        // The newest row is fetched regardless of age, and the age is judged here
+        // rather than in the WHERE clause, so a stale prediction can be reported as
+        // stale instead of being indistinguishable from no prediction at all. "The
+        // model has no view" and "the model has been dead since Tuesday" call for
+        // completely different responses from an operator, and a filtered query
+        // collapses them into the same empty result.
         const string sql = """
             SELECT symbol, direction, confidence, model_version, rationale, created_at
             FROM prediction_table
@@ -147,6 +156,25 @@ public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredict
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return null;
+
+        var createdAt = reader.GetDateTime(reader.GetOrdinal("created_at"));
+        var age       = DateTime.UtcNow - createdAt;
+
+        if (age > maxAge)
+        {
+            // Warning, not error: the prediction service is switched off deliberately
+            // often enough that this is a normal state to be in. What must not be
+            // normal is acting on the frozen row it left behind.
+            log.LogWarning(
+                "[Prediction] Ignoring the AI prediction for {Symbol}: it is {Age} old " +
+                "(limit {MaxAge}), written at {At:O} by {Version}. Either the prediction service " +
+                "is switched off or it has stopped producing — this does not distinguish the two. " +
+                "Entries proceed on order flow alone until a fresh prediction appears.",
+                symbol, age, maxAge, createdAt,
+                reader.GetString(reader.GetOrdinal("model_version")));
+
+            return null;
+        }
 
         return new PredictionSnapshot(
             Symbol:       reader.GetString(reader.GetOrdinal("symbol")),

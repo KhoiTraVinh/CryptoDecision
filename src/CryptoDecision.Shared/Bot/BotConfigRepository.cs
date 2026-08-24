@@ -24,7 +24,11 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    COALESCE(use_ai_filter, FALSE) AS use_ai_filter,
                    COALESCE(min_ai_confidence, 0.500) AS min_ai_confidence,
                    COALESCE(use_ai_sizing, FALSE) AS use_ai_sizing,
-                   COALESCE(use_ai_agent,  FALSE) AS use_ai_agent
+                   COALESCE(use_ai_agent,  FALSE) AS use_ai_agent,
+                   COALESCE(require_ai_gate, TRUE) AS require_ai_gate,
+                   COALESCE(allow_entry_without_gate, FALSE) AS allow_entry_without_gate,
+                   COALESCE(max_entries_per_day, 6) AS max_entries_per_day,
+                   COALESCE(risk_pct_per_trade, 0.01) AS risk_pct_per_trade
             FROM bot_config WHERE id = 1
             """;
 
@@ -67,6 +71,10 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             MinAiConfidence          = r.GetDecimal(r.GetOrdinal("min_ai_confidence")),
             UseAiSizing              = r.GetBoolean(r.GetOrdinal("use_ai_sizing")),
             UseAiAgent               = r.GetBoolean(r.GetOrdinal("use_ai_agent")),
+            RequireAiGate            = r.GetBoolean(r.GetOrdinal("require_ai_gate")),
+            AllowEntryWithoutGate    = r.GetBoolean(r.GetOrdinal("allow_entry_without_gate")),
+            MaxEntriesPerDay         = r.GetInt32(r.GetOrdinal("max_entries_per_day")),
+            RiskPctPerTrade          = r.GetDecimal(r.GetOrdinal("risk_pct_per_trade")),
         };
     }
 

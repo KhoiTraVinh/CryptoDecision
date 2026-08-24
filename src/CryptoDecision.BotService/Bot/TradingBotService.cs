@@ -1,6 +1,7 @@
 using CryptoDecision.BotService.Agent;
 using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.Shared.Bot;
+using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Bot;
 
@@ -18,6 +19,7 @@ public sealed class TradingBotService(
     IFeatureRepository    featureRepo,
     TradingAgent          agent,
     AgentContext          agentContext,
+    IEntryGate            gate,
     ILogger<TradingBotService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -94,9 +96,49 @@ public sealed class TradingBotService(
 
                 if (!state.IsRunning) continue;
 
+                // ── A cycle gets a deadline ────────────────────────────────────
+                //
+                // Without one, any single await that never completes stops the loop
+                // forever while the process stays alive and the health endpoint keeps
+                // answering. That is not hypothetical: trading halted for 64 minutes
+                // on 2026-08-22 with the container reporting healthy the whole time and
+                // the cause never established, and it happened again on 2026-08-23 —
+                // the loop completed a cycle, wrote its heartbeat, and never started
+                // another, with every managed thread parked in futex_wait and the
+                // database showing no query in flight.
+                //
+                // Guessing which await hangs has now failed twice. A deadline does not
+                // need to know: it cancels whatever is stuck, says how long it had run,
+                // and lets the next cycle try again. The two candidates found so far —
+                // a misconfigured GC and an exchange call — are both fixed elsewhere,
+                // and this is what makes the third one survivable.
+                //
+                // Half the liveness window, so the loop recovers on its own before the
+                // health check would call it dead. Both derive from the same function,
+                // so they cannot drift into disagreeing.
+                var cycleBudget = BotLiveness.StaleAfter(opts.EvalIntervalSeconds) / 2;
+
+                using var cycleCts =
+                    CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                cycleCts.CancelAfter(cycleBudget);
+
+                var cycleStarted = DateTime.UtcNow;
+
                 try
                 {
-                    await EvalCycleAsync(opts, stoppingToken);
+                    await EvalCycleAsync(opts, cycleCts.Token);
+                }
+                catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+                {
+                    // The cycle blew its deadline rather than the worker being shut
+                    // down. Error, not Warning: a cycle that cannot finish inside three
+                    // times its own interval means something is wrong, and open
+                    // positions went un-evaluated for that whole stretch.
+                    log.LogError(
+                        "[TradingBot] Evaluation cycle exceeded its {Budget} budget and was " +
+                        "cancelled after {Elapsed:F0}s. Open positions were not evaluated this " +
+                        "cycle; the exchange-side stops are still in force. The loop continues.",
+                        cycleBudget, (DateTime.UtcNow - cycleStarted).TotalSeconds);
                 }
                 finally
                 {
@@ -343,9 +385,122 @@ public sealed class TradingBotService(
                 outcome.OrdersRefused);
     }
 
+    /// <summary>
+    /// Ask the gate whether a proposed entry is taken.
+    ///
+    /// Returns an approval without consulting the gate in exactly two cases, both of
+    /// which the operator has to have chosen explicitly:
+    ///
+    ///   • Gating is switched off (<c>require_ai_gate = false</c>), recorded as
+    ///     NOT_GATED so the row says the trade was never reviewed.
+    ///   • The gate is unreachable and <c>allow_entry_without_gate = true</c>,
+    ///     recorded as APPROVED_DEGRADED.
+    ///
+    /// The default for both settings is the safe one: gating on, no fallback. An
+    /// unreachable gate then stops entries rather than silently reverting to ungated
+    /// trading, because a deployment where the gate has been dead for a week and
+    /// nothing looks different is the failure this whole arrangement is meant to
+    /// avoid.
+    /// </summary>
+    private async Task<GateDecision> ReviewEntryAsync(
+        BotOptions opts, string strategyName, EntryDecision decision,
+        decimal price, int openPositions, CancellationToken ct)
+    {
+        if (!opts.RequireAiGate) return GateDecision.Ungated();
+
+        // A candidate with no evidence to show cannot be meaningfully reviewed, and
+        // handing the model an empty brief invites it to approve on nothing. Only the
+        // flow strategy produces a FlowVerdict; anything else is treated as ungated
+        // rather than pretend-reviewed, and the row says so.
+        if (decision.Flow is not { } flow || decision.Geometry is not { } geometry)
+        {
+            log.LogDebug(
+                "[Gate] {Strategy} produced no reviewable evidence; recording the entry as NOT_GATED.",
+                strategyName);
+            return GateDecision.Ungated();
+        }
+
+        decimal todayPnl;
+        try
+        {
+            todayPnl = await repo.GetTodayPnlAsync(
+                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE", ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The day's P&L is context for the gate's judgement, not a precondition
+            // for it. Zero is the neutral value and the omission is logged, rather
+            // than refusing an otherwise good entry over a failed read.
+            log.LogWarning("[Gate] Could not read today's P&L: {Err}. Reviewing without it.",
+                ex.Message);
+            todayPnl = 0m;
+        }
+
+        var sizing = PositionSizer.Resolve(
+            opts.CapitalUsd, opts.PositionPctOfCapital,
+            currentVolatilityPct: geometry.AtrPctUsed,
+            confidence: decision.Confidence,
+            useAiSizing: opts.UseAiSizing);
+
+        var candidate = new EntryCandidate(
+            Symbol:        opts.Symbol,
+            Side:          decision.Side,
+            Price:         price,
+            Flow:          flow,
+            Geometry:      geometry,
+            NotionalUsd:   sizing.NotionalUsd,
+            OpenPositions: openPositions,
+            TodayPnlUsd:   todayPnl);
+
+        var verdict = await gate.ReviewAsync(candidate, ct);
+
+        if (verdict.Approved || !opts.AllowEntryWithoutGate) return verdict;
+
+        // Refused for want of a reachable gate, and the operator has allowed trading
+        // to continue without one. Distinguished from a refusal on the merits: the
+        // gate having an opinion and the gate being absent are different facts, and
+        // only the second one may be overridden.
+        if (verdict.Reason.StartsWith("Gate unreachable", StringComparison.Ordinal)
+            || verdict.Reason.StartsWith("Gate call failed", StringComparison.Ordinal))
+        {
+            log.LogWarning(
+                "[Gate] {Reason} allow_entry_without_gate is set, so this entry proceeds " +
+                "unreviewed and is recorded as APPROVED_DEGRADED.", verdict.Reason);
+
+            return GateDecision.Degraded(verdict.Reason);
+        }
+
+        return verdict;
+    }
+
     private async Task EvalCycleAsync(BotOptions opts, CancellationToken ct)
     {
-        state.TouchEval();
+        var evalGap = state.TouchEval();
+
+        // ── Is the wall clock believable this cycle? ───────────────────────────
+        //
+        // The loop sleeps EvalIntervalSeconds between cycles, so the gap between two
+        // TouchEval stamps should be that interval plus however long a cycle took.
+        // A gap far outside that means UtcNow moved for a reason other than time
+        // passing — the WSL2 clock resyncing after the host suspended is the known
+        // one on this host — and the timeout exit is the only decision that would act
+        // on the bogus value. Four intervals with a 180s floor matches the liveness
+        // window, so a normal slow cycle is not mistaken for a jump.
+        //
+        // A restart legitimately produces a large first gap, which is why the first
+        // cycle after start returns null and is treated as trusted: there is no
+        // previous stamp to compare against, and the recovery path has just re-read
+        // every open position from the database.
+        var window = BotLiveness.StaleAfter(opts.EvalIntervalSeconds);
+        var clockTrusted = evalGap is null
+                        || (evalGap.Value >= TimeSpan.Zero && evalGap.Value <= window);
+
+        if (!clockTrusted)
+            log.LogError(
+                "[TradingBot] The evaluation clock jumped {Gap} between cycles against a {Window} " +
+                "expectation. Clock-based exits are suspended for this cycle; price-based exits and " +
+                "the exchange-side stops are unaffected.",
+                evalGap, window);
 
         // ── 1. Circuit breakers ───────────────────────────────────────────────
         // Daily loss limit, consecutive-loss streak and realised drawdown. Any
@@ -360,11 +515,23 @@ public sealed class TradingBotService(
         // protecting, and nothing else.
         var mode         = opts.PaperMode ? "PAPER" : "LIVE";
         var todayPnl     = await repo.GetTodayPnlAsync(opts.Symbol, mode, ct);
-        var closedTrades = (await repo.GetRecentTradesAsync(500, ct))
-            .Where(t => t.Status is "CLOSED" or "STOPPED")
+
+        // Fetched once and filtered twice: the circuit breakers want closed trades on
+        // this account, and the daily entry cap wants everything opened today on it.
+        // Two queries for one list of 500 rows would just be two queries.
+        var accountTrades = (await repo.GetRecentTradesAsync(500, ct))
             .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
             .Where(t => string.Equals(t.Mode, mode, StringComparison.OrdinalIgnoreCase))
             .ToList();
+
+        var closedTrades = accountTrades
+            .Where(t => t.Status is "CLOSED" or "STOPPED")
+            .ToList();
+
+        // Entries opened so far today, counted by UTC day to match how the daily loss
+        // limit and the feature tables are bucketed.
+        var entriesToday = accountTrades
+            .Count(t => t.OpenedAt.Date == DateTime.UtcNow.Date);
 
         var breach = RiskEngine.CheckCircuitBreakers(closedTrades, opts, todayPnl);
         if (breach is not null)
@@ -432,7 +599,7 @@ public sealed class TradingBotService(
         // ── 4. Manage all open trades exits ────────────────────────────────────
         foreach (var trade in openTrades)
         {
-            var decision = strategy.EvaluateExit(trade, currentPrice.Value, opts);
+            var decision = strategy.EvaluateExit(trade, currentPrice.Value, opts, clockTrusted);
             if (decision.ShouldExit)
             {
                 log.LogInformation("[TradingBot] Closing trade {Id} at ${Price} reason={Reason}",
@@ -476,10 +643,44 @@ public sealed class TradingBotService(
             return;
         }
 
+        // ── Daily entry cap ───────────────────────────────────────────────────
+        //
+        // Checked once, outside the strategy loop, because the cap is on the account's
+        // trading for the day rather than on any one strategy's. Not a circuit
+        // breaker: hitting it is a normal end to a busy day and should stop entries,
+        // not stop the bot — open positions still need their exits evaluated.
+        if (opts.MaxEntriesPerDay > 0 && entriesToday >= opts.MaxEntriesPerDay)
+        {
+            log.LogInformation(
+                "[TradingBot] {Count} entries already opened today, at the {Max} limit. No further " +
+                "entries until 00:00 UTC; open positions are still managed.",
+                entriesToday, opts.MaxEntriesPerDay);
+
+            await SafeRecordAsync(
+                configRepo.RecordEntryRefusalAsync(
+                    $"daily entry cap reached ({entriesToday}/{opts.MaxEntriesPerDay})", ct),
+                "entry cap refusal");
+
+            return;
+        }
+
         foreach (var strat in opts.ActiveStrategies)
         {
-            var stratTrades = openTrades.Where(t => t.Strategy == strat).ToList();
-            
+            // Counted from live state at the moment of the decision, not from the
+            // `openTrades` snapshot taken at the top of the cycle.
+            //
+            // The snapshot is stale by the time execution reaches here: the exit loop
+            // above may have closed several of those positions, and each strategy's
+            // own entry below adds one. Reading the snapshot made the concurrency
+            // limit answer a question about the past — it counted positions that had
+            // already been closed this cycle, and on the other side it could not see
+            // a position opened by an earlier strategy in this same loop. Both
+            // directions are wrong, and the second one lets the limit be exceeded.
+            var stratTrades = state.GetOpenTrades()
+                .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
+                .Where(t => string.Equals(t.Strategy, strat, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
             if (stratTrades.Count < opts.MaxOpenTradesPerStrategy)
             {
                 bool cooldownOk = true;
@@ -495,15 +696,58 @@ public sealed class TradingBotService(
                     var decision = await strategy.ShouldEnterAsync(strat, opts, stratTrades, currentPrice.Value, ct);
                     if (decision.Pass)
                     {
-                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0}{Rationale}",
+                        // ── The gate has the only veto on entry ────────────────
+                        //
+                        // Everything about the trade is already fixed: direction from
+                        // cross-venue flow consensus, stop and target from measured
+                        // volatility, size from the position sizer. The gate is asked
+                        // one question about a finished proposal, and it can only ever
+                        // answer no.
+                        //
+                        // That asymmetry is the safety property. Every failure mode —
+                        // Ollama down, timed out, unparseable, ambiguous — resolves to
+                        // "no entry", which costs an opportunity and never a position.
+                        // The arrangement this replaces blended the model's output into
+                        // a composite score, where a wrong answer moved real money in
+                        // the wrong direction.
+                        var gate = await ReviewEntryAsync(
+                            opts, strat, decision, currentPrice.Value, stratTrades.Count, ct);
+
+                        if (!gate.Approved)
+                        {
+                            log.LogInformation(
+                                "[TradingBot] {Strat} {Side} was proposed and the gate declined it: {Reason}",
+                                strat, decision.Side, gate.Reason);
+
+                            // Persisted, because a declined entry is the outcome an
+                            // operator is least able to see. A bot that refused every
+                            // entry for hours looked identical to one waiting for a
+                            // signal, and the only trace was in a container log that
+                            // did not survive the container.
+                            await SafeRecordAsync(
+                                configRepo.RecordEntryRefusalAsync(
+                                    $"gate declined {strat} {decision.Side}: {gate.Reason}", ct),
+                                "gate refusal");
+
+                            // No cooldown stamp: nothing was opened, so nothing should
+                            // pace the next attempt.
+                            continue;
+                        }
+
+                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0} gate={Gate}{Rationale}",
                             strat, decision.Side, stratTrades.Count + 1, opts.MaxOpenTradesPerStrategy, opts.Symbol,
-                            decision.Confidence, decision.Rationale != null ? $" [{decision.Rationale}]" : "");
+                            decision.Confidence, gate.Verdict,
+                            decision.Rationale != null ? $" [{decision.Rationale}]" : "");
 
                         try
                         {
                             var trade = await orderEngine.OpenPositionAsync(
                                 opts.Symbol, strat, decision.Side, currentPrice.Value, opts.CapitalUsd, opts.PositionPctOfCapital, ct,
-                                decision.Confidence, opts.UseAiSizing);
+                                decision.Confidence, opts.UseAiSizing,
+                                // Passed into the engine, not attached afterwards: the
+                                // exchange-side OCO is armed inside OpenPositionAsync
+                                // and it is the stop that survives this process dying.
+                                decision.Geometry);
 
                             state.AddOpenTrade(trade);
                             state.SetLastEntryAt(strat, DateTime.UtcNow);
@@ -528,6 +772,54 @@ public sealed class TradingBotService(
                                     trade.Id, decision.Composite, decision.Confidence,
                                     decision.Rationale, ct),
                                 "entry evidence");
+
+                            // ── Exit levels, onto the row ──────────────────────
+                            //
+                            // Not wrapped in SafeRecordAsync, unlike the two writes
+                            // above. Those exist to make behaviour visible and losing
+                            // them costs an explanation; this one is what the exit
+                            // evaluation reads, and losing it means the position falls
+                            // back to the configured percentages — a different, usually
+                            // tighter stop than the entry was sized against.
+                            //
+                            // So it is recorded, and a failure is escalated rather than
+                            // swallowed. The position is already open either way, which
+                            // is why this cannot throw past here: the trade must stay in
+                            // state and keep being managed. What it must not do is stay
+                            // quiet.
+                            if (decision.Geometry is { } signalGeometry)
+                            {
+                                // Re-anchored onto the price that actually filled, not
+                                // the one the signal was scored at. With a resting
+                                // maker entry those differ by minutes and a few basis
+                                // points, and against a stop that may only be 40 bps
+                                // wide a 5 bps drift moves the risk on the trade by
+                                // over a tenth. The distances are the decision; the
+                                // prices are that decision applied to the real fill.
+                                var geometry = signalGeometry.RebaseTo(trade.EntryPrice, decision.Side);
+
+                                try
+                                {
+                                    await repo.RecordEntryGeometryAsync(
+                                        trade.Id, geometry.StopPrice, geometry.TargetPrice,
+                                        (decimal)geometry.AtrPctUsed, gate.Verdict, gate.Reason, ct);
+
+                                    trade.StopPrice   = geometry.StopPrice;
+                                    trade.TargetPrice = geometry.TargetPrice;
+                                    trade.GateVerdict = gate.Verdict;
+                                    trade.GateReason  = gate.Reason;
+                                }
+                                catch (Exception ex) when (ex is not OperationCanceledException)
+                                {
+                                    log.LogCritical(ex,
+                                        "[TradingBot] Trade {Id} is OPEN but its stop ({Stop}) and target " +
+                                        "({Target}) could not be persisted. The bot will manage it with " +
+                                        "the configured {Sl:P2}/{Tp:P2} instead, which is not what this " +
+                                        "entry was sized against. Set the levels by hand or close it.",
+                                        trade.Id, geometry.StopPrice, geometry.TargetPrice,
+                                        opts.StopLossPct, opts.TakeProfitPct);
+                                }
+                            }
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {

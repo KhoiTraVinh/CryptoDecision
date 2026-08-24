@@ -292,11 +292,41 @@ public sealed record OkxPositionHistory(
 
 public sealed record OkxTicker(
     [property: JsonPropertyName("instId")] string? InstId,
-    [property: JsonPropertyName("last")]   string? LastRaw
+    [property: JsonPropertyName("last")]   string? LastRaw,
+    [property: JsonPropertyName("bidPx")]  string? BidRaw,
+    [property: JsonPropertyName("askPx")]  string? AskRaw
 )
 {
     /// <summary>Last traded price, or null when the field is absent or empty.</summary>
     public decimal? Last => OkxNum.ParseOrNull(LastRaw);
+
+    /// <summary>Best bid — the highest price a resting buyer will pay.</summary>
+    public decimal? Bid => OkxNum.ParseOrNull(BidRaw);
+
+    /// <summary>Best ask — the lowest price a resting seller will accept.</summary>
+    public decimal? Ask => OkxNum.ParseOrNull(AskRaw);
+
+    /// <summary>
+    /// Both sides of the book present and sane.
+    ///
+    /// Checked as a unit because a maker entry needs a side to rest on, and a
+    /// one-sided or crossed quote means the book is not in a state to rest in.
+    /// A crossed book (bid above ask) is not a tradeable market — it is a stale
+    /// or partial snapshot — and placing into it is how a "maker" order becomes a
+    /// taker one at a price nobody chose.
+    /// </summary>
+    public bool HasTwoSidedQuote => Bid is > 0m && Ask is > 0m && Bid <= Ask;
+
+    /// <summary>Spread in basis points of the mid, or null without a two-sided quote.</summary>
+    public double? SpreadBps
+    {
+        get
+        {
+            if (!HasTwoSidedQuote) return null;
+            var mid = (Bid!.Value + Ask!.Value) / 2m;
+            return mid > 0m ? (double)((Ask.Value - Bid.Value) / mid) * 10_000.0 : null;
+        }
+    }
 }
 
 // ── Account balance ──────────────────────────────────────────────────────────

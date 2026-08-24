@@ -29,9 +29,27 @@ builder.Services.AddSingleton(ds);
 builder.Services.AddSingleton<IFeatureRepository, FeatureRepository>();
 builder.Services.AddSingleton<IMomentumRepository, MomentumRepository>();
 builder.Services.AddSingleton<IPredictionRepository, PredictionRepository>();
+builder.Services.AddSingleton<IFlowBarRepository, FlowBarRepository>();
 
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────
 builder.Services.AddSingleton<ITradingStrategy, MomentumStrategy>();
+
+// The cross-venue flow strategy. Registered alongside MOMENTUM rather than replacing
+// it, because which strategies run is bot_config.active_strategies — a database edit,
+// not a redeploy. Switching to XVENUE_FLOW is therefore reversible in one UPDATE,
+// which matters while the new signal has not yet been validated on enough history to
+// justify committing to it.
+builder.Services.AddSingleton<FlowStrategyOptions>(sp =>
+{
+    var options = new FlowStrategyOptions();
+    builder.Configuration.GetSection(FlowStrategyOptions.Section).Bind(options);
+    return options;
+});
+builder.Services.AddSingleton<ITradingStrategy, CrossVenueFlowStrategy>();
+
+// The entry gate. This is the only place a language model can affect whether real
+// funds move, and it can only ever prevent a trade — see AiEntryGate.
+builder.Services.AddSingleton<IEntryGate, AiEntryGate>();
 
 // ─── Trading Bot ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<BotStateService>();

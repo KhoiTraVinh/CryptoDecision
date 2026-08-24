@@ -1,5 +1,6 @@
 using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.Shared.Bot;
+using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Bot;
 
@@ -10,7 +11,20 @@ namespace CryptoDecision.BotService.Bot;
 /// </summary>
 public interface IOrderEngine
 {
-    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false);
+    /// <param name="geometry">
+    /// Volatility-scaled stop and target for this entry, when the strategy produced
+    /// them. Null falls back to the configured percentages.
+    ///
+    /// Threaded through the engine rather than attached to the trade afterwards
+    /// because the exchange-side OCO is placed here, inside OpenPositionAsync, and it
+    /// is the protection that survives the bot process dying. Recording the geometry
+    /// on the row after the fact left the OCO on the configured 2%/1.5% while the bot
+    /// watched a 3.2%/1.6% pair — two different stops on one position, with the
+    /// exchange holding the one that actually fires. That is not bookkeeping drifting
+    /// out of step, it is the strategy being silently overridden by whatever
+    /// bot_config happens to say.
+    /// </param>
+    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null);
     Task<BotTrade> CloseTradeAsync(BotTrade trade, decimal exitPrice, string reason, CancellationToken ct);
 
     /// <summary>
@@ -84,11 +98,28 @@ public sealed class PaperOrderEngine(
         => Task.FromResult<BotTrade?>(null);
 
     public async Task<BotTrade> OpenPositionAsync(
-        string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false)
+        string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null)
     {
-        var feature = await featureRepo.GetTodayAsync(symbol, ct);
-        var size    = PositionSizer.Resolve(
-            capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
+        // Paper mode has no exchange-side OCO to place, so the geometry is carried
+        // onto the row for the exit evaluation to read — the same field the live
+        // engine populates, so a simulated run exits where a real one would.
+        //
+        // Sizing follows the same two rules as the live engine, by design: a paper run
+        // whose position sizing differs from the live one is not a rehearsal of
+        // anything. See PositionSizer.ResolveByRisk.
+        PositionSize size;
+
+        if (geometry is { StopPct: > 0m } g)
+        {
+            size = PositionSizer.ResolveByRisk(
+                capitalUsd, state.Options.RiskPctPerTrade, g.StopPct, confidence, useAiSizing);
+        }
+        else
+        {
+            var feature = await featureRepo.GetTodayAsync(symbol, ct);
+            size = PositionSizer.Resolve(
+                capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
+        }
 
         var notional = size.NotionalUsd;
         var qty      = Math.Round(notional / price, 6);
@@ -99,10 +130,13 @@ public sealed class PaperOrderEngine(
                 "[PaperBot] AI-sized: confidence={Conf:P0} scalar={Scalar:F2} adjustedPct={Pct:P1}",
                 confidence, size.ConfidenceScalar, size.AdjustedPct);
 
+        // Risk-based sizing reports a scalar of 1.0 — the volatility adjustment lives
+        // in the stop distance there, not in a haircut on the notional — so this only
+        // ever fires on the fallback path, which is where it is meaningful.
         if (size.VolatilityScalar < 1.0)
             log.LogInformation(
-                "[PaperBot] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional=${Notional}",
-                feature?.Volatility ?? 2.0m, size.VolatilityScalar, notional);
+                "[PaperBot] Vol-adjusted size: scalar={Scalar:P0} notional={Notional}",
+                size.VolatilityScalar, notional);
 
         var trade = new BotTrade
         {
@@ -118,6 +152,14 @@ public sealed class PaperOrderEngine(
             // The venue whose prices drove this simulated fill, so a paper row can
             // still be compared against the live rows it was meant to predict.
             Exchange    = state.Options.Exchange,
+
+            // Same levels the live engine would arm at the exchange. Carried here so a
+            // paper run exits where a live run would — otherwise the simulation being
+            // used to validate the strategy is validating a different exit policy,
+            // which is the one thing a paper run must not quietly do.
+            StopPrice     = geometry?.RebaseTo(price, side).StopPrice,
+            TargetPrice   = geometry?.RebaseTo(price, side).TargetPrice,
+            AtrPctAtEntry = geometry is null ? null : (decimal)geometry.AtrPctUsed,
         };
 
         trade = trade with { Id = await repo.InsertTradeAsync(trade, ct) };

@@ -41,6 +41,58 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Attach the exit geometry and the gate's verdict to a freshly opened trade.
+    ///
+    /// A second statement rather than parameters on IOrderEngine.OpenPositionAsync,
+    /// for the reason <see cref="RecordEntryEvidenceAsync"/> already gives: these are
+    /// facts the strategy and the gate own, and threading them through the engine
+    /// would touch three implementations to carry values none of them use.
+    ///
+    /// Unlike the evidence write, this one is <em>not</em> safe to swallow. The stop
+    /// price is what the exit evaluation reads; a position whose geometry failed to
+    /// persist falls back to the configured percentages, which for a volatility-scaled
+    /// stop is a different — and possibly much tighter — level than the one the entry
+    /// was sized against. The caller has to know.
+    /// </summary>
+    public async Task RecordEntryGeometryAsync(
+        long tradeId,
+        decimal stopPrice,
+        decimal targetPrice,
+        decimal atrPct,
+        string gateVerdict,
+        string? gateReason,
+        CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_trades
+            SET stop_price       = @stop,
+                target_price     = @target,
+                atr_pct_at_entry = @atr,
+                gate_verdict     = @verdict,
+                gate_reason      = @reason
+            WHERE id = @id
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id",      tradeId);
+        cmd.Parameters.AddWithValue("stop",    NpgsqlDbType.Numeric, stopPrice);
+        cmd.Parameters.AddWithValue("target",  NpgsqlDbType.Numeric, targetPrice);
+        cmd.Parameters.AddWithValue("atr",     NpgsqlDbType.Numeric, atrPct);
+        cmd.Parameters.AddWithValue("verdict", gateVerdict);
+        cmd.Parameters.AddWithValue("reason",
+            string.IsNullOrWhiteSpace(gateReason) ? DBNull.Value : gateReason);
+
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+
+        if (rows != 1)
+            throw new InvalidOperationException(
+                $"Expected to set exit geometry on exactly one row for trade {tradeId}, " +
+                $"but {rows} were updated. The position is open without the stop level the " +
+                "entry was sized against.");
+    }
+
     // ── Insert a new trade ────────────────────────────────────────────────────
 
     public async Task<long> InsertTradeAsync(BotTrade t, CancellationToken ct = default)
@@ -178,7 +230,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
             SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
-                   leverage, margin_mode
+                   leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
+                   gate_verdict, gate_reason
             FROM bot_trades
             WHERE status = 'OPEN'
             ORDER BY opened_at ASC
@@ -215,7 +268,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
             SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
-                   leverage, margin_mode
+                   leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
+                   gate_verdict, gate_reason
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -310,5 +364,14 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         ExitAlgoId   = r.IsDBNull(20) ? null : r.GetString(20),
         Leverage     = r.IsDBNull(21) ? null : r.GetDecimal(21),
         MarginMode   = r.IsDBNull(22) ? null : r.GetString(22),
+
+        // Ordinals continue the SELECT list above. Positional rather than by name
+        // because every query in this class shares one column list, so the two stay
+        // in step or neither compiles.
+        StopPrice     = r.IsDBNull(23) ? null : r.GetDecimal(23),
+        TargetPrice   = r.IsDBNull(24) ? null : r.GetDecimal(24),
+        AtrPctAtEntry = r.IsDBNull(25) ? null : r.GetDecimal(25),
+        GateVerdict   = r.IsDBNull(26) ? null : r.GetString(26),
+        GateReason    = r.IsDBNull(27) ? null : r.GetString(27),
     };
 }

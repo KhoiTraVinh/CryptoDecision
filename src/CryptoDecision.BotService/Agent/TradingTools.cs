@@ -33,8 +33,18 @@ public sealed class GetMarketSnapshotTool(
             var mtf     = await momentumRepo.GetMultiTimeframeAsync(symbol, ct);
             var feature = await featureRepo.GetTodayAsync(symbol, ct);
 
+            // Bounded by age for the same reason the deterministic strategy is: the
+            // prediction service is switched off routinely, and the row it last wrote
+            // stays in the table looking exactly like a current one. Handing a stale
+            // direction to a model that has been told "the AI prediction agreeing
+            // raises conviction" is worse than handing it nothing — absence it can
+            // reason about, a wrong current-looking figure it cannot.
             PredictionSnapshot? prediction = null;
-            try { prediction = await predictionRepo.GetLatestAsync(symbol, ct); }
+            try
+            {
+                prediction = await predictionRepo.GetLatestAsync(
+                    symbol, PredictionFreshness.MaxAge, ct);
+            }
             catch { /* prediction is optional context, never fatal */ }
 
             // Described in words, not just ratios. The same lesson the prediction

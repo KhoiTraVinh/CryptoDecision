@@ -25,7 +25,10 @@ services:
       KAFKA_LOG_RETENTION_HOURS:           72
       KAFKA_LOG_SEGMENT_BYTES:             104857600
       KAFKA_NUM_NETWORK_THREADS:           2
-      KAFKA_NUM_IO_THREADS:                4
+      # 2, not 4. On a 2-vCPU host four IO threads oversubscribe the box and the JVM
+      # spends time context-switching rather than doing work. Throughput here is one
+      # symbol at ~28 trades/sec, which one thread would carry.
+      KAFKA_NUM_IO_THREADS:                2
       # Single-broker: internal topics must use replication-factor=1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:          1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR:  1
@@ -79,21 +82,16 @@ services:
     container_name: postgres
     ports:
       - "5432:5432"
-    mem_limit: 768m
+    # Raised from 768m. Postgres is the workhorse here and the only service whose
+    # performance is cache-sensitive; with a 7-day trades window (~2.5 GB) more page
+    # cache is the highest-value gigabyte in the budget.
+    mem_limit: 1g
     environment:
       POSTGRES_DB:       crypto
       POSTGRES_USER:     crypto
       POSTGRES_PASSWORD: crypto
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./sql/001_bootstrap_schema.sql:/docker-entrypoint-initdb.d/001_bootstrap_schema.sql:ro
-      - ./sql/002_partition_helpers.sql:/docker-entrypoint-initdb.d/002_partition_helpers.sql:ro
-      - ./sql/003_app_users.sql:/docker-entrypoint-initdb.d/003_app_users.sql:ro
-      - ./sql/004_add_exchange.sql:/docker-entrypoint-initdb.d/004_add_exchange.sql:ro
-      - ./sql/005_bot_config.sql:/docker-entrypoint-initdb.d/005_bot_config.sql:ro
-      - ./sql/009_price_alerts.sql:/docker-entrypoint-initdb.d/009_price_alerts.sql:ro
-      - ./sql/010_bot_config_v2.sql:/docker-entrypoint-initdb.d/010_bot_config_v2.sql:ro
-      - ./sql/011_bot_ai_config.sql:/docker-entrypoint-initdb.d/011_bot_ai_config.sql:ro
     command: >
       postgres
         -c max_connections=50
@@ -113,6 +111,42 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ── Schema migrations ─────────────────────────────────────────────────────
+  #
+  # Applies sql/*.sql in filename order, once each, recorded in schema_migrations.
+  #
+  # This replaces docker-entrypoint-initdb.d, which could not do the job: Postgres
+  # runs that directory only when the data volume is empty, so it never applied
+  # anything on an upgrade, and the mount list stopped at 011. Migrations 012-022 —
+  # flow_bars_15m, per-trade exit geometry, the entry cap, risk-based sizing, both
+  # readiness views — were applied by hand to one machine. A fresh instance would
+  # have started, reported healthy, and abstained forever against a table that did
+  # not exist.
+  #
+  # Every service that touches the database waits on this completing successfully.
+  db-migrate:
+    image: postgres:16
+    container_name: db-migrate
+    mem_limit: 128m
+    environment:
+      PGHOST:     postgres
+      PGPORT:     "5432"
+      PGUSER:     "${POSTGRES_USER:-crypto}"
+      PGPASSWORD: "${POSTGRES_PASS:-crypto}"
+      PGDATABASE: "${POSTGRES_DB:-crypto}"
+      SQL_DIR:    /sql
+      # Set to 1 exactly once, against a database already migrated by hand, to record
+      # the existing files without re-running them. Never against an empty database —
+      # it would produce a ledger claiming a schema that does not exist.
+      MIGRATE_BASELINE: "${MIGRATE_BASELINE:-0}"
+    volumes:
+      - ./sql:/sql:ro
+    entrypoint: ["/bin/sh", "/sql/migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   # ── IngestionService ──────────────────────────────────────────────────────────
   ingestion:
@@ -156,6 +190,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -170,7 +206,11 @@ services:
       context: ./src
       dockerfile: CryptoDecision.BotService/Dockerfile
     container_name: bot
-    mem_limit: 128m
+    # Raised from 128m. The process was steady at 92 MB against that cap — 72%, with
+    # no headroom for a GC to work in — and stalled with every thread in futex_wait.
+    # 256m matches the other .NET services here and is still small; the GC mode was
+    # the larger half of that problem and is fixed in the csproj.
+    mem_limit: 256m
     environment:
       DOTNET_ENVIRONMENT:              Production
       ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
@@ -193,9 +233,36 @@ services:
       Okx__MaxOrderNotionalUsd:        "${OKX_MAX_ORDER_NOTIONAL_USD:-100}"
       Okx__Leverage:                   "${OKX_LEVERAGE:-3}"
       Okx__MarginMode:                 "${OKX_MARGIN_MODE:-isolated}"
+
+      # The same tag the pull and the prediction service use. Stated here rather than
+      # left to the code default, which was qwen2.5:7b — and because the availability
+      # probe matches only the name before the colon, a 3b-only host would have looked
+      # healthy and then refused every entry on a chat call for a missing tag.
+      Agent__Model:                    "${OLLAMA_MODEL:-qwen2.5:3b}"
+
+      # ── Flow signal tuning ──
+      #
+      # BaselineBars 44, not the 96 the code defaults to, and this is a concession
+      # with a stated cost rather than a tuned value.
+      #
+      # The baseline is what turns a raw imbalance into "this is 1.6 sigma from
+      # normal", so its length is the length of the sample the median and MAD are
+      # estimated from. 96 bars gives 93 rolling samples; 44 gives 41. Forty-one is
+      # thin — a noisier sigma means noisier z-scores means more marginal signals —
+      # but it is a real estimate, not a guess, and it is what the data on hand can
+      # support: only ~56 buckets per venue exist, because the 21-22 August history is
+      # itself 47% complete and the continuous run restarted on the 23rd.
+      #
+      # The alternative was eleven more hours of ingestion before the strategy could
+      # score anything at all, which is a real cost in power on this host. This value
+      # is provisional: the backtester sweeps BaselineBars, and this should be revisited
+      # from that sweep rather than left because it worked.
+      FlowStrategy__Signal__BaselineBars: "44"
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -222,6 +289,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -232,7 +301,7 @@ services:
 
   # ── Ollama — local LLM runtime serving Qwen 2.5 7B ────────────────────────
   #
-  # Resource note: qwen2.5:7b at the default Q4_K_M quantisation is ~4.7 GB on
+  # Resource note: qwen2.5:3b at Q4_K_M is ~1.9 GB on
   # disk and wants roughly 6-8 GB of RAM resident while loaded. mem_limit is set
   # above that with headroom for the KV cache; lowering it will get the model
   # OOM-killed mid-generation rather than making it run leaner. If the host
@@ -247,11 +316,24 @@ services:
     container_name: ollama
     ports:
       - "11434:11434"
-    mem_limit: 10g
+    # 6g, not 10g. Docker on this host has 8.3 GB total, so a 10 GB limit was not a
+    # limit at all — it exceeded the VM, so the kernel OOM killer decided the outcome
+    # instead of Docker, and what it reaches for is whatever is largest at the time.
+    # That is how Docker Desktop was killed here before. 3g holds qwen2.5:3b (1.9 GB on
+    # disk) with context headroom and leaves the rest of the stack, which measures
+    # under 900 MB in total, comfortably clear.
+    # 3 GB for qwen2.5:3b (~1.9 GB of weights plus KV cache at 8k context).
+    mem_limit: 3g
     environment:
       # Keep the model resident between prediction cycles. The default 5m would
       # unload it between runs and pay the multi-second load cost every time.
-      OLLAMA_KEEP_ALIVE:        "30m"
+      # Never unload. With ~4 gate calls a day, a 30-minute keep-alive meant almost
+      # every call paid the cold load — 15-18s on 2 Graviton cores, against a 90s
+      # cycle deadline. Holding 1.9 GB resident is the cheaper trade on an 8 GB box.
+      OLLAMA_KEEP_ALIVE:        "-1"
+      # Match the physical core count. Left unset, Ollama sizes its thread pool from
+      # nproc and oversubscribes a 2-core instance.
+      OLLAMA_NUM_THREAD:        "2"
       # One model, one request at a time — bounds peak memory predictably.
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_NUM_PARALLEL:      "1"
@@ -268,7 +350,14 @@ services:
       start_period: 20s
 
   # ── One-shot model pull ───────────────────────────────────────────────────
-  # Downloads qwen2.5:7b into the shared volume on first boot (~4.7 GB) and exits.
+  # Pulls the configured model into the shared volume on first boot and exits.
+  #
+  # The tag comes from .env so this pull, the prediction service and the bot agent
+  # cannot disagree about it. They could before: the bot defaulted to qwen2.5:7b in
+  # code with no env override, while OllamaAgentClient.IsAvailableAsync matches on the
+  # name before the colon — so on a host with only 3b pulled it would report the model
+  # available and then fail the actual chat call on a tag that does not exist. That
+  # surfaces as the gate refusing every entry, with a log line about JSON parsing.
   # Nothing blocks on it: the prediction service degrades to quantitative-only
   # while the pull runs and picks the LLM up automatically once it lands.
   ollama-init:
@@ -284,7 +373,7 @@ services:
     # reasoning as kafka-init above.
     command:
       - >-
-        ollama pull qwen2.5:7b
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
     volumes:
       - ollama_models:/root/.ollama
     restart: "no"
@@ -295,6 +384,12 @@ services:
       context: ./src/CryptoDecision.PredictionService
       dockerfile: Dockerfile
     container_name: prediction
+    # Off by default. With XVENUE_FLOW active nothing reads prediction_table: the
+    # strategy scores cross-venue flow directly and the entry gate calls Ollama
+    # itself. Kept in the file, behind a profile, because the ensemble is still the
+    # reference implementation of the daily-horizon model — not running it and
+    # deleting it are separate decisions.
+    profiles: ["ensemble"]
     # Raised from 128m: the service now builds richer market contexts and holds
     # prompt/response strings. Inference itself lives in the ollama container.
     mem_limit: 256m
@@ -316,7 +411,7 @@ services:
       # Set OLLAMA_ENABLED=false to run the ensemble on XGBoost + heuristic only.
       OLLAMA_ENABLED:           "true"
       OLLAMA_BASE_URL:          "http://ollama:11434"
-      OLLAMA_MODEL:             "qwen2.5:7b"
+      OLLAMA_MODEL:             "${OLLAMA_MODEL:-qwen2.5:3b}"
       OLLAMA_TIMEOUT_SECONDS:   "120"
       OLLAMA_TEMPERATURE:       "0.2"
       OLLAMA_NUM_CTX:           "8192"
@@ -341,6 +436,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       # Deliberately service_started, not service_healthy: predictions should not
       # wait on a multi-gigabyte model pull. The LLM joins the ensemble on its own
       # once it answers an availability probe.

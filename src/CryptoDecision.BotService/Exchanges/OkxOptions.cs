@@ -86,6 +86,53 @@ public sealed class OkxOptions
     /// <summary>Per-request timeout for the OKX REST API, in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 10;
 
+    // ── Maker entries ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Enter by resting a post-only order on the book instead of crossing the spread.
+    ///
+    /// This is the largest remaining cost lever, and for a signal with a small gross
+    /// edge it is close to decisive. OKX charges roughly 5 bps taker and 2 bps maker
+    /// per side on USDT-margined swaps, so a taker-in/taker-out round trip costs about
+    /// 10 bps against about 4 for maker-in. Published work on order-flow-imbalance
+    /// strategies in crypto perpetuals found them net negative at an assumed 4 bps
+    /// round trip — which puts 10 bps well outside anything the signal can pay for,
+    /// and 4 bps merely at the edge.
+    ///
+    /// What it costs: a resting order is not an entry until someone trades against it,
+    /// so some signals are simply missed. That is the right trade here — a missed
+    /// entry costs an opportunity, while 6 extra basis points costs money on every
+    /// trade actually taken. It is only the right trade because the signal is held for
+    /// hours; for a strategy that needed to be in within seconds it would not be.
+    ///
+    /// Exits stay taker regardless. A stop that waits for a fill is not a stop.
+    /// </summary>
+    public bool UseMakerEntries { get; set; } = true;
+
+    /// <summary>
+    /// How long to leave an entry order resting, expressed as polls × delay.
+    ///
+    /// 60 × 1000ms = one minute. Bounded because the price the signal was scored at
+    /// goes stale: an order still resting after several minutes would, if it filled,
+    /// be entering on evidence that has since been superseded. Cancelling and letting
+    /// the next cycle re-decide is the honest handling.
+    /// </summary>
+    public int MakerFillPollAttempts { get; set; } = 60;
+
+    /// <summary>Delay between polls while an entry order rests, in milliseconds.</summary>
+    public int MakerFillPollDelayMs { get; set; } = 1_000;
+
+    /// <summary>
+    /// How many ticks inside the touch to rest, on the passive side.
+    ///
+    /// Zero rests at the best bid (buying) or best ask (selling): the front of the
+    /// queue, the highest fill probability that is still maker. A positive value
+    /// steps away from the touch, which improves the price and lowers the chance of
+    /// filling at all. Zero is the right default — the edge being chased here is the
+    /// fee saving, not another basis point of entry price.
+    /// </summary>
+    public int MakerPriceOffsetTicks { get; set; } = 0;
+
     public bool HasCredentials =>
         !string.IsNullOrWhiteSpace(ApiKey)
         && !string.IsNullOrWhiteSpace(ApiSecret)

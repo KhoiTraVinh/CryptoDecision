@@ -62,6 +62,7 @@ public sealed class MomentumStrategy(
     /// </summary>
     private const int     MinWhaleTrades = 3;
 
+
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
     {
         var opts = ctx.Options;
@@ -135,7 +136,8 @@ public sealed class MomentumStrategy(
             PredictionSnapshot? prediction = null;
             try
             {
-                prediction = await predictionRepo.GetLatestAsync(opts.Symbol, ct);
+                prediction = await predictionRepo.GetLatestAsync(
+                    opts.Symbol, PredictionFreshness.MaxAge, ct);
             }
             catch (Exception ex)
             {

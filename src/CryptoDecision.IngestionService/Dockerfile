@@ -1,10 +1,24 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+# Cross-compiled, not emulated.
+#
+# --platform=$BUILDPLATFORM pins the SDK stage to the machine doing the building, so
+# restore and publish run natively on the x86 CI runner. Only the runtime stage below
+# is the target architecture, and that stage does nothing but copy files — which needs
+# no emulation.
+#
+# The alternative is letting buildx run the whole SDK stage under QEMU for arm64.
+# That works and is roughly ten times slower: emulating the Roslyn compiler turned a
+# two-minute build into twenty, per service, on every deploy.
+#
+# TARGETARCH is supplied by buildx (arm64 / amd64) and -a maps it to the .NET RID, so
+# this same file builds for either target with no edit.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+ARG TARGETARCH
 WORKDIR /src
 COPY ["CryptoDecision.IngestionService.csproj", "."]
-RUN dotnet restore
+RUN dotnet restore -a $TARGETARCH
 COPY . .
-RUN dotnet publish -c Release -o /app/publish --no-restore
+RUN dotnet publish -c Release -a $TARGETARCH -o /app/publish --no-restore
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/runtime:9.0 AS runtime

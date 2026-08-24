@@ -1,6 +1,7 @@
 using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.Shared.Bot;
+using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Bot;
 
@@ -98,7 +99,8 @@ public sealed class OkxOrderEngine(
 
     public async Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
-        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false)
+        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        StopGeometry? geometry = null)
     {
         var refusal = DescribeRefusal(state.Options);
         if (refusal is not null)
@@ -124,25 +126,50 @@ public sealed class OkxOrderEngine(
         // notional requires. Sizing off margin instead would let a leverage change
         // silently multiply exposure, which is how a working configuration becomes
         // an account-ending one without anybody editing a risk parameter.
-        var feature = await featureRepo.GetTodayAsync(symbol, ct);
-        var size    = PositionSizer.Resolve(
-            capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
+        // Two sizing rules, chosen by whether the strategy supplied a stop distance.
+        //
+        // With one, size is whatever makes that stop cost risk_pct_per_trade of
+        // capital — so every trade risks the same money whatever the regime. Without
+        // one, fall back to the older percentage-of-capital rule, which is all a
+        // strategy that does not express a stop distance can support.
+        //
+        // They must not be combined. Sizing a fraction of capital and *then* shrinking
+        // it for volatility, while the stop separately widens for volatility, adjusts
+        // one decision with two readings of the same thing: on this account a 15.9%
+        // daily volatility pinned the scalar at its 0.5 floor and halved every order,
+        // while the 15-minute ATR that sets the stop was 1.07%.
+        var sizingOpts = state.Options;
+        PositionSize size;
+
+        if (geometry is { StopPct: > 0m } g)
+        {
+            size = PositionSizer.ResolveByRisk(
+                capitalUsd, sizingOpts.RiskPctPerTrade, g.StopPct, confidence, useAiSizing);
+
+            log.LogInformation(
+                "[OKX] Risk-based size: {Risk:P2} of {Capital} capital over a {Stop:P2} stop = " +
+                "{Notional} notional, {RiskUsd:F2} USD at risk.",
+                sizingOpts.RiskPctPerTrade, capitalUsd, g.StopPct, size.NotionalUsd,
+                capitalUsd * sizingOpts.RiskPctPerTrade);
+        }
+        else
+        {
+            var feature = await featureRepo.GetTodayAsync(symbol, ct);
+            size = PositionSizer.Resolve(
+                capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
+
+            // Say what sizing did, on the same terms PaperOrderEngine does. The paper
+            // engine logged the volatility haircut and this one did not, so the single
+            // mode where the number moves real money was the mode where it was invisible.
+            if (size.VolatilityScalar < 1.0)
+                log.LogInformation(
+                    "[OKX] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional={Notional} " +
+                    "(from {Pct:P0} of {Capital})",
+                    feature?.Volatility ?? (decimal)PositionSizer.BaseVolatilityPct,
+                    size.VolatilityScalar, size.NotionalUsd, positionPct, capitalUsd);
+        }
 
         var notional = size.NotionalUsd;
-
-        // Say what sizing did, on the same terms PaperOrderEngine does.
-        //
-        // The paper engine logged the volatility haircut and this one did not, so
-        // the single mode where the number moves real money was the mode where it
-        // was invisible. On a 15.8% volatility day the scalar sat pinned at its 0.5
-        // floor, halving every order, and nothing in the log or on the dashboard
-        // said so — the size just quietly stopped matching the configuration.
-        if (size.VolatilityScalar < 1.0)
-            log.LogInformation(
-                "[OKX] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional=${Notional} " +
-                "(from {Pct:P0} of ${Capital})",
-                feature?.Volatility ?? (decimal)PositionSizer.BaseVolatilityPct,
-                size.VolatilityScalar, notional, positionPct, capitalUsd);
 
         if (useAiSizing && size.ConfidenceScalar != 1.0m)
             log.LogInformation(
@@ -234,10 +261,8 @@ public sealed class OkxOrderEngine(
         var entrySide  = positionSide == "long" ? "buy" : "sell";
         var payloadPos = config.IsHedgeMode ? positionSide : null;
 
-        var orderId = await trading.PlaceSwapMarketOrderAsync(
-            instrument.InstId, entrySide, payloadPos, contracts, reduceOnly: false, ct);
-
-        var fill = await trading.WaitForFillAsync(instrument.InstId, orderId, ct);
+        var (orderId, fill) = await AcquireEntryFillAsync(
+            instrument, entrySide, payloadPos, contracts, price, ct);
 
         // ── Reconcile the fill into a trade record ──
         //
@@ -264,6 +289,13 @@ public sealed class OkxOrderEngine(
             FeeUsd       = Math.Round(entryFeeUsd, 8),
             Leverage     = okxOptions.Leverage,
             MarginMode   = okxOptions.MarginMode,
+
+            // Set here as well as persisted by the caller, so the in-memory trade the
+            // bot manages this cycle already carries the right levels rather than
+            // waiting a round trip for them.
+            StopPrice     = geometry?.RebaseTo(fill.AveragePrice, side).StopPrice,
+            TargetPrice   = geometry?.RebaseTo(fill.AveragePrice, side).TargetPrice,
+            AtrPctAtEntry = geometry is null ? null : (decimal)geometry.AtrPctUsed,
         };
 
         try
@@ -294,9 +326,165 @@ public sealed class OkxOrderEngine(
             okxOptions.Leverage, trade.FeeUsd, price,
             price > 0m ? (fill.AveragePrice - price) / price * 100m : 0m);
 
-        await ArmProtectiveExitAsync(trade, instrument, positionSide, fill.FilledContracts, ct);
+        await ArmProtectiveExitAsync(trade, instrument, positionSide, fill.FilledContracts, geometry, ct);
 
         return trade;
+    }
+
+    /// <summary>
+    /// Get an entry fill: resting on the book when maker entries are on, crossing the
+    /// spread when they are not.
+    ///
+    /// Throws <see cref="InvalidOperationException"/> when no position was opened. The
+    /// caller in TradingBotService already treats that as a refused entry — logged,
+    /// persisted to the refusal trail, cooldown deliberately not stamped — which is
+    /// the correct handling here too: an unfilled maker order is a normal outcome, not
+    /// a fault, and the next cycle re-decides on fresh evidence.
+    /// </summary>
+    private async Task<(string OrderId, OkxFill Fill)> AcquireEntryFillAsync(
+        OkxInstrument instrument, string entrySide, string? payloadPos,
+        decimal contracts, decimal signalPrice, CancellationToken ct)
+    {
+        if (!okxOptions.UseMakerEntries)
+        {
+            var takerId = await trading.PlaceSwapMarketOrderAsync(
+                instrument.InstId, entrySide, payloadPos, contracts, reduceOnly: false, ct);
+
+            return (takerId, await trading.WaitForFillAsync(instrument.InstId, takerId, ct));
+        }
+
+        // ── Where to rest ─────────────────────────────────────────────────────
+        var quote = await trading.GetQuoteAsync(instrument.InstId, ct);
+
+        if (quote is null || !quote.HasTwoSidedQuote)
+            throw new InvalidOperationException(
+                $"OKX returned no usable two-sided quote for {instrument.InstId} " +
+                $"(bid={quote?.BidRaw ?? "none"}, ask={quote?.AskRaw ?? "none"}). A maker order needs " +
+                "a side to rest on; not entering this cycle.");
+
+        var isBuy = entrySide == "buy";
+
+        // The passive side: buy at the bid, sell at the ask. Offset steps *away* from
+        // the touch, never across it — a post-only order that crosses is refused by
+        // the exchange, so stepping the wrong way would simply never fill.
+        var offset = instrument.TickSize * okxOptions.MakerPriceOffsetTicks;
+
+        var limitPrice = isBuy
+            ? quote.Bid!.Value - offset
+            : quote.Ask!.Value + offset;
+
+        limitPrice = OkxSizing.FloorToStep(limitPrice, instrument.TickSize);
+
+        if (limitPrice <= 0m)
+            throw new InvalidOperationException(
+                $"Computed a non-positive limit price ({limitPrice}) for {instrument.InstId} from " +
+                $"bid {quote.Bid} / ask {quote.Ask}. Not entering.");
+
+        // ── Rest it ───────────────────────────────────────────────────────────
+        var placement = await trading.PlaceSwapPostOnlyOrderAsync(
+            instrument.InstId, entrySide, payloadPos, contracts, limitPrice,
+            reduceOnly: false, ct);
+
+        if (!placement.Placed)
+            throw new InvalidOperationException(
+                $"Post-only {entrySide} on {instrument.InstId} at {limitPrice} was not accepted " +
+                $"({placement.RejectCode}: {placement.RejectMessage ?? "no message"}). Usually the " +
+                "book moved and the order would have crossed. Nothing is resting.");
+
+        var orderId = placement.OrdId!;
+
+        var fill = await trading.WaitForRestingFillAsync(
+            instrument.InstId, orderId,
+            okxOptions.MakerFillPollAttempts, okxOptions.MakerFillPollDelayMs, ct);
+
+        if (fill is null)
+        {
+            var waited = okxOptions.MakerFillPollAttempts * okxOptions.MakerFillPollDelayMs / 1000.0;
+            throw new InvalidOperationException(
+                $"Post-only {entrySide} on {instrument.InstId} rested at {limitPrice} for " +
+                $"{waited:F0}s without filling and was cancelled. No position was opened. This is " +
+                "the expected cost of maker entries — the next cycle will re-decide.");
+        }
+
+        // ── Partial fills ─────────────────────────────────────────────────────
+        //
+        // A resting order that filled part way leaves a real position smaller than
+        // the one that was sized and risk-checked. Accepting it silently would put
+        // the account into a position nobody approved the size of; refusing without
+        // cleaning up would leave it open and unmanaged.
+        var filledNotional = fill.FilledContracts * instrument.ContractValue * fill.AveragePrice;
+
+        if (!fill.FullyFilled && filledNotional < okxOptions.MinOrderNotionalUsd)
+        {
+            log.LogWarning(
+                "[OKX] Post-only {Side} on {InstId} filled only {Filled} contract(s) " +
+                "(${Notional:F2}), under the ${Min} minimum. Closing the remainder immediately " +
+                "rather than keeping a position too small to manage.",
+                entrySide, instrument.InstId, fill.FilledContracts, filledNotional,
+                okxOptions.MinOrderNotionalUsd);
+
+            await UnwindDustAsync(instrument, entrySide, payloadPos, fill.FilledContracts, ct);
+
+            throw new InvalidOperationException(
+                $"Post-only {entrySide} on {instrument.InstId} filled ${filledNotional:F2}, under " +
+                $"the ${okxOptions.MinOrderNotionalUsd} minimum; the fill has been closed out. " +
+                "No position is open.");
+        }
+
+        if (!fill.FullyFilled)
+            log.LogWarning(
+                "[OKX] Post-only {Side} on {InstId} filled {Filled} contract(s) (${Notional:F2}) of " +
+                "the {Requested} requested. Keeping the partial position — it clears the minimum — " +
+                "and the stop will be armed against what actually filled.",
+                entrySide, instrument.InstId, fill.FilledContracts, filledNotional, contracts);
+
+        var slippageBps = signalPrice > 0m
+            ? (double)((fill.AveragePrice - signalPrice) / signalPrice) * 10_000.0
+            : 0.0;
+
+        log.LogInformation(
+            "[OKX] Maker entry filled: {Side} {InstId} at {Fill} (rested at {Limit}, signal was " +
+            "{Signal}, {Slip:+0.0;-0.0} bps) fee=${Fee} — taker would have cost roughly " +
+            "3 bps more on this leg.",
+            entrySide, instrument.InstId, fill.AveragePrice, limitPrice, signalPrice,
+            slippageBps, fill.FeeAbs);
+
+        return (orderId, fill);
+    }
+
+    /// <summary>
+    /// Close a fill too small to keep, with a reduce-only market order.
+    ///
+    /// Taker on purpose: this is cleanup of an unwanted position, and the thing that
+    /// matters is that it is gone, not what it cost. Never throws — the caller is
+    /// already on its way to reporting a refused entry, and replacing that message
+    /// with a cleanup error would lose the reason. A failure here is logged as
+    /// critical because it leaves a real, unmanaged position behind.
+    /// </summary>
+    private async Task UnwindDustAsync(
+        OkxInstrument instrument, string entrySide, string? payloadPos,
+        decimal contracts, CancellationToken ct)
+    {
+        try
+        {
+            var closeSide = entrySide == "buy" ? "sell" : "buy";
+
+            var closeId = await trading.PlaceSwapMarketOrderAsync(
+                instrument.InstId, closeSide, payloadPos, contracts, reduceOnly: true, ct);
+
+            await trading.WaitForFillAsync(instrument.InstId, closeId, ct);
+
+            log.LogInformation(
+                "[OKX] Closed the {Contracts}-contract partial fill on {InstId} via order {OrdId}.",
+                contracts, instrument.InstId, closeId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogCritical(ex,
+                "[OKX] Could not close a {Contracts}-contract partial fill on {InstId}. There is a " +
+                "real position open that the bot has no row for, and therefore no stop loss. Close " +
+                "it manually.", contracts, instrument.InstId);
+        }
     }
 
     // ── Exchange-side protection ──────────────────────────────────────────────
@@ -312,23 +500,82 @@ public sealed class OkxOrderEngine(
     /// the fallback — the bot process staying alive — is now the only thing standing
     /// between the trade and liquidation.
     /// </summary>
+    /// <summary>
+    /// Rebuild the geometry from levels already stored on a trade, for the re-arming
+    /// paths — a position whose OCO was never placed, and the residual left by a
+    /// partial exit.
+    ///
+    /// Reconstructed rather than recomputed from a fresh volatility reading. Both call
+    /// sites run minutes or hours after the entry, and measuring the market again there
+    /// would move the stop under a position that already exists — the levels are a
+    /// decision made at entry, and re-arming has to reproduce them, not revise them.
+    ///
+    /// Returns null for a trade that has no stored levels, which puts those rows back
+    /// on the configured percentages. That is correct for them: they were opened under
+    /// that policy.
+    /// </summary>
+    private static StopGeometry? GeometryFromTrade(BotTrade trade)
+    {
+        if (!trade.HasGeometry || trade.EntryPrice <= 0m) return null;
+
+        var isLong = trade.Side != "SHORT";
+        var entry  = trade.EntryPrice;
+
+        var stopPct = isLong
+            ? (entry - trade.StopPrice!.Value) / entry
+            : (trade.StopPrice!.Value - entry) / entry;
+
+        var targetPct = isLong
+            ? (trade.TargetPrice!.Value - entry) / entry
+            : (entry - trade.TargetPrice!.Value) / entry;
+
+        // A stored pair that does not straddle the entry is corrupt rather than merely
+        // unusual, and re-arming from it would place a stop on the wrong side of the
+        // position. Falling back to the configured percentages is the safe reading.
+        if (stopPct <= 0m || targetPct <= 0m) return null;
+
+        return new StopGeometry(
+            StopPct:     stopPct,
+            TargetPct:   targetPct,
+            StopPrice:   trade.StopPrice.Value,
+            TargetPrice: trade.TargetPrice.Value,
+            AtrPctUsed:  (double)(trade.AtrPctAtEntry ?? 0m),
+            RewardRisk:  stopPct > 0m ? targetPct / stopPct : 0m,
+            Basis:       "restored from the stored levels");
+    }
+
     private async Task ArmProtectiveExitAsync(
         BotTrade trade, OkxInstrument instrument, string positionSide, decimal contracts,
-        CancellationToken ct)
+        StopGeometry? geometry, CancellationToken ct)
     {
         var opts    = state.Options;
         var isLong  = positionSide == "long";
         var entry   = trade.EntryPrice;
 
+        // The OCO must guard the levels the strategy chose, not whatever bot_config
+        // currently says.
+        //
+        // This is the order that fires when the bot process is not running, so it is
+        // the real stop — and pointing it at the configured percentages while the bot
+        // watched volatility-scaled ones put two different stops on one position, with
+        // the exchange holding the one that actually executes. Concretely: a 3.2%
+        // target against a configured 2% take profit means the exchange closes every
+        // winner a third early, and the 2:1 reward:risk the entry was accepted on
+        // never exists. Rebased onto the real fill for the same reason the row is.
+        var levels = geometry?.RebaseTo(entry, trade.Side);
+
+        var takeProfitPct = levels?.TargetPct ?? opts.TakeProfitPct;
+        var stopLossPct   = levels?.StopPct   ?? opts.StopLossPct;
+
         // Profit is up for a long and down for a short; the stop is the mirror.
         // Rounding always goes the direction that does not widen risk.
         var takeProfit = isLong
-            ? OkxSizing.FloorToStep(entry * (1m + opts.TakeProfitPct), instrument.TickSize)
-            : OkxSizing.CeilToStep (entry * (1m - opts.TakeProfitPct), instrument.TickSize);
+            ? OkxSizing.FloorToStep(entry * (1m + takeProfitPct), instrument.TickSize)
+            : OkxSizing.CeilToStep (entry * (1m - takeProfitPct), instrument.TickSize);
 
         var stopLoss = isLong
-            ? OkxSizing.CeilToStep (entry * (1m - opts.StopLossPct), instrument.TickSize)
-            : OkxSizing.FloorToStep(entry * (1m + opts.StopLossPct), instrument.TickSize);
+            ? OkxSizing.CeilToStep (entry * (1m - stopLossPct), instrument.TickSize)
+            : OkxSizing.FloorToStep(entry * (1m + stopLossPct), instrument.TickSize);
 
         var straddlesEntry = isLong
             ? takeProfit > entry && stopLoss < entry && stopLoss > 0m
@@ -338,9 +585,9 @@ public sealed class OkxOrderEngine(
         {
             log.LogCritical(
                 "[OKX] Trade {Id} has no exchange-side stop: {Side} TP {Tp} / SL {Sl} do not straddle " +
-                "the {Entry} entry price (take_profit_pct={TpPct:P2}, stop_loss_pct={SlPct:P2}). " +
+                "the {Entry} entry price (tp={TpPct:P2}, sl={SlPct:P2}). " +
                 "This leveraged position is protected only while the bot process is alive.",
-                trade.Id, trade.Side, takeProfit, stopLoss, entry, opts.TakeProfitPct, opts.StopLossPct);
+                trade.Id, trade.Side, takeProfit, stopLoss, entry, takeProfitPct, stopLossPct);
             return;
         }
 
@@ -355,7 +602,7 @@ public sealed class OkxOrderEngine(
             log.LogInformation(
                 "[OKX] Trade {Id} guarded by OCO {AlgoId}: TP ${Tp} / SL ${Sl} " +
                 "({TpPct:P2} / {SlPct:P2} from entry). This survives a bot restart.",
-                trade.Id, algoId, takeProfit, stopLoss, opts.TakeProfitPct, opts.StopLossPct);
+                trade.Id, algoId, takeProfit, stopLoss, takeProfitPct, stopLossPct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -475,7 +722,8 @@ public sealed class OkxOrderEngine(
             log.LogWarning(
                 "[OKX] Trade {Id} is open with no exchange-side stop — re-arming its OCO.", trade.Id);
 
-            await ArmProtectiveExitAsync(trade, instr, positionSide, live.AbsContracts, ct);
+            await ArmProtectiveExitAsync(
+                trade, instr, positionSide, live.AbsContracts, GeometryFromTrade(trade), ct);
             return null;
         }
 
@@ -643,7 +891,8 @@ public sealed class OkxOrderEngine(
             await repo.UpdateOpenQuantityAsync(trade.Id, residualBase, trade.FeeUsd.Value, ct);
 
             await ArmProtectiveExitAsync(
-                trade, instrument, positionSide, contracts - fill.FilledContracts, ct);
+                trade, instrument, positionSide, contracts - fill.FilledContracts,
+                GeometryFromTrade(trade), ct);
 
             return trade;   // Status is still OPEN — the caller must not record a close.
         }

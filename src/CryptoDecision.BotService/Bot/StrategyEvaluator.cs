@@ -77,15 +77,48 @@ public sealed class StrategyEvaluator
 
     // ── Exit Evaluation (delegates to resolved strategy) ──────────────────────
 
-    public ExitDecision EvaluateExit(BotTrade trade, decimal currentPrice, BotOptions opts)
+    /// <param name="clockTrusted">
+    /// False when the caller has reason to believe the wall clock moved between
+    /// cycles by something other than the passage of time. The timeout branch is
+    /// skipped while it is false; every other exit compares prices and is unaffected.
+    ///
+    /// This parameter exists because of a real loss of control on a live account: two
+    /// positions 13 and 16 minutes old were closed in the same instant with reason
+    /// TIMEOUT against a 1440-minute threshold. See
+    /// <see cref="BotStateService.TouchEval"/> for how the condition is detected.
+    /// </param>
+    public ExitDecision EvaluateExit(
+        BotTrade trade, decimal currentPrice, BotOptions opts, bool clockTrusted = true)
     {
         var rawChange = (currentPrice - trade.EntryPrice) / trade.EntryPrice;
         var changePct = trade.Side == "SHORT" ? -rawChange : rawChange;
         var held = DateTime.UtcNow - trade.OpenedAt;
 
-        // Timeout is universal across all strategies
-        if (held.TotalMinutes >= opts.MaxHoldMinutes)
-            return new ExitDecision(true, "TIMEOUT", currentPrice, changePct);
+        // Timeout is universal across all strategies, and is the only exit here that
+        // is decided by the clock rather than by a price.
+        //
+        // A negative hold is checked separately from the untrusted-clock case because
+        // it is unambiguous: a position cannot have been opened in the future, so the
+        // timestamp or the clock is wrong and neither is a reason to close a position.
+        if (held < TimeSpan.Zero)
+        {
+            _log.LogError(
+                "[Exit] Trade {Id} reports a negative hold time ({Held:F1} min): opened_at is " +
+                "{Opened:O} but now is {Now:O}. Not applying the timeout — the clock or the row is " +
+                "wrong, and neither is a reason to close a real position. Price-based exits still apply.",
+                trade.Id, held.TotalMinutes, trade.OpenedAt, DateTime.UtcNow);
+        }
+        else if (held.TotalMinutes >= opts.MaxHoldMinutes)
+        {
+            if (clockTrusted)
+                return new ExitDecision(true, "TIMEOUT", currentPrice, changePct);
+
+            _log.LogError(
+                "[Exit] Trade {Id} would time out at {Held:F1} min against a {Max} min limit, but " +
+                "the eval clock jumped this cycle so that figure is not trustworthy. Holding. If the " +
+                "position really is this old it will time out next cycle, once the clock is sane.",
+                trade.Id, held.TotalMinutes, opts.MaxHoldMinutes);
+        }
 
         // ── Breakeven stop (universal) ──────────────────────────────────────
         // Once trade reaches BreakevenTriggerPct profit, treat entry price as floor.

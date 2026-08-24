@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production overlay: pull prebuilt images instead of building on the host.
+#
+# Used as:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Why images and not a build on the instance
+# ------------------------------------------
+# The target is a t4g.large — two Graviton cores. Those two cores are what keeps
+# three WebSocket feeds ingesting, Postgres aggregating and the bot evaluating, and
+# a .NET multi-stage build would take them away for several minutes on every deploy,
+# during which the ingestion gap shows up as missing 15-minute buckets. Buckets are
+# the thing the strategy is waiting on, so a deploy that costs data is expensive in
+# a way that is easy to miss.
+#
+# Building in CI also makes rollback trivial: point IMAGE_TAG at the previous SHA
+# and `up -d`. Building on the host makes rollback a git checkout plus a rebuild.
+#
+# IMAGE_TAG is set by the deploy workflow to the commit SHA. It defaults to `latest`
+# so a hand-run `up -d` on the instance still works, but a pinned SHA is what CI
+# deploys — `latest` cannot tell you which commit is actually running.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  ingestion:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/ingestion:${IMAGE_TAG:-latest}
+
+  processor:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/processor:${IMAGE_TAG:-latest}
+
+  bot:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/bot:${IMAGE_TAG:-latest}
+
+  api:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/api:${IMAGE_TAG:-latest}
+
+  prediction:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/prediction:${IMAGE_TAG:-latest}

@@ -100,7 +100,34 @@ public sealed class BotStateService
 
     // ── Eval & Cooldown ───────────────────────────────────────────────────────
 
-    public void TouchEval() { lock (_lock) _lastEvalAt = DateTime.UtcNow; }
+    /// <summary>
+    /// Stamp the start of an evaluation cycle and report the gap since the previous
+    /// one, or null on the first cycle.
+    ///
+    /// The gap is returned rather than merely recorded because it is the only signal
+    /// available that the wall clock moved when it should not have. On 2026-08-22 two
+    /// live positions opened 13 and 16 minutes earlier were both closed in the same
+    /// instant with reason TIMEOUT, against a max_hold_minutes of 1440 — a 24-hour
+    /// threshold tripped by a quarter-hour-old trade. The only way
+    /// <c>DateTime.UtcNow - OpenedAt</c> reaches 24 hours there is if UtcNow jumped,
+    /// which is a documented behaviour of the WSL2 clock after the host suspends, and
+    /// this host has had Docker killed by memory pressure more than once. It
+    /// self-corrected on the next cycle, so nothing was left behind to find except
+    /// two closed positions with a reason that was not true.
+    ///
+    /// Every other exit is a comparison against a price. The timeout is the one that
+    /// trusts the clock alone, so the clock is the input that needs checking.
+    /// </summary>
+    public TimeSpan? TouchEval()
+    {
+        lock (_lock)
+        {
+            var previous = _lastEvalAt;
+            _lastEvalAt  = DateTime.UtcNow;
+            return previous is { } p ? _lastEvalAt.Value - p : null;
+        }
+    }
+
     public DateTime? LastEvalAt { get { lock (_lock) return _lastEvalAt; } }
 
     public void SetLastClosedAt(DateTime? dt) { lock (_lock) _lastClosedAt = dt; }

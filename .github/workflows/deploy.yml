@@ -1,0 +1,249 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Build service images, push to GHCR, deploy to the EC2 instance.
+#
+# The target is a 2-vCPU / 8 GB instance. Those two cores keep three WebSocket feeds
+# ingesting and the bot evaluating, so nothing is compiled on them: images are built
+# here and pulled there.
+#
+# Architecture comes from the BUILD_PLATFORM variable (see env below). The .NET
+# Dockerfiles cross-compile via $TARGETARCH, so an arm64 target builds natively on the
+# x86 runner instead of under QEMU — which matters, because emulating the Roslyn
+# compiler turned a two-minute build into twenty, per service.
+#
+# PredictionService is deliberately not built. It sits behind the `ensemble` compose
+# profile and nothing reads prediction_table while XVENUE_FLOW is the active strategy;
+# its Python wheels (numpy, xgboost, scikit-learn) have no arm64 manylinux builds for
+# every version pinned, so it would be the one thing here that genuinely needs QEMU.
+# Add it to the matrix when the ensemble is switched back on.
+# ─────────────────────────────────────────────────────────────────────────────
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_deploy:
+        description: "Build and push images without deploying"
+        type: boolean
+        default: false
+
+concurrency:
+  # One deploy at a time. Two overlapping runs would race on `docker compose up -d`
+  # and could leave half the stack on one image tag and half on another.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+  # Target architecture, as a repository variable so switching instance families is a
+  # settings change rather than a code edit.
+  #
+  # Defaults to amd64 because the deployed instance is x86_64 — and because GitHub's
+  # runners are x86 too, so amd64 needs no cross-compilation and no QEMU at all. The
+  # Dockerfiles read $TARGETARCH, so they build correctly for either value with no
+  # edit; set BUILD_PLATFORM=linux/arm64 if the instance is ever moved to Graviton.
+  #
+  # Getting this wrong is not subtle but it is late: the images push fine and the
+  # instance fails to start them with "exec format error".
+  PLATFORM: ${{ vars.BUILD_PLATFORM || 'linux/amd64' }}
+
+  # Fallback only. Each job recomputes this lowercased into $GITHUB_ENV, because GHCR
+  # rejects uppercase in a repository path and GitHub owner names are routinely mixed
+  # case — and Actions expressions have no lower() function to do it inline.
+  #
+  # Recomputed per job rather than passed as a job output: a matrix job's `outputs` are
+  # written by whichever leg finishes last, which is the wrong mechanism for a value
+  # every leg derives identically.
+  REGISTRY_PATH: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - service: ingestion
+            context: ./src/CryptoDecision.IngestionService
+            dockerfile: ./src/CryptoDecision.IngestionService/Dockerfile
+          - service: processor
+            context: ./src/CryptoDecision.ProcessorService
+            dockerfile: ./src/CryptoDecision.ProcessorService/Dockerfile
+          - service: bot
+            context: ./src
+            dockerfile: ./src/CryptoDecision.BotService/Dockerfile
+          - service: api
+            context: ./src
+            dockerfile: ./src/CryptoDecision.ApiService/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase the registry path
+        run: |
+          echo "REGISTRY_PATH=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+
+      # Only does anything when PLATFORM differs from the runner. On amd64 it is a
+      # no-op; kept so switching BUILD_PLATFORM to arm64 needs no edit here.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ env.PLATFORM }}
+          push: true
+          # Both tags: the SHA is what gets deployed and what a rollback points at,
+          # `latest` exists so a hand-run `up -d` on the instance still resolves.
+          tags: |
+            ${{ env.REGISTRY_PATH }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY_PATH }}/${{ matrix.service }}:latest
+          # Registry-backed cache rather than gha: the .NET restore layer is large and
+          # the gha cache evicts aggressively at 10 GB across all keys.
+          cache-from: type=registry,ref=${{ env.REGISTRY_PATH }}/${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_PATH }}/${{ matrix.service }}:buildcache,mode=max
+
+  deploy:
+    needs: build
+    if: ${{ !inputs.skip_deploy }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase the registry path
+        run: |
+          echo "REGISTRY_PATH=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+
+      - name: Open SSH to the instance
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          # Pinned rather than StrictHostKeyChecking=no. Accepting any key on every run
+          # is how a deploy pipeline gets pointed at someone else's host.
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Only what the host actually needs: the two compose files and sql/, which
+      # db-migrate mounts. Source code is not shipped — the images carry it.
+      - name: Sync compose files and migrations
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'mkdir -p ~/cryptodecision'
+          rsync -az --delete \
+            -e "ssh -i $HOME/.ssh/deploy.pem" \
+            docker-compose.yml docker-compose.prod.yml \
+            "$USER@$HOST:~/cryptodecision/"
+          rsync -az --delete \
+            -e "ssh -i $HOME/.ssh/deploy.pem" \
+            sql/ "$USER@$HOST:~/cryptodecision/sql/"
+
+      # Written on the host, never committed and never echoed. `set +x` guards against
+      # a future `set -x` in this step leaking the key into the run log.
+      - name: Write .env on the host
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          set +x
+          cat <<'ENVEOF' | ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'cat > ~/cryptodecision/.env && chmod 600 ~/cryptodecision/.env'
+          POSTGRES_DB=crypto
+          POSTGRES_USER=crypto
+          POSTGRES_PASS=${{ secrets.POSTGRES_PASS }}
+
+          OKX_API_KEY=${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET=${{ secrets.OKX_API_SECRET }}
+          OKX_PASS=${{ secrets.OKX_PASSPHRASE }}
+
+          OKX_DEMO_TRADING=${{ vars.OKX_DEMO_TRADING || 'true' }}
+          OKX_ENABLE_LIVE_TRADING=${{ vars.OKX_ENABLE_LIVE_TRADING || 'false' }}
+          OKX_MAX_ORDER_NOTIONAL_USD=${{ vars.OKX_MAX_ORDER_NOTIONAL_USD || '10' }}
+          OKX_LEVERAGE=${{ vars.OKX_LEVERAGE || '3' }}
+          OKX_MARGIN_MODE=isolated
+
+          OLLAMA_MODEL=${{ vars.OLLAMA_MODEL || 'qwen2.5:3b' }}
+
+          IMAGE_REGISTRY=${{ env.REGISTRY_PATH }}
+          IMAGE_TAG=${{ github.sha }}
+          ENVEOF
+
+      - name: Pull and restart
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          ssh -i ~/.ssh/deploy.pem "$USER@$HOST" \
+            "GH_USER='$GH_USER' GH_TOKEN='$GH_TOKEN' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/cryptodecision
+
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
+
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+
+          $COMPOSE pull --quiet
+
+          # --no-build makes a fallback to compiling on this host an error rather than a
+          # silent twenty-minute stall on two cores.
+          $COMPOSE up -d --no-build --remove-orphans
+
+          # Reclaim the previous tag's layers. Without this the 30 GiB root volume fills
+          # after a few dozen deploys and Postgres is what stops first.
+          docker image prune -f --filter 'until=168h'
+          REMOTE
+
+      - name: Verify the stack came up
+        env:
+          HOST: ${{ secrets.EC2_HOST }}
+          USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd ~/cryptodecision
+
+          # Give the health checks their start_period before judging anything.
+          sleep 90
+
+          unhealthy=$(docker ps --format '{{.Names}} {{.Status}}' | grep -c 'unhealthy' || true)
+          exited=$(docker ps -a --filter 'status=exited' --format '{{.Names}} {{.Status}}' \
+                   | grep -v 'db-migrate\|kafka-init\|ollama-init' | grep -c 'Exited (' || true)
+
+          docker ps --format 'table {{.Names}}\t{{.Status}}'
+
+          # db-migrate is expected to have exited 0. Anything else exiting, or any
+          # container reporting unhealthy, fails the deploy rather than leaving a
+          # half-started stack that looks deployed.
+          if [ "$unhealthy" -gt 0 ] || [ "$exited" -gt 0 ]; then
+            echo "::error::deploy left $unhealthy unhealthy and $exited unexpectedly exited container(s)"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=40
+            exit 1
+          fi
+
+          echo "migration ledger:"
+          docker exec postgres psql -U crypto -d crypto -c \
+            'SELECT filename, applied_at FROM schema_migrations ORDER BY filename DESC LIMIT 5'
+          REMOTE

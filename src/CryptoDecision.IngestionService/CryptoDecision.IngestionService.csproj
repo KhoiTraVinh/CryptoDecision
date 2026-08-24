@@ -3,7 +3,15 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- Workstation GC. Server GC allocates a heap and a thread per core and sizes
+         allocation budgets for a large heap; inside a memory-capped container on a
+         2-core host it is the wrong mode. Measured on BotService at 128 MB: six GC
+         threads, the process pinned at 72% of its cap, and every managed thread parked
+         in futex_wait while the trading loop silently stopped starting cycles.
+         Switching modes there took it from 92 MB to 32 MB. Same reasoning applies to
+         every service in this solution. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <RootNamespace>CryptoDecision.IngestionService</RootNamespace>
     <AssemblyName>CryptoDecision.IngestionService</AssemblyName>
   </PropertyGroup>

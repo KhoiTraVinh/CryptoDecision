@@ -268,6 +268,182 @@ public sealed class OkxTradingClient(
         return ack.OrdId!;
     }
 
+    /// <summary>
+    /// Outcome of trying to rest a post-only order on the book.
+    ///
+    /// A result rather than an exception, because the interesting failure is an
+    /// ordinary one: a post-only order that would cross the spread is refused by the
+    /// exchange by design, and that means "the book moved, try again next cycle" — not
+    /// "something is broken". Throwing here would turn the normal case into an error
+    /// log and bury the placements that genuinely failed.
+    /// </summary>
+    public sealed record PostOnlyPlacement(
+        bool Placed, string? OrdId, string? RejectCode, string? RejectMessage)
+    {
+        public static PostOnlyPlacement Rested(string ordId) => new(true, ordId, null, null);
+        public static PostOnlyPlacement Rejected(string? code, string? message) =>
+            new(false, null, code ?? "UNKNOWN", message);
+    }
+
+    /// <summary>
+    /// Rest a post-only limit order on the book at <paramref name="limitPrice"/>.
+    ///
+    /// Why post-only and not a plain limit
+    /// -----------------------------------
+    /// A plain limit order priced at the touch can still cross and pay the taker fee
+    /// if the book moves between the quote and the placement. post_only is refused
+    /// outright in that case, which is the guarantee being bought: either this order
+    /// is a maker order or it does not exist. That matters because the whole point is
+    /// the fee — taker is 5 bps a side on OKX perpetual swaps against 2 bps for maker,
+    /// so a round trip goes from about 10 bps to about 4. Against a signal whose gross
+    /// edge is small, that difference is most of the decision about whether the
+    /// strategy can exist at all.
+    ///
+    /// The cost of it is fill probability: a resting order is not an entry until
+    /// someone trades against it. That is an acceptable trade for a signal held for
+    /// hours — missing an entry costs an opportunity, while paying 6 extra bps costs
+    /// money on every trade taken.
+    /// </summary>
+    public async Task<PostOnlyPlacement> PlaceSwapPostOnlyOrderAsync(
+        string instId, string side, string? positionSide, decimal contracts,
+        decimal limitPrice, bool reduceOnly, CancellationToken ct)
+    {
+        var clientOrderId = "cd" + Guid.NewGuid().ToString("N")[..24];
+
+        var payload = new Dictionary<string, object>
+        {
+            ["instId"]  = instId,
+            ["tdMode"]  = opts.MarginMode,
+            ["side"]    = side,
+            ["ordType"] = "post_only",
+            ["px"]      = OkxNum.Format(limitPrice),
+            ["sz"]      = OkxNum.Format(contracts),
+            ["clOrdId"] = clientOrderId,
+        };
+
+        if (positionSide is not null) payload["posSide"]    = positionSide;
+        if (reduceOnly)               payload["reduceOnly"] = true;
+
+        List<OkxOrderAck> acks;
+        try
+        {
+            acks = await client.PostPrivateAsync<OkxOrderAck>("/api/v5/trade/order", payload, ct);
+        }
+        catch (OkxApiException ex)
+        {
+            // A transport-level or API-level refusal. Reported rather than rethrown
+            // for the same reason as an sCode rejection below: the caller's response
+            // is identical either way — abandon this entry, keep the bot running.
+            log.LogInformation(
+                "[OKX] Post-only {Side} on {InstId} at {Px} was refused: {Message}",
+                side, instId, OkxNum.Format(limitPrice), ex.Message);
+
+            return PostOnlyPlacement.Rejected(ex.Code, ex.Message);
+        }
+
+        var ack = acks.FirstOrDefault();
+
+        if (ack is null)
+            // No acknowledgement at all is genuinely ambiguous — the order may exist.
+            // This one throws, because silently abandoning an order that might be
+            // resting is how an unmanaged position appears.
+            throw new OkxApiException("NO_ACK",
+                $"OKX accepted the post-only {side} request for {instId} but returned no " +
+                $"acknowledgement. The order may exist under clOrdId {clientOrderId} — check the " +
+                "exchange before retrying.");
+
+        if (!ack.Accepted || string.IsNullOrWhiteSpace(ack.OrdId))
+        {
+            log.LogInformation(
+                "[OKX] Post-only {Side} on {InstId} at {Px} was not accepted: sCode={Code} sMsg={Msg}. " +
+                "Most often this means the book moved and the order would have crossed — nothing is " +
+                "resting, and nothing needs cleaning up.",
+                side, instId, OkxNum.Format(limitPrice), ack.SCode, ack.SMsg ?? "(none)");
+
+            return PostOnlyPlacement.Rejected(ack.SCode, ack.SMsg);
+        }
+
+        log.LogInformation(
+            "[OKX] Resting post-only {Side} order {OrdId} on {InstId} at {Px} sz={Contracts} " +
+            "posSide={PosSide} (clOrdId={ClOrdId}, demo={Demo})",
+            side, ack.OrdId, instId, OkxNum.Format(limitPrice), OkxNum.Format(contracts),
+            positionSide ?? "(net)", clientOrderId, opts.DemoTrading);
+
+        return PostOnlyPlacement.Rested(ack.OrdId!);
+    }
+
+    /// <summary>
+    /// Wait for a resting order for up to <paramref name="attempts"/> polls, then
+    /// cancel whatever is left and report what filled.
+    ///
+    /// Separate from <see cref="WaitForFillAsync"/> because the two have opposite
+    /// expectations. A market order that fills nothing is a fault; a resting order
+    /// that fills nothing is the ordinary outcome of a quiet book, and the caller
+    /// needs to tell the difference. So this returns null for "nothing filled"
+    /// instead of throwing.
+    /// </summary>
+    public async Task<OkxFill?> WaitForRestingFillAsync(
+        string instId, string ordId, int attempts, int delayMs, CancellationToken ct)
+    {
+        OkxOrderDetail? detail = null;
+        var polls = Math.Max(1, attempts);
+
+        for (var attempt = 1; attempt <= polls; attempt++)
+        {
+            detail = await ReadOrderAsync(instId, ordId, ct);
+
+            if (detail is not null && detail.IsTerminal)
+                break;
+
+            if (attempt < polls)
+                await Task.Delay(Math.Max(50, delayMs), ct);
+        }
+
+        if (detail is null)
+            throw new OkxApiException("ORDER_NOT_FOUND",
+                $"OKX order {ordId} on {instId} could not be read back. Check the exchange: " +
+                "the order may be resting and unmanaged.");
+
+        if (!detail.IsTerminal)
+        {
+            // Cancelled rather than left to rest. An order the bot has stopped
+            // watching can still fill, and a position the bot does not know it holds
+            // has no stop loss — which on a leveraged perp is the one state worth
+            // spending a cancel request to avoid.
+            await TryCancelAsync(instId, ordId, ct);
+
+            // Re-read: cancelling is what settles accFillSz on a partial fill.
+            detail = await ReadOrderAsync(instId, ordId, ct) ?? detail;
+        }
+
+        var filled = detail.FilledSize;
+        var price  = detail.AverageFillPrice ?? 0m;
+
+        if (filled <= 0m || price <= 0m)
+        {
+            log.LogInformation(
+                "[OKX] Resting order {OrdId} on {InstId} ended '{State}' with nothing filled. " +
+                "No position was opened.", ordId, instId, detail.State);
+
+            return null;
+        }
+
+        var requested = OkxNum.Parse(detail.SzRaw);
+
+        if (requested > 0m && filled < requested)
+            log.LogWarning(
+                "[OKX] Resting order {OrdId} on {InstId} filled {Filled} of {Requested} contracts " +
+                "before being cancelled.", ordId, instId, filled, requested);
+
+        return new OkxFill(
+            OrdId:           ordId,
+            FilledContracts: filled,
+            AveragePrice:    price,
+            FeeAbs:          detail.FeeAbs,
+            FeeCcy:          detail.FeeCcy,
+            FullyFilled:     requested <= 0m || filled >= requested);
+    }
+
     // ── Fill resolution ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -492,5 +668,16 @@ public sealed class OkxTradingClient(
         var tickers = await client.GetPublicAsync<OkxTicker>(
             $"/api/v5/market/ticker?instId={instId}", ct);
         return tickers.FirstOrDefault()?.Last;
+    }
+
+    /// <summary>
+    /// Top of book, for deciding where a resting order goes. Null when the venue
+    /// returns no ticker at all.
+    /// </summary>
+    public async Task<OkxTicker?> GetQuoteAsync(string instId, CancellationToken ct)
+    {
+        var tickers = await client.GetPublicAsync<OkxTicker>(
+            $"/api/v5/market/ticker?instId={instId}", ct);
+        return tickers.FirstOrDefault();
     }
 }

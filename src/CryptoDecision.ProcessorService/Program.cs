@@ -30,6 +30,18 @@ try
         builder.Configuration.GetSection(ConsumerSettings.Section));
     builder.Services.Configure<FeatureSettings>(
         builder.Configuration.GetSection(FeatureSettings.Section));
+    builder.Services.Configure<FlowBarSettings>(
+        builder.Configuration.GetSection(FlowBarSettings.Section));
+
+    // Validated at startup, before any worker runs. Both collections default to empty
+    // to dodge the configuration binder's append behaviour, which means a missing
+    // section is now indistinguishable from an empty one — and an empty one makes the
+    // whole pipeline idle while reporting healthy. Failing here is the only version of
+    // that an operator can see.
+    builder.Configuration.GetSection(FeatureSettings.Section).Get<FeatureSettings>()
+        ?.Validate();
+    builder.Configuration.GetSection(FlowBarSettings.Section).Get<FlowBarSettings>()
+        ?.Validate();
 
     // ─── PostgreSQL ───────────────────────────────────────────────────────────
     var pgConnStr = builder.Configuration.GetConnectionString("Postgres")
@@ -63,6 +75,7 @@ try
     builder.Services.AddHostedService<TradeProcessorWorker>();
     builder.Services.AddHostedService<KlineProcessorWorker>();
     builder.Services.AddHostedService<FeatureAggregationWorker>();
+    builder.Services.AddHostedService<FlowBarAggregationWorker>();
     builder.Services.AddHostedService<HealthCheckHttpServer>();
 
     var host = builder.Build();
