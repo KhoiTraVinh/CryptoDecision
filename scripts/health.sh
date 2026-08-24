@@ -65,18 +65,41 @@ else
         info=$(docker inspect "$cid" --format '{{.State.Status}}|{{.State.ExitCode}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.HostConfig.RestartPolicy.Name}}|{{.RestartCount}}')
         IFS='|' read -r state code health policy restarts <<<"$info"
 
-        # Empty means Docker's default, which restarts nothing -- but it is not
-        # a declared one-shot either, so treat only an explicit "no" as one.
-        if [ "$policy" = "no" ]; then
-            # One-shot job (db-check, db-migrate, kafka-init, ollama-init).
-            # These are SUPPOSED to be exited; exited 0 is success, and an
-            # exclusion list that forgets one is how "0 unhealthy" was reported
-            # while db-check was failing.
-            case "$state:$code" in
-                exited:0) ok   "$s: one-shot job completed (exit 0)" ;;
-                exited:*) fail "$s: one-shot job FAILED (exit $code) -- docker logs $s" ;;
-                *)        warn "$s: one-shot job still $state" ;;
+        # The restart policy CANNOT identify a one-shot job. Docker's default
+        # for a service with no `restart:` key is the string "no" on Linux and
+        # "" on Docker Desktop -- byte-identical to an explicit `restart: "no"`.
+        # So kafka and postgres, which declare nothing, were reported as
+        # "one-shot job still running" on EC2 while being long-running services.
+        #
+        # Only an explicit long-running policy is a reliable signal, so that is
+        # the only thing treated as one. Everything else is ambiguous and
+        # accepts either a healthy process or a clean exit -- but never a
+        # non-zero exit, which is a failure under any reading.
+        case "$policy" in
+            unless-stopped | always | on-failure) longrunning=1 ;;
+            *)                                    longrunning=0 ;;
+        esac
+
+        if [ "$longrunning" -eq 0 ]; then
+            # db-check, db-migrate, kafka-init, ollama-init are SUPPOSED to be
+            # exited; kafka and postgres are supposed to be running. An
+            # exclusion list that forgets one is how the deploy workflow
+            # reported "0 unhealthy" while db-check was failing.
+            case "$state:$code:$health" in
+                exited:0:*)       ok   "$s: completed (exit 0)" ;;
+                exited:*:*)       fail "$s: exited $code -- docker logs $s" ;;
+                running:*:healthy) ok  "$s: running, healthy" ;;
+                running:*:none)   ok   "$s: running (no healthcheck defined)" ;;
+                running:*:starting) warn "$s: running, health check still starting" ;;
+                running:*:*)      fail "$s: running but health=$health -- docker logs $s" ;;
+                *)                warn "$s: $state" ;;
             esac
+            # Nothing brings these back after a host reboot or a Docker
+            # restart, which is worth saying out loud for a bot meant to run
+            # unattended -- see the note printed after this section.
+            if [ "$state" = "running" ]; then
+                norestart="${norestart:-} $s"
+            fi
         else
             case "$state:$health" in
                 running:healthy)  ok   "$s: running, healthy" ;;
@@ -92,6 +115,18 @@ else
             fi
         fi
     done
+
+    # A long-running container with no restart policy does not come back after
+    # a host reboot or a Docker daemon restart. For a bot that is supposed to
+    # be unattended, that is the difference between "running 24/7" and "running
+    # until the next reboot", and nothing else in this output would reveal it.
+    if [ -n "${norestart:-}" ]; then
+        warn "no restart policy on:${norestart} -- these will NOT come back after a reboot"
+        printf '        Everything downstream of them fails while looking like a bot problem.\n'
+        printf '        Fix the running containers now, with no downtime and no data loss:\n'
+        printf '            docker update --restart unless-stopped%s\n' "$norestart"
+        printf '        The compose file needs the same change to survive a recreate.\n'
+    fi
 fi
 
 # --------------------------------------------------------------- 2 the loop
@@ -165,7 +200,12 @@ if [ "${n:-0}" = "0" ]; then
 fi
 
 # --------------------------------------------------------------- 6 abstains
-title "6. Why it is not entering (last 24h of decisions)"
+title "6. Why it is not entering (abstain codes logged in 24h)"
+# These are LOG LINES, not decisions. CrossVenueFlowStrategy logs an abstention
+# when the code CHANGES and then only every 120th repeat, precisely so a stable
+# refusal does not fill the log. So "1" here can mean one cycle or a thousand
+# consecutive cycles with the same verdict -- read it as which reasons are in
+# play, never as how many decisions were made.
 counted=$(docker logs bot --since 24h 2>/dev/null \
     | grep -o '"Code":"[A-Z_]*"' | sed 's/.*://; s/"//g' \
     | sort | uniq -c | sort -rn | head -8 \
@@ -212,7 +252,12 @@ fi
 # the processor's first aggregation pass runs BEFORE the SQL functions exist and
 # fails with 42883. The worker then waits its full 60-minute interval before
 # trying again, so each deploy silently costs up to an hour of flow bars.
-if log_has processor 1h '42883'; then
+# Matched as "42883: function", never as the bare number. Serilog timestamps
+# carry seven fractional digits, so `18:32:40.9342883Z` and `18:43:17.1142883Z`
+# both contain "42883" -- which made this fire on a host where the functions
+# existed and aggregation was running normally. A health check that cries wolf
+# is worse than no health check, because it teaches the operator to skim.
+if log_has processor 1h '42883: function'; then
     up=$(docker inspect "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=processor" | head -1)" --format '{{.State.StartedAt}}' 2>/dev/null)
     warn "processor hit 42883 (SQL function missing) -- the known deploy race, started $up"
     printf '        Expected right after a deploy and it self-heals, but the next\n'

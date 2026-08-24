@@ -6,6 +6,11 @@ services:
   kafka:
     image: apache/kafka:3.8.0
     container_name: kafka
+    # Without this, Docker defaults to "no" and kafka does NOT come back after a
+    # host reboot or a daemon restart, while every unless-stopped service does.
+    # The bot then runs against a stack that is missing its backbone and looks
+    # like a bot fault. Same reason as postgres below.
+    restart: unless-stopped
     ports:
       - "9092:9092"
     mem_limit: 512m
@@ -80,6 +85,10 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
+    # The whole stack is downstream of this. With no policy Docker defaults to
+    # "no", so a reboot brings back bot, processor and ingestion but not their
+    # database -- the worst possible half-recovery for an unattended bot.
+    restart: unless-stopped
     ports:
       - "5432:5432"
     # Raised from 768m. Postgres is the workhorse here and the only service whose
