@@ -76,6 +76,10 @@ public sealed class PaperOrderEngine(
     BotRepository      repo,
     IFeatureRepository featureRepo,
     BotStateService    state,
+    // Injected only for MaxOrderNotionalUsd. The ceiling is a property of this
+    // deployment risk appetite rather than of OKX, but OkxOptions is where it lives
+    // today and one copy beats two that drift.
+    CryptoDecision.BotService.Exchanges.OkxOptions okxOptions,
     ILogger<PaperOrderEngine> log) : IOrderEngine
 {
     // Conservative taker fee, applied per leg. Binance spot without the BNB
@@ -122,6 +126,25 @@ public sealed class PaperOrderEngine(
         }
 
         var notional = size.NotionalUsd;
+
+        // The same per-order ceiling the live engine applies.
+        //
+        // Without it a paper run and a live run size differently from identical inputs:
+        // risk-based sizing asked for $44.54 here while OkxOrderEngine would have capped
+        // the same entry at $10, so paper P&L ran about 4.5x live and the two were not
+        // comparable. A simulation whose position size does not match the venue's is
+        // measuring a different strategy — and it flatters it, since the cap only ever
+        // shrinks the order.
+        if (notional > okxOptions.MaxOrderNotionalUsd)
+        {
+            log.LogInformation(
+                "[PaperBot] Sizing asked for {Asked} but the per-order ceiling is {Cap} — capping, " +
+                "so this simulated fill matches what the live engine would have placed.",
+                notional, okxOptions.MaxOrderNotionalUsd);
+
+            notional = okxOptions.MaxOrderNotionalUsd;
+        }
+
         var qty      = Math.Round(notional / price, 6);
         var fee      = Math.Round(notional * FeeRate, 4);
 
