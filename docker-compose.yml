@@ -87,9 +87,17 @@ services:
     # cache is the highest-value gigabyte in the budget.
     mem_limit: 1g
     environment:
-      POSTGRES_DB:       crypto
-      POSTGRES_USER:     crypto
-      POSTGRES_PASSWORD: crypto
+      # Parameterised so the value in .env is the value in force. It was hardcoded to
+      # `crypto` here while db-migrate connected with ${POSTGRES_PASS} from .env — so
+      # setting that secret broke the migration with psql exit 2 (connection failed)
+      # and changed nothing else, because every other client hardcoded `crypto` too.
+      #
+      # initdb reads these ONLY when the data volume is empty. Changing the password
+      # against an existing volume does not change the database password: the volume
+      # has to be recreated, or this set back to what the volume was built with.
+      POSTGRES_DB:       "${POSTGRES_DB:-crypto}"
+      POSTGRES_USER:     "${POSTGRES_USER:-crypto}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASS:-crypto}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     command: >
@@ -106,7 +114,12 @@ services:
         -c track_activity_query_size=2048
         -c log_min_duration_statement=1000
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crypto -d crypto"]
+      # Interpolated by Compose, not by the container shell. A $-escaped variable
+      # here would have to survive two layers of escaping, and it did not — it
+      # collapsed to a single $ and Compose resolved it to an empty string, giving
+      # `pg_isready -U ""`. That fails, postgres never reports healthy, and every
+      # service that waits on it never starts. Same source of truth either way.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crypto} -d ${POSTGRES_DB:-crypto}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -146,6 +159,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Waits for ProcessorService, which owns the base schema.
+      #
+      # DatabaseInitializer creates trades, klines_1m, daily_feature_table,
+      # prediction_table, bot_trades and the bot_config columns, and it runs before
+      # host.RunAsync() — so a healthy processor means those tables exist. The sql/
+      # files are increments on top of that and several of them (006 onward) alter
+      # tables they do not create.
+      processor:
+        condition: service_healthy
     restart: "no"
 
   # ── IngestionService ──────────────────────────────────────────────────────────
@@ -184,14 +206,12 @@ services:
     environment:
       DOTNET_ENVIRONMENT:              Production
       Kafka__BootstrapServers:         kafka:9092
-      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=5;MaxPoolSize=50;"
+      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=${POSTGRES_DB:-crypto};Username=${POSTGRES_USER:-crypto};Password=${POSTGRES_PASS:-crypto};Pooling=true;MinPoolSize=5;MaxPoolSize=50;"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-      db-migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -213,7 +233,7 @@ services:
     mem_limit: 256m
     environment:
       DOTNET_ENVIRONMENT:              Production
-      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
+      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=${POSTGRES_DB:-crypto};Username=${POSTGRES_USER:-crypto};Password=${POSTGRES_PASS:-crypto};Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
 
       # ── OKX live order placement ──
       #
@@ -282,7 +302,7 @@ services:
       - "8080:8080"   # HTTP (health + Swagger)
     environment:
       ASPNETCORE_ENVIRONMENT:          Production
-      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto;Pooling=true;MinPoolSize=2;MaxPoolSize=30;"
+      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=${POSTGRES_DB:-crypto};Username=${POSTGRES_USER:-crypto};Password=${POSTGRES_PASS:-crypto};Pooling=true;MinPoolSize=2;MaxPoolSize=30;"
       Kafka__BootstrapServers:         kafka:9092
     depends_on:
       kafka-init:
@@ -396,7 +416,7 @@ services:
     ports:
       - "8083:8080"   # health endpoint
     environment:
-      POSTGRES_URL:             "postgresql://crypto:crypto@postgres:5432/crypto"
+      POSTGRES_URL:             "postgresql://${POSTGRES_USER:-crypto}:${POSTGRES_PASS:-crypto}@postgres:5432/${POSTGRES_DB:-crypto}"
       KAFKA_BOOTSTRAP_SERVERS:  "kafka:9092"
       SYMBOLS:                  "SOLUSDT"
       # 150s, down from 300s. The bot evaluates every 30s, so at 300s it read the

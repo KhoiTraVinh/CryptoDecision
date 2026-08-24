@@ -64,6 +64,23 @@ public sealed class DatabaseInitializer(
                 quantity        NUMERIC(20, 8)   NOT NULL,
                 quote_qty       NUMERIC(20, 8)   NOT NULL,
                 is_buyer_maker  BOOLEAN          NOT NULL,
+
+                -- Created here, not only by sql/004_add_exchange.sql.
+                --
+                -- This column was added by that migration while EnsureDedupIndexAsync
+                -- below indexes on it — so the base schema depended on a migration, and
+                -- the migrations in turn depend on tables only this class creates
+                -- (006_bot_trailing_stop.sql alters bot_trades). That is a cycle, and it
+                -- meant a fresh database could not be built by either order: SQL-first
+                -- failed at 006, C#-first failed here on "column exchange does not
+                -- exist". The only working database was one patched incrementally over
+                -- months on a single machine.
+                --
+                -- Declaring it here breaks the cycle and makes this class the sole owner
+                -- of the base schema. sql/004 stays harmless — it is ADD COLUMN IF NOT
+                -- EXISTS — and is kept so an existing database's migration ledger still
+                -- accounts for it.
+                exchange        VARCHAR(16)      NOT NULL DEFAULT 'BINANCE',
                 is_whale        BOOLEAN          NOT NULL GENERATED ALWAYS AS (quote_qty > 100000) STORED,
                 trade_time      TIMESTAMPTZ      NOT NULL,
                 ingested_at     TIMESTAMPTZ      NOT NULL DEFAULT now(),
