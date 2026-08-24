@@ -110,6 +110,16 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: ${{ env.PLATFORM }}
           push: true
+          # Links the package to this repository in GHCR.
+          #
+          # Without it a newly pushed image lands as a standalone private package with
+          # no repo association, and a repository-scoped token cannot read it back —
+          # which surfaces on the instance as `docker login` succeeding and the pull
+          # failing, or as a bare "denied: denied". This label is what makes GHCR treat
+          # the package as belonging to the repo, so GITHUB_TOKEN can read it.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           # Both tags: the SHA is what gets deployed and what a rollback points at,
           # `latest` exists so a hand-run `up -d` on the instance still resolves.
           tags: |
@@ -124,6 +134,11 @@ jobs:
     needs: build
     if: ${{ !inputs.skip_deploy }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Grants GITHUB_TOKEN pull rights on the packages the build job just pushed,
+      # which is what removes the need for a hand-made PAT.
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -194,12 +209,25 @@ jobs:
           HOST: ${{ secrets.EC2_HOST }}
           USER: ${{ secrets.EC2_USER }}
           GH_USER: ${{ github.actor }}
-          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          # GITHUB_TOKEN, not a PAT. It is scoped to this repository, expires when the
+          # job ends, and needs no manual setup — so there is no long-lived credential
+          # sitting on the instance and nothing to rotate. A classic PAT with
+          # read:packages still works if you ever need one: swap this line for
+          # secrets.GHCR_READ_TOKEN.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ssh -i ~/.ssh/deploy.pem "$USER@$HOST" \
             "GH_USER='$GH_USER' GH_TOKEN='$GH_TOKEN' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/cryptodecision
+
+          # Checked explicitly. An empty token makes docker report a bare
+          # "denied: denied" with nothing about the cause, which is a poor way to spend
+          # a debugging session.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "registry token is empty — check the deploy job's packages:read permission" >&2
+            exit 1
+          fi
 
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
 
