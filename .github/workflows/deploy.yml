@@ -253,25 +253,65 @@ jobs:
           set -euo pipefail
           cd ~/cryptodecision
 
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+
           # Give the health checks their start_period before judging anything.
           sleep 90
 
-          unhealthy=$(docker ps --format '{{.Names}} {{.Status}}' | grep -c 'unhealthy' || true)
-          exited=$(docker ps -a --filter 'status=exited' --format '{{.Names}} {{.Status}}' \
-                   | grep -v 'db-migrate\|kafka-init\|ollama-init' | grep -c 'Exited (' || true)
-
           docker ps --format 'table {{.Names}}\t{{.Status}}'
 
-          # db-migrate is expected to have exited 0. Anything else exiting, or any
-          # container reporting unhealthy, fails the deploy rather than leaving a
-          # half-started stack that looks deployed.
-          if [ "$unhealthy" -gt 0 ] || [ "$exited" -gt 0 ]; then
-            echo "::error::deploy left $unhealthy unhealthy and $exited unexpectedly exited container(s)"
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=40
+          # A positive assertion over the services compose is actually managing, rather
+          # than a count of exited containers.
+          #
+          # Two earlier versions of this check were wrong in opposite directions. Naming
+          # the one-shots to exclude ('db-migrate|kafka-init|ollama-init') meant adding
+          # db-check failed a deploy where all 24 migrations applied and every container
+          # was healthy. Counting non-zero exits instead picked up containers that had
+          # crashed days earlier and were never cleaned up, so it would start failing on
+          # its own.
+          #
+          # The service list comes from compose, so profiles are respected and it cannot
+          # fall behind the file. Each service passes if it is running and not unhealthy,
+          # or if it exited 0 — which is success for a one-shot and failure for nothing.
+          failed=0
+          for svc in $($COMPOSE config --services); do
+            cid=$($COMPOSE ps -aq "$svc" 2>/dev/null | head -1)
+
+            if [ -z "$cid" ]; then
+              # Not started at all: a profile-gated service. Nothing to assert.
+              continue
+            fi
+
+            state=$(docker inspect "$cid" --format '{{.State.Status}}')
+            code=$(docker inspect "$cid" --format '{{.State.ExitCode}}')
+            health=$(docker inspect "$cid" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')
+
+            case "$state" in
+              running)
+                if [ "$health" = "unhealthy" ]; then
+                  echo "::error::$svc is running but unhealthy"
+                  failed=1
+                fi
+                ;;
+              exited)
+                if [ "$code" != "0" ]; then
+                  echo "::error::$svc exited $code"
+                  failed=1
+                fi
+                ;;
+              *)
+                echo "::error::$svc is in state '$state'"
+                failed=1
+                ;;
+            esac
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            $COMPOSE logs --tail=40
             exit 1
           fi
 
           echo "migration ledger:"
-          docker exec postgres psql -U crypto -d crypto -c \
-            'SELECT filename, applied_at FROM schema_migrations ORDER BY filename DESC LIMIT 5'
+          docker exec postgres psql -U "${POSTGRES_USER:-crypto}" -d "${POSTGRES_DB:-crypto}" -c \
+            'SELECT count(*) AS applied, max(applied_at) AS latest FROM schema_migrations'
           REMOTE
