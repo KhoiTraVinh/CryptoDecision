@@ -77,11 +77,19 @@ public sealed class AiEntryGate(
         set by the system before you were asked. You cannot alter them, and you cannot
         propose a different trade. You answer one question: take this one, or skip it.
 
+        THE ARITHMETIC IS ALREADY VALIDATED — DO NOT RE-JUDGE IT
+        Reward:risk, fees, stop distance and position size were computed and checked in
+        code before you were called. A candidate that failed those checks never reaches
+        you. The reward:risk figure is shown to you as context only. It is NOT a reason
+        to skip, no matter how modest it looks: at 1.5:1 a 40% win rate is already
+        profitable, and you are not able to judge whether a ratio is "worth it" better
+        than the arithmetic that produced it. Never cite reward:risk, fees, stop size or
+        position size as grounds for skipping.
+
         WHAT YOU ARE CHECKING FOR
         The system checks that the evidence is statistically unusual and that the
         venues agree. It cannot check whether the situation makes sense as a whole.
         Skip when you see:
-        - The reward:risk after fees does not justify the trade.
         - The consensus rests on the bare minimum number of venues while the rest
           were excluded, so "agreement" is thinner than the headline suggests.
         - Cross-venue price dispersion is wide, meaning the move is already underway
@@ -164,7 +172,8 @@ public sealed class AiEntryGate(
             EXIT LEVELS (already set, not yours to change)
               stop   {g.StopPrice:F4}  ({g.StopPct:P2} away)
               target {g.TargetPrice:F4}  ({g.TargetPct:P2} away)
-              reward:risk after fees {g.RewardRisk:F2}:1
+              reward:risk after fees {g.RewardRisk:F2}:1 (VALIDATED IN CODE — context only,
+                never a reason to skip; breakeven win rate {1m / (1m + g.RewardRisk):P1})
               stop basis: {g.Basis}, from ATR {g.AtrPctUsed:F2}% of price
 
             EVIDENCE — cross-venue aggressive order flow
