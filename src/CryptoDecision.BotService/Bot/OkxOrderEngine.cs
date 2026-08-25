@@ -178,10 +178,27 @@ public sealed class OkxOrderEngine(
 
         if (notional > okxOptions.MaxOrderNotionalUsd)
         {
+            // Restate the risk AFTER the cap. The risk-based sizing above already
+            // logged "$0.60 USD at risk" from capital x risk_pct, and then this cap
+            // cut the notional to a tenth of what that figure assumed — so the only
+            // number an operator saw was wrong by the ratio of the two, and it was
+            // wrong in the reassuring direction. Whenever the cap binds,
+            // risk_pct_per_trade stops describing anything: every order is exactly
+            // the ceiling, and the real risk is the ceiling times the stop.
+            var askedRisk  = geometry is { StopPct: > 0m } gA ? notional * gA.StopPct : 0m;
+            var cappedRisk = geometry is { StopPct: > 0m } gC
+                ? okxOptions.MaxOrderNotionalUsd * gC.StopPct
+                : 0m;
+
             log.LogWarning(
                 "[OKX] Sizing asked for ${Asked} but the per-order ceiling is ${Cap} — capping. " +
-                "Check capital_usd and position_pct if this was not intended.",
-                notional, okxOptions.MaxOrderNotionalUsd);
+                "Real risk on this trade is ${CappedRisk:F3}, not the ${AskedRisk:F3} the risk " +
+                "model asked for. While the ceiling binds, risk_pct_per_trade has no effect and " +
+                "every order is ${Cap}. Raise Okx__MaxOrderNotionalUsd to make the risk setting " +
+                "mean what it says, or lower capital_usd so the two agree.",
+                notional, okxOptions.MaxOrderNotionalUsd, cappedRisk, askedRisk,
+                okxOptions.MaxOrderNotionalUsd);
+
             notional = okxOptions.MaxOrderNotionalUsd;
         }
 
