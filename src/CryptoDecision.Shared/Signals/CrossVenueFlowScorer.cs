@@ -21,9 +21,23 @@ namespace CryptoDecision.Shared.Signals;
 /// </param>
 /// <param name="BaselineBars">
 /// Buckets of trailing history used to judge whether the signal window is unusual.
-/// 96 = 24 hours. This is the piece the previous strategy had no way to express:
+/// 44 = 11 hours. This is the piece the previous strategy had no way to express:
 /// it compared a raw buy ratio against a hardcoded 62, so the same imbalance meant
 /// the same thing in a dead market and a panic.
+///
+/// THIS DEFAULT IS THE ONE SOURCE OF TRUTH — do not add another. It was 96 here
+/// while appsettings.json ran 44, and the backtester carried its own literal 96,
+/// so any backtest run without an explicit --baseline-bars was certifying a
+/// strategy nobody was running: 0 signals over 134 buckets against 6 signals in
+/// 16 live hours, with the discrepancy invisible because both numbers looked
+/// plausible. A validation tool that picks its own parameters cannot validate
+/// anything.
+///
+/// 44 is not a researched value. It was chosen under time pressure to make the
+/// readiness bar reachable within a day, and it has never been tested out of
+/// sample. It is here because it is what runs, and agreement between the live
+/// path and the offline path matters more than the number until there is enough
+/// history to choose one properly.
 /// </param>
 /// <param name="EnterZ">
 /// How many robust standard deviations from its own median a venue's imbalance
@@ -68,7 +82,7 @@ namespace CryptoDecision.Shared.Signals;
 /// </param>
 public sealed record FlowSignalOptions(
     int     SignalBars                    = 4,
-    int     BaselineBars                  = 96,
+    int     BaselineBars                  = 44,
     double  EnterZ                        = 1.5,
     int     MinAgreeingVenues             = 2,
     double  MinVenueVolumeFractionOfMedian = 0.20,

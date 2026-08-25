@@ -1,3 +1,5 @@
+using CryptoDecision.Shared.Signals;
+
 namespace CryptoDecision.Backtest;
 
 /// <summary>
@@ -83,7 +85,8 @@ public sealed record CliOptions(
                 MaxHoldHours:     ParseDouble(map.GetValueOrDefault("max-hold-hours"), 12.0),
                 OosFraction:      Math.Clamp(ParseDouble(map.GetValueOrDefault("oos"), 0.4), 0.1, 0.9),
                 SignalBars:       (int)ParseDecimal(map.GetValueOrDefault("signal-bars"), 4m),
-                BaselineBars:     (int)ParseDecimal(map.GetValueOrDefault("baseline-bars"), 96m),
+                BaselineBars:     (int)ParseDecimal(map.GetValueOrDefault("baseline-bars"),
+                                      new FlowSignalOptions().BaselineBars),
                 Sweep:            flags.Contains("sweep"),
                 DumpTrades:       flags.Contains("trades"));
         }
@@ -125,7 +128,9 @@ public sealed record CliOptions(
               --max-hold-hours <n>         default 12
               --oos <frac>                 out-of-sample tail fraction, default 0.4
               --signal-bars <n>            buckets in the decision window, default 4 (=1h)
-              --baseline-bars <n>          trailing buckets for the baseline, default 96 (=24h)
+              --baseline-bars <n>          trailing buckets for the baseline; defaults to the
+                                           FlowSignalOptions value the live bot uses, so a
+                                           run with no flag validates what is deployed
 
             Shrink --baseline-bars only to exercise the machinery on a short history.
             A baseline of a few hours cannot tell an unusual imbalance from an ordinary
