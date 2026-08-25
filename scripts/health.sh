@@ -191,10 +191,15 @@ else
 fi
 
 # --------------------------------------------------------------- 5 results
-title "5. Paper results, last 24h"
-t=$($PSQL -c "SELECT COUNT(*), COALESCE(ROUND(SUM(pnl_usd), 4), 0), (COUNT(*) FILTER (WHERE pnl_usd > 0)), (COUNT(*) FILTER (WHERE status IN ('OPEN', 'PENDING'))) FROM bot_trades WHERE opened_at > now() - INTERVAL '24 hours';" 2>/dev/null)
+# Labelled by the mode actually running, and counted per mode. It said "Paper
+# results" while reporting a LIVE trade, because the query had no mode filter --
+# the one number an operator is most likely to act on, under the wrong heading.
+mode=$([ "${paper:-t}" = "t" ] && echo PAPER || echo LIVE)
+title "5. $mode results, last 24h"
+t=$($PSQL -c "SELECT COUNT(*), COALESCE(ROUND(SUM(pnl_usd), 4), 0), (COUNT(*) FILTER (WHERE pnl_usd > 0)), (COUNT(*) FILTER (WHERE status IN ('OPEN', 'PENDING'))) FROM bot_trades WHERE mode = '$mode' AND opened_at > now() - INTERVAL '24 hours';" 2>/dev/null)
 IFS='|' read -r n pnl wins open <<<"${t:-0|0|0|0}"
 ok "${n:-0} trades, ${wins:-0} winners, PnL ${pnl:-0} USDT, ${open:-0} still open"
+open_now=${open:-0}
 if [ "${n:-0}" = "0" ]; then
     printf '        Zero trades is normal here -- the abstain reasons below say why.\n'
 fi
@@ -212,10 +217,19 @@ else
     IFS='|' read -r vcode vz vagree vvenues vage vdetail <<<"$v"
     ok "$vcode  z=$vz  ${vagree}/${vvenues} venues agree  (${vage}s ago)"
     printf '        %s\n' "$vdetail"
-    # A verdict older than a few cycles means the loop is ticking without
-    # producing one -- the price fetch failing is the known way that happens.
+    # A stale verdict is only a fault when the strategy SHOULD be evaluating.
+    # With a position open and max_open_trades_per_strategy reached, the loop
+    # skips the strategy entirely by design, so no verdict is produced and this
+    # check fired FAIL on a perfectly healthy bot the first time it ever saw a
+    # live trade. Crying wolf on the designed path is how a check teaches an
+    # operator to ignore it, so the open-position case is stated, not flagged.
     if [ "${vage:-0}" -gt 300 ]; then
-        fail "verdict is ${vage}s old while the loop reports alive -- cycles are running without reaching the strategy"
+        if [ "${open_now:-0}" -gt 0 ]; then
+            printf '        Stale because %s position(s) are open: at the per-strategy limit the\n' "$open_now"
+            printf '        loop stops evaluating entries, so no new verdict is formed. Expected.\n'
+        else
+            fail "verdict is ${vage}s old with no position open -- cycles are running without reaching the strategy"
+        fi
     fi
 fi
 
