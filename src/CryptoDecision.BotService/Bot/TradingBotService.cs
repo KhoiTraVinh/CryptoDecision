@@ -22,6 +22,28 @@ public sealed class TradingBotService(
     IEntryGate            gate,
     ILogger<TradingBotService> log) : BackgroundService
 {
+    /// <summary>
+    /// Declines the gate has already given, keyed by symbol, side and the
+    /// 15-minute bucket the verdict belongs to.
+    ///
+    /// The evaluation loop runs every 30 seconds but flow bars only change on the
+    /// quarter hour, so one signal was being handed to the model up to thirty
+    /// times. Measured: 55 gate calls carrying six distinct z-scores, and the
+    /// same z=-2.62 candidate drew "1.73:1" and "1.74:1" a minute apart. That is
+    /// not only ~9x of wasted inference — it makes entry timing a lottery, since
+    /// a model that declines nine times and approves on the tenth enters at
+    /// whatever moment it happened to change its mind.
+    ///
+    /// Only declines are cached. An approval leads straight to an order, and
+    /// re-serving a stale approval from a dictionary is the one direction where
+    /// being wrong costs money rather than an opportunity.
+    /// </summary>
+    private readonly Dictionary<(string Symbol, string Side, DateTime Bucket), GateDecision>
+        _declinedThisBucket = new();
+
+    private static DateTime BucketOf(DateTime utc) =>
+        new(utc.Ticks - utc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         log.LogInformation("[TradingBot] Worker Service started. Polling bot_config for commands...");
@@ -452,7 +474,32 @@ public sealed class TradingBotService(
             OpenPositions: openPositions,
             TodayPnlUsd:   todayPnl);
 
+        // One verdict per side per 15-minute bucket. The evidence cannot change
+        // until the next bar closes, so asking again inside the same bucket is
+        // asking an identical question and accepting a different answer.
+        (string Symbol, string Side, DateTime Bucket) key =
+            (opts.Symbol, decision.Side, BucketOf(DateTime.UtcNow));
+
+        if (_declinedThisBucket.TryGetValue(key, out var cached))
+        {
+            log.LogDebug(
+                "[Gate] Already declined {Side} {Symbol} for the {Bucket:HH:mm} bucket: {Reason}",
+                decision.Side, opts.Symbol, key.Bucket, cached.Reason);
+            return cached;
+        }
+
         var verdict = await gate.ReviewAsync(candidate, ct);
+
+        if (!verdict.Approved)
+        {
+            // Bounded by dropping everything older than the current bucket. The
+            // loop runs for weeks, so an unpruned dictionary keyed on a timestamp
+            // is a slow leak rather than a cache.
+            foreach (var stale in _declinedThisBucket.Keys.Where(k => k.Bucket < key.Bucket).ToList())
+                _declinedThisBucket.Remove(stale);
+
+            _declinedThisBucket[key] = verdict;
+        }
 
         if (verdict.Approved || !opts.AllowEntryWithoutGate) return verdict;
 
