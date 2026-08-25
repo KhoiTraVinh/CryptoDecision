@@ -774,6 +774,25 @@ public sealed class TradingBotService(
                 if (cooldownOk)
                 {
                     var decision = await strategy.ShouldEnterAsync(strat, opts, stratTrades, currentPrice.Value, ct);
+
+                    // Persisted every cycle, pass or not. The strategy's own log is
+                    // throttled to a code change and then every 120th repeat, which is
+                    // right for a log and wrong for an operator: SOL fell 2.7% over
+                    // three hours and the newest line was 33 minutes stale, so the
+                    // actual state had to be rebuilt by hand from flow_bars_15m. A
+                    // failed write must not stop an entry, hence SafeRecordAsync.
+                    await SafeRecordAsync(
+                        configRepo.RecordVerdictAsync(
+                            decision.Flow?.AbstainCode is { Length: > 0 } code
+                                ? code
+                                : decision.Pass ? "ACTIONABLE" : "NO_FLOW_VERDICT",
+                            decision.Rationale ?? "(no rationale)",
+                            decision.Flow?.AggregateZ ?? 0.0,
+                            decision.Flow?.AgreeingVenues ?? 0,
+                            decision.Flow?.ParticipatingVenues ?? 0,
+                            ct),
+                        "verdict");
+
                     if (decision.Pass)
                     {
                         // ── The gate has the only veto on entry ────────────────

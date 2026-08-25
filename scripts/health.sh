@@ -200,6 +200,25 @@ if [ "${n:-0}" = "0" ]; then
 fi
 
 # --------------------------------------------------------------- 6 abstains
+# --------------------------------------------------------------- 5b verdict
+title "5b. The strategy's verdict right now"
+# Read from bot_config, not from the log. The log is throttled to a code change
+# and then every 120th repeat, so during a move its newest line can be an hour
+# old -- SOL fell 2.7% while the freshest line said z=+0.50.
+v=$($PSQL -c "SELECT COALESCE(last_verdict_code,'-'), COALESCE(last_verdict_z::TEXT,'-'), COALESCE(last_verdict_agree::TEXT,'-'), COALESCE(last_verdict_venues::TEXT,'-'), COALESCE(EXTRACT(EPOCH FROM now()-last_verdict_at)::INT::TEXT,'-'), COALESCE(last_verdict_detail,'-') FROM bot_config WHERE id = 1;" 2>/dev/null)
+if [ -z "$v" ] || [ "${v%%|*}" = "-" ]; then
+    warn "no verdict recorded yet -- needs sql/026 applied and the bot restarted"
+else
+    IFS='|' read -r vcode vz vagree vvenues vage vdetail <<<"$v"
+    ok "$vcode  z=$vz  ${vagree}/${vvenues} venues agree  (${vage}s ago)"
+    printf '        %s\n' "$vdetail"
+    # A verdict older than a few cycles means the loop is ticking without
+    # producing one -- the price fetch failing is the known way that happens.
+    if [ "${vage:-0}" -gt 300 ]; then
+        fail "verdict is ${vage}s old while the loop reports alive -- cycles are running without reaching the strategy"
+    fi
+fi
+
 title "6. Why it is not entering (abstain codes logged in 24h)"
 # These are LOG LINES, not decisions. CrossVenueFlowStrategy logs an abstention
 # when the code CHANGES and then only every 120th repeat, precisely so a stable

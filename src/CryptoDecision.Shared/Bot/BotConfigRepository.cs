@@ -211,6 +211,51 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     }
 
     /// <summary>
+    /// The strategy's current verdict, overwritten every cycle.
+    ///
+    /// Separate from <see cref="RecordEntryRefusalAsync"/> on purpose. That one
+    /// counts refusals that mattered — the daily cap, the gate declining a finished
+    /// proposal — and an abstention happens on nearly every cycle, so routing them
+    /// through the same counter would take refusal_count to roughly 2,880 a day and
+    /// make an existing column meaningless.
+    ///
+    /// This exists because the abstention log is throttled to once per code change
+    /// and then once per 120 cycles. That is correct for a log, and it left the
+    /// operator blind for 33 minutes while SOL fell 2.7%: the newest line said
+    /// z=+0.50 and the actual state had to be reconstructed by hand from
+    /// flow_bars_15m. One row, always current, so looking is a query.
+    /// </summary>
+    public async Task RecordVerdictAsync(
+        string code, string detail, double aggregateZ,
+        int agreeingVenues, int participatingVenues, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_config
+            SET last_verdict_code   = @code,
+                last_verdict_detail = @detail,
+                last_verdict_z      = @z,
+                last_verdict_agree  = @agree,
+                last_verdict_venues = @venues,
+                last_verdict_at     = NOW()
+            WHERE id = 1
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+
+        cmd.Parameters.AddWithValue("code",
+            code.Length > 48 ? code[..48] : code);
+        // Same reasoning as the refusal reason: this is read on one dashboard line.
+        cmd.Parameters.AddWithValue("detail",
+            detail.Length > 400 ? detail[..400] : detail);
+        cmd.Parameters.AddWithValue("z",      (decimal)Math.Round(aggregateZ, 4));
+        cmd.Parameters.AddWithValue("agree",  (short)agreeingVenues);
+        cmd.Parameters.AddWithValue("venues", (short)participatingVenues);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
     /// Record what the last sizing decision actually produced (used by Bot worker).
     ///
     /// The API can re-derive what <see cref="PositionSizer"/> would ask for, but not

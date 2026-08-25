@@ -93,7 +93,16 @@ public sealed class CrossVenueFlowStrategy(
             if (!verdict.Actionable)
             {
                 LogAbstention(opts.Symbol, verdict.AbstainCode, verdict.Reason);
-                return new EntryDecision(false, Rationale: $"{verdict.AbstainCode}: {verdict.Reason}");
+
+                // The verdict travels with the refusal, not just its text. The caller
+                // persists the aggregate z and the venue tally so "how close was it"
+                // stays a number rather than something to parse back out of a
+                // sentence — and the log line it would have been parsed from is
+                // throttled to once an hour when the code has not changed.
+                return new EntryDecision(
+                    false,
+                    Rationale: $"{verdict.AbstainCode}: {verdict.Reason}",
+                    Flow:      verdict);
             }
 
             // ── Exit geometry, from measured volatility ────────────────────────
@@ -157,14 +166,30 @@ public sealed class CrossVenueFlowStrategy(
             // Refuse, never guess. An exception here means the evidence could not be
             // assembled, and an entry taken without it is an entry taken for no reason.
             log.LogError(ex, "[XFlow] Entry evaluation failed for {Symbol}; refusing.", opts.Symbol);
-            return new EntryDecision(false, Rationale: $"EVALUATION_FAILED: {ex.Message}");
+            return new EntryDecision(
+                false,
+                Rationale: $"EVALUATION_FAILED: {ex.Message}",
+                // Same reason as Refuse(): the code belongs in a column, not only in
+                // a sentence. This is the one an operator most needs to be able to
+                // query for, because it means the evidence could not be built.
+                Flow:      FlowVerdict.Abstain("EVALUATION_FAILED", ex.Message));
         }
     }
 
     private EntryDecision Refuse(string code, string message)
     {
         LogAbstention(null, code, message);
-        return new EntryDecision(false, Rationale: $"{code}: {message}");
+
+        // Carries a FlowVerdict even though the scorer was never reached. Without
+        // it these refusals — FLOW_BARS_STALE, NO_CANDLES, the ones that mean the
+        // evidence could not be assembled at all — reached the caller with a null
+        // Flow, so the persisted code came out as a placeholder and the real one
+        // survived only inside the rationale sentence. FLOW_BARS_STALE is exactly
+        // a code worth querying on: it means ingestion or aggregation has stopped.
+        return new EntryDecision(
+            false,
+            Rationale: $"{code}: {message}",
+            Flow:      FlowVerdict.Abstain(code, message));
     }
 
     // The abstain code as of the previous evaluation, and how many cycles it has held.
