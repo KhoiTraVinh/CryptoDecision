@@ -243,9 +243,17 @@ jobs:
           # silent twenty-minute stall on two cores.
           $COMPOSE up -d --no-build --remove-orphans
 
-          # Reclaim the previous tag's layers. Without this the 30 GiB root volume fills
-          # after a few dozen deploys and Postgres is what stops first.
-          docker image prune -f --filter 'until=168h'
+          # Reclaim superseded images. Needs -a: without it prune only removes
+          # DANGLING images, and every image this pipeline pushes carries a commit-SHA
+          # tag, so none of them are ever dangling. Combined with until=168h — which
+          # excluded everything younger than a week, i.e. all of them — the step ran
+          # clean on every deploy and reclaimed nothing. Sixteen images and 11 GB
+          # accumulated behind a line that read as if it were housekeeping.
+          #
+          # until=24h keeps the day's images so a same-day rollback stays instant;
+          # anything older re-pulls from GHCR, which still has every tag.
+          docker image prune -af --filter 'until=24h'
+          docker system df | head -2
           REMOTE
 
       - name: Verify the stack came up
