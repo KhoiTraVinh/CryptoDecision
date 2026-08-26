@@ -270,18 +270,53 @@ public static class RiskEngine
         if (closedTradesNewestFirst.Count == 0) return null;
 
         // ── Consecutive losses ──
+        //
+        // Scoped to one strategy and to a bounded window, because this breaker
+        // makes a claim about a SIGNAL — its own message says "the signal is
+        // likely out of regime" — and an unscoped walk makes that claim about
+        // trades no signal produced.
+        //
+        // What went wrong without the scoping: XVENUE_FLOW's very first live
+        // trade lost, and the walk continued straight into four MOMENTUM losses
+        // from three days earlier. MOMENTUM had been retired and replaced in
+        // between. That was five in a row by the letter of the rule, so the bot
+        // disabled itself after one trade of the new strategy and stayed down
+        // for fifteen hours. A streak that spans a strategy rewrite is not a
+        // streak.
+        //
+        // The window is DERIVED from the entry cap rather than picked, because a
+        // window shorter than the time it takes to accumulate the streak would
+        // silently make this breaker unreachable — the opposite failure, and the
+        // harder one to notice. At the cap, `maxConsecutiveLosses` losses need
+        // ceil(limit / entriesPerDay) days, and doubling that leaves room for a
+        // day the bot barely trades.
+        var perDay      = Math.Max(1, opts.MaxEntriesPerDay);
+        var streakDays  = Math.Max(2, (int)Math.Ceiling((double)maxConsecutiveLosses / perDay) * 2);
+        var streakSince = DateTime.UtcNow - TimeSpan.FromDays(streakDays);
+
+        var newestStrategy = closedTradesNewestFirst[0].Strategy;
         var streak = 0;
+
         foreach (var trade in closedTradesNewestFirst)
         {
+            // A different strategy ends the streak rather than being skipped:
+            // skipping would stitch two strategies' losses into one run, which
+            // is the bug this comment exists for.
+            if (!string.Equals(trade.Strategy, newestStrategy, StringComparison.OrdinalIgnoreCase))
+                break;
+
+            if ((trade.ClosedAt ?? trade.OpenedAt) < streakSince) break;
             if ((trade.PnlUsd ?? 0m) >= 0m) break;
+
             streak++;
         }
+
         if (streak >= maxConsecutiveLosses)
         {
             return new CircuitBreak(
                 "CONSECUTIVE_LOSSES",
-                $"{streak} losing trades in a row (limit {maxConsecutiveLosses}). " +
-                "The signal is likely out of regime.");
+                $"{streak} losing {newestStrategy} trades in a row within {streakDays} days " +
+                $"(limit {maxConsecutiveLosses}). The signal is likely out of regime.");
         }
 
         // ── Peak-to-trough drawdown on the realised equity curve ──
