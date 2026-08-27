@@ -262,7 +262,8 @@ Behind the `ui` profile. `GET /api/market-status/{symbol}`, `/dashboard/{symbol}
 `/api/bot/status` · `/pnl` · `/trades` · `/config` · `/debug`, plus
 `POST /api/bot/start` · `/stop`.
 
-SignalR hub at `/hubs/market` pushes `ReceiveVolumeAnalysis` and `ReceiveWhaleAlert`.
+SignalR hub at `/hubs/market` pushes four messages: `ReceiveVolumeAnalysis`,
+`ReceiveWhaleAlert`, `ReceiveMarketStatus` and `ReceiveBotStatus`.
 
 ## Known constraints
 

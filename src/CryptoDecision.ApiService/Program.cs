@@ -30,7 +30,6 @@ builder.Services.AddSingleton(ds);
 
 // ─── Repositories ─────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IFeatureRepository, FeatureRepository>();
-builder.Services.AddSingleton<IPredictionRepository, PredictionRepository>();
 builder.Services.AddSingleton<IMomentumRepository, MomentumRepository>();
 builder.Services.AddSingleton<IKlineRepository, KlineRepository>();
 builder.Services.AddSingleton<IVolumeRepository, VolumeRepository>();

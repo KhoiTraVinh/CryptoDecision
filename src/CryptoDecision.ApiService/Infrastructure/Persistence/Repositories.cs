@@ -75,61 +75,6 @@ public sealed class FeatureRepository(NpgsqlDataSource dataSource) : IFeatureRep
     }
 }
 
-public sealed class PredictionRepository(NpgsqlDataSource dataSource) : IPredictionRepository
-{
-    public async Task<Prediction?> GetLatestAsync(string symbol, CancellationToken ct = default)
-    {
-        // The agreement/absent-model fields are pulled out of the signals JSONB in
-        // SQL rather than deserialised here: three scalars are wanted, not the whole
-        // audit blob, and postgres already knows how to read them.
-        const string sql = """
-            SELECT symbol, date, direction, confidence, model_version, rationale, created_at,
-                   signals->>'agreement' AS agreement,
-                   COALESCE((signals->>'weight_capped')::boolean, FALSE) AS weight_capped,
-                   COALESCE(
-                       ARRAY(SELECT jsonb_array_elements_text(
-                                        COALESCE(signals->'absent_models', '[]'::jsonb))),
-                       '{}'::text[]
-                   ) AS absent_models
-            FROM prediction_table
-            WHERE symbol = @symbol
-            ORDER BY date DESC, created_at DESC
-            LIMIT 1
-            """;
-
-        await using var conn   = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd    = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("symbol", symbol);
-
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct)) return null;
-
-        var ordSymbol  = reader.GetOrdinal("symbol");
-        var ordDate    = reader.GetOrdinal("date");
-        var ordDir     = reader.GetOrdinal("direction");
-        var ordConf    = reader.GetOrdinal("confidence");
-        var ordModel   = reader.GetOrdinal("model_version");
-        var ordRat     = reader.GetOrdinal("rationale");
-        var ordCreated = reader.GetOrdinal("created_at");
-        var ordAgree   = reader.GetOrdinal("agreement");
-        var ordCapped  = reader.GetOrdinal("weight_capped");
-        var ordAbsent  = reader.GetOrdinal("absent_models");
-
-        return new Prediction(
-            Symbol:       reader.GetString(ordSymbol),
-            Date:         DateOnly.FromDateTime(reader.GetDateTime(ordDate)),
-            Direction:    reader.GetString(ordDir),
-            Confidence:   reader.GetDecimal(ordConf),
-            ModelVersion: reader.GetString(ordModel),
-            Rationale:    reader.IsDBNull(ordRat) ? string.Empty : reader.GetString(ordRat),
-            CreatedAt:    reader.GetDateTime(ordCreated),
-            Agreement:    reader.IsDBNull(ordAgree) ? null : reader.GetString(ordAgree),
-            AbsentModels: reader.IsDBNull(ordAbsent) ? [] : reader.GetFieldValue<string[]>(ordAbsent),
-            WeightCapped: !reader.IsDBNull(ordCapped) && reader.GetBoolean(ordCapped)
-        );
-    }
-}
-
 public sealed class MomentumRepository(NpgsqlDataSource dataSource) : IMomentumRepository
 {
     // COUNT(*) aggregates always return exactly 1 row, even when no trades match.

@@ -50,7 +50,14 @@ public sealed class BotController(
             Volatility        : feature?.Volatility,
             VolatilityScalar  : size.VolatilityScalar,
             SizingNotionalUsd : size.NotionalUsd,
-            LastSizingNote    : cfg.LastSizingNote));
+            LastSizingNote    : cfg.LastSizingNote,
+
+            LastVerdictCode   : cfg.LastVerdictCode,
+            LastVerdictDetail : cfg.LastVerdictDetail,
+            LastVerdictZ      : cfg.LastVerdictZ,
+            LastVerdictAgree  : cfg.LastVerdictAgree,
+            LastVerdictVenues : cfg.LastVerdictVenues,
+            LastVerdictAt     : cfg.LastVerdictAt));
     }
 
     // GET /api/bot/config

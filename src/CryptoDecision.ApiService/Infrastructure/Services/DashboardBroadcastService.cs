@@ -49,7 +49,7 @@ public sealed class DashboardBroadcastService(
 
                 foreach (var symbol in ActiveSymbols)
                 {
-                    // AI Prediction & Today's metrics (every 20s)
+                    // Today's feature metrics (every 20s)
                     var status = await queries.GetMarketStatusAsync(symbol, ct);
                     if (status != null)
                     {

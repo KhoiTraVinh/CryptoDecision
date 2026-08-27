@@ -307,7 +307,18 @@ public sealed record BotStatus(
 
     // What the last real attempt produced, which only the bot can know: the venue's
     // lot grid is applied there, not here.
-    string?   LastSizingNote    = null
+    string?   LastSizingNote    = null,
+
+    // The scorer's verdict on the last cycle. This replaced a panel that rendered
+    // prediction_table, whose writer has been deleted — so the dashboard was
+    // showing an empty row from a service that no longer exists while the number
+    // that actually decides entries was not on screen at all.
+    string?   LastVerdictCode   = null,
+    string?   LastVerdictDetail = null,
+    decimal?  LastVerdictZ      = null,
+    int?      LastVerdictAgree  = null,
+    int?      LastVerdictVenues = null,
+    DateTime? LastVerdictAt     = null
 );
 
 /// <param name="Composite">

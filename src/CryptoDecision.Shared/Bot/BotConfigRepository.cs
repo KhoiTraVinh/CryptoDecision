@@ -297,7 +297,9 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    take_profit_pct, stop_loss_pct,
                    last_refusal_reason, last_refusal_at,
                    COALESCE(refusal_count, 0) AS refusal_count,
-                   refusal_count_date, last_sizing_note
+                   refusal_count_date, last_sizing_note,
+                   last_verdict_code, last_verdict_detail, last_verdict_z,
+                   last_verdict_agree, last_verdict_venues, last_verdict_at
             FROM bot_config WHERE id = 1
             """;
 
@@ -357,6 +359,14 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                                        : DateOnly.FromDateTime(
                                              r.GetDateTime(r.GetOrdinal("refusal_count_date"))),
             LastSizingNote       = Text("last_sizing_note"),
+            LastVerdictCode      = Text("last_verdict_code"),
+            LastVerdictDetail    = Text("last_verdict_detail"),
+            LastVerdictZ         = Nullable("last_verdict_z"),
+            LastVerdictAgree     = r.IsDBNull(r.GetOrdinal("last_verdict_agree"))
+                                       ? null : (int)r.GetInt16(r.GetOrdinal("last_verdict_agree")),
+            LastVerdictVenues    = r.IsDBNull(r.GetOrdinal("last_verdict_venues"))
+                                       ? null : (int)r.GetInt16(r.GetOrdinal("last_verdict_venues")),
+            LastVerdictAt        = Stamp("last_verdict_at"),
         };
     }
 }
@@ -391,6 +401,17 @@ public sealed class BotConfigStatus
     public int          RefusalCount         { get; init; }
     public DateOnly?    RefusalCountDate     { get; init; }
     public string?      LastSizingNote       { get; init; }
+
+    // The strategy's current verdict, written every cycle. Distinct from the
+    // refusal trail above: that counts refusals that mattered (the daily cap, the
+    // gate declining a proposal), this is what the scorer said on the last pass —
+    // and it is the only thing that answers "how close was it".
+    public string?      LastVerdictCode      { get; init; }
+    public string?      LastVerdictDetail    { get; init; }
+    public decimal?     LastVerdictZ         { get; init; }
+    public int?         LastVerdictAgree     { get; init; }
+    public int?         LastVerdictVenues    { get; init; }
+    public DateTime?    LastVerdictAt        { get; init; }
 
     /// <summary>
     /// Refusals today, as opposed to whenever the counter was last touched.

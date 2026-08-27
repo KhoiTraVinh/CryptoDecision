@@ -15,7 +15,6 @@ namespace CryptoDecision.ApiService.Application;
 /// </summary>
 public sealed class MarketQueries(
     IFeatureRepository    featureRepo,
-    IPredictionRepository predictionRepo,
     IMomentumRepository   momentumRepo,
     IKlineRepository      klineRepo,
     IVolumeRepository     volumeRepo,
@@ -43,25 +42,16 @@ public sealed class MarketQueries(
     {
         var s = RequireSymbol(symbol);
 
-        // Independent reads — issue both before awaiting either.
-        var featureTask    = featureRepo.GetTodayAsync(s, ct);
-        var predictionTask = predictionRepo.GetLatestAsync(s, ct);
-        await Task.WhenAll(featureTask, predictionTask);
-
-        var feature    = featureTask.Result;
-        var prediction = predictionTask.Result;
+        var feature = await featureRepo.GetTodayAsync(s, ct);
 
         return new MarketStatusDto(
-            Symbol:             s,
-            Return24h:          feature?.Return24h,
-            Volatility:         feature?.Volatility,
-            VolumeChange:       feature?.VolumeChange,
-            WhaleCount:         feature?.WhaleCount,
-            Vwap:               feature?.Vwap,
-            PredictedDirection: prediction?.Direction,
-            Confidence:         prediction?.Confidence,
-            Rationale:          prediction?.Rationale,
-            AsOf:               DateTime.UtcNow);
+            Symbol:       s,
+            Return24h:    feature?.Return24h,
+            Volatility:   feature?.Volatility,
+            VolumeChange: feature?.VolumeChange,
+            WhaleCount:   feature?.WhaleCount,
+            Vwap:         feature?.Vwap,
+            AsOf:         DateTime.UtcNow);
     }
 
     // ── Dashboard ─────────────────────────────────────────────────────────────
@@ -72,26 +62,14 @@ public sealed class MarketQueries(
         var s = RequireSymbol(symbol);
         var d = RequireRange(days, 1, 90, nameof(days));
 
-        var historyTask    = featureRepo.GetHistoryAsync(s, d, ct);
-        var predictionTask = predictionRepo.GetLatestAsync(s, ct);
-        await Task.WhenAll(historyTask, predictionTask);
-
-        var prediction = predictionTask.Result;
+        var history = await featureRepo.GetHistoryAsync(s, d, ct);
 
         return new DashboardDto(
             Symbol:  s,
-            History: historyTask.Result.Select(f => new DailyFeatureDto(
+            History: history.Select(f => new DailyFeatureDto(
                          f.Date, f.Return24h, f.Volatility,
                          f.VolumeChange, f.WhaleCount, f.Vwap, f.TotalVolume)).ToList(),
-            PredictedDirection: prediction?.Direction,
-            Confidence:         prediction?.Confidence,
-            Rationale:          prediction?.Rationale,
-            ModelVersion:       prediction?.ModelVersion,
-            AsOf:               DateTime.UtcNow,
-            Agreement:          prediction?.Agreement,
-            AbsentModels:       prediction?.AbsentModels,
-            WeightCapped:       prediction?.WeightCapped ?? false,
-            PredictedAt:        prediction?.CreatedAt);
+            AsOf:    DateTime.UtcNow);
     }
 
     // ── Momentum ──────────────────────────────────────────────────────────────

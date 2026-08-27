@@ -337,6 +337,7 @@ function renderStatus(status) {
 
     renderSizingLine(status);
     renderRefusalLine(status);
+    renderVerdict(status);
 }
 
 // ── Sizing ────────────────────────────────────────────────────────────────────
@@ -442,56 +443,67 @@ function renderPositions(debug) {
     }).join('');
 }
 
-// ── Signal ────────────────────────────────────────────────────────────────────
+// ── Verdict ───────────────────────────────────────────────────────────────────
 
-function renderSignal(d) {
-    const dir = d?.predictedDirection || 'NEUTRAL';
+// Fed from bot status, not from a market-status call. The strategy writes its
+// verdict to bot_config every cycle precisely because the log is throttled — once
+// per code change and then every 120th repeat — which left the state 33 minutes
+// stale during a 2.7% move.
+function renderVerdict(status) {
+    const code = status?.lastVerdictCode;
+    const z    = status?.lastVerdictZ;
+
+    // ACTIONABLE means the scorer proposed an entry; anything else is a named
+    // abstain code, and which one it is says where the binding constraint sat.
+    const actionable = code === 'ACTIONABLE';
+    const tone = actionable ? 'LONG' : (code ? 'NEUTRAL' : 'NEUTRAL');
 
     const dirEl = el('sig-direction');
     if (dirEl) {
-        dirEl.textContent = dir;
-        dirEl.className = 'direction ' + dir;
+        dirEl.textContent = code || '--';
+        dirEl.className = 'direction ' + tone;
     }
 
+    // The z next to its own threshold, because "z = -0.98" only means something
+    // against the ±1.00 band it has to clear.
     const conf = el('sig-confidence');
-    if (conf) conf.textContent = d?.confidence != null ? pctText(d.confidence, 0) + ' confidence' : '';
+    if (conf) conf.textContent = z != null ? 'z = ' + Number(z).toFixed(2) : '';
 
     const rat = el('sig-rationale');
-    if (rat) rat.textContent = d?.rationale || 'No rationale available.';
+    if (rat) rat.textContent = status?.lastVerdictDetail || 'No verdict recorded yet.';
 
-    // modelVersion encodes which models actually voted, e.g. ensemble-heuristic+llm.
-    // Worth showing: it is how you tell a full run from one made while Ollama was down.
     const model = el('sig-model');
     if (model) {
         const bits = [];
-        if (d?.modelVersion) bits.push('model: ' + d.modelVersion);
-        // "unanimous" across three models and "insufficient" because only one model
-        // took a side render as the same confidence percentage otherwise.
-        if (d?.agreement) bits.push('agreement: ' + d.agreement);
-        const age = ago(d?.predictedAt);
+        const agree = status?.lastVerdictAgree;
+        const venues = status?.lastVerdictVenues;
+        if (agree != null && venues != null) bits.push(agree + ' of ' + venues + ' venues agree');
+        const age = ago(status?.lastVerdictAt);
         if (age) bits.push(age);
         model.textContent = bits.join(' · ');
     }
 
-    // An abstaining model is invisible in the verdict but changes what the verdict
-    // means: the survivors' weights are renormalised over them, which is how a 0.35
-    // LLM quietly became a 0.538 majority holder for six days.
+    // A verdict that has stopped advancing while no position is open means cycles
+    // are running without reaching the strategy — the price fetch failing is the
+    // known way that happens, and it is silent.
     const warn = el('sig-warn');
     if (warn) {
-        const absent = d?.absentModels || [];
-        if (absent.length === 0 && !d?.weightCapped) {
-            warn.hidden = true;
-        } else {
-            const parts = [];
-            if (absent.length) {
-                parts.push(
-                    `${absent.join(', ')} did not vote — the remaining models carry the whole verdict`);
-            }
-            if (d?.weightCapped) {
-                parts.push('one model’s share was capped so it cannot outvote the rest');
-            }
-            warn.textContent = parts.join('; ') + '.';
+        const at = status?.lastVerdictAt ? new Date(status.lastVerdictAt).getTime() : null;
+        const staleMs = at ? Date.now() - at : null;
+        const open = status?.openTradeCount || 0;
+
+        if (staleMs != null && staleMs > 300000 && open === 0) {
+            warn.textContent =
+                'Verdict is ' + Math.round(staleMs / 60000) + ' minutes old with no position open — ' +
+                'cycles may be running without reaching the strategy.';
             warn.hidden = false;
+        } else if (staleMs != null && staleMs > 300000 && open > 0) {
+            warn.textContent =
+                'Not advancing because ' + open + ' position(s) are open: at the per-strategy ' +
+                'limit the loop stops evaluating entries. Expected.';
+            warn.hidden = false;
+        } else {
+            warn.hidden = true;
         }
     }
 }
@@ -551,7 +563,6 @@ async function refreshBot() {
 
 async function refreshSignal() {
     try {
-        renderSignal(await apiGet(`/dashboard/${activeSymbol}?days=1`));
     } catch (e) {
         console.error('refreshSignal:', e);
     }
@@ -632,7 +643,8 @@ async function connectHub() {
     });
 
     hubConn.on('ReceiveMarketStatus', data => {
-        if (data.symbol === activeSymbol) renderSignal(data);
+        if (data.symbol === activeSymbol) { /* feature metrics only; the verdict
+           arrives with bot status */ }
     });
 
     hubConn.on('ReceiveVolumeAnalysis', data => {

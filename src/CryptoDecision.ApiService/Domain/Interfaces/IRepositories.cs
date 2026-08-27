@@ -9,11 +9,6 @@ public interface IFeatureRepository
     Task<IReadOnlyList<DailyFeature>> GetHistoryAsync(string symbol, int days = 30, CancellationToken ct = default);
 }
 
-public interface IPredictionRepository
-{
-    Task<Prediction?> GetLatestAsync(string symbol, CancellationToken ct = default);
-}
-
 public interface IMomentumRepository
 {
     Task<MomentumData> GetAsync(string symbol, string exchange = "BINANCE", CancellationToken ct = default);

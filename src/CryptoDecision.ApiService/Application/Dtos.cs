@@ -41,9 +41,6 @@ public sealed record MarketStatusDto(
     decimal? VolumeChange,
     int?     WhaleCount,
     decimal? Vwap,
-    string?  PredictedDirection,
-    decimal? Confidence,
-    string?  Rationale,
     DateTime AsOf
 );
 
@@ -57,26 +54,14 @@ public sealed record DailyFeatureDto(
     decimal  TotalVolume
 );
 
+// Daily feature history only. The eight prediction fields that used to ride along
+// here — direction, confidence, rationale, model version, agreement, absent models,
+// weight capping, prediction age — described prediction_table, whose writer has been
+// deleted. They were serialised as nulls on every response long before that.
 public sealed record DashboardDto(
     string                         Symbol,
     IReadOnlyList<DailyFeatureDto> History,
-    string?  PredictedDirection,
-    decimal? Confidence,
-    string?  Rationale,
-    string?  ModelVersion,
-    DateTime AsOf,
-
-    // How the verdict was reached, and what was missing when it was. A confidence
-    // number on its own cannot distinguish three models agreeing from one model
-    // being the only one that took a side.
-    string?   Agreement    = null,
-    string[]? AbsentModels = null,
-    bool      WeightCapped = false,
-
-    // When the prediction was made, not when it was fetched. The prediction cycle
-    // runs every 150s while the bot evaluates every 30s, so a displayed signal is
-    // routinely a few minutes old and the age is part of reading it honestly.
-    DateTime? PredictedAt  = null
+    DateTime                       AsOf
 );
 
 public sealed record MomentumDto(

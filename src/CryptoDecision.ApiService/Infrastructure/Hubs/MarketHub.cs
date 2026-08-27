@@ -18,7 +18,7 @@ public interface IMarketClient
     /// <summary>Pushed whenever new whale trades are detected.</summary>
     Task ReceiveWhaleAlert(WhaleAlertDto data);
 
-    /// <summary>Pushed every 30s with general market status (AI prediction, today's metrics).</summary>
+    /// <summary>Pushed every 30s with today's feature metrics for the symbol.</summary>
     Task ReceiveMarketStatus(MarketStatusDto data);
 
     /// <summary>Pushed every 15s with trading bot status.</summary>

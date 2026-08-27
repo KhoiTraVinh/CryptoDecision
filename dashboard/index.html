@@ -96,18 +96,22 @@
     </section>
 
     <!-- ── Why the bot is acting ─────────────────────────────────────────── -->
+    <!-- The strategy's own verdict, written to bot_config every cycle.
+         This replaced a panel that rendered prediction_table: the ensemble that
+         wrote that table has been deleted, so it had been showing an empty row
+         from a service that no longer runs, while the number that actually decides
+         entries — the cross-venue z — was not on screen anywhere. -->
     <section class="card signal-card">
-      <h2>Signal</h2>
+      <h2>Verdict</h2>
       <div class="signal-head">
         <span class="direction NEUTRAL" id="sig-direction">--</span>
         <span class="muted" id="sig-confidence"></span>
       </div>
-      <p class="rationale" id="sig-rationale">Waiting for a prediction...</p>
+      <p class="rationale" id="sig-rationale">Waiting for the first evaluation...</p>
 
-      <!-- Which models actually voted, how much they agreed, and how old the call
-           is. modelVersion alone said `ensemble-heuristic+llm` for six days while
-           XGBoost abstained for want of a trained model.pkl — technically on
-           screen, in practice unreadable. -->
+      <!-- Venue tally and age. "2 of 3 agree" is the binding condition far more
+           often than the aggregate threshold is, and a verdict minutes old during a
+           move reads very differently from a fresh one. -->
       <p class="muted small" id="sig-model"></p>
       <p class="signal-warn" id="sig-warn" hidden></p>
     </section>
