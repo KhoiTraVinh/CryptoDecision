@@ -22,8 +22,9 @@ OKX     ┘                                              │  trades → flow_ba
                                               OKX  ─ post-only entry + OCO exit
 ```
 
-`api` and `dashboard` sit behind the `ui` profile; `prediction` sits behind `ensemble`.
-Neither is deployed, and nothing in the entry path reads `prediction_table`.
+`api` and `dashboard` sit behind the `ui` profile and are not deployed. The Python
+prediction service that used to sit behind an `ensemble` profile has been deleted —
+nothing in the entry path read its output.
 
 ## Services
 
@@ -37,7 +38,6 @@ Neither is deployed, and nothing in the entry path reads `prediction_table`.
 | **PostgreSQL** | 16 | `trades` partitioned daily, 7-day retention | yes |
 | **API** | .NET 9 web | REST + SignalR | `ui` profile |
 | **Dashboard** | nginx | Static single-page UI | `ui` profile |
-| **Prediction** | Python 3.12 | Ensemble → `prediction_table` | `ensemble` profile |
 
 Exchanges: **Binance, Bybit, OKX**. Each has its own WebSocket client and a normalizer
 onto one internal trade shape. Orders go to OKX only, and the price feed is deliberately
@@ -176,7 +176,7 @@ unhealthy".
 | `bot_trades` | Trade history with realised P&L, per-trade stop/target/ATR/gate verdict |
 | `bot_trades_archive` | Trades from retired strategies, kept out of the active series |
 | `daily_feature_table` | return_24h, volatility, volume_change, whale_count, vwap |
-| `prediction_table` | Written only when the `ensemble` profile runs; nothing reads it |
+| `prediction_table` | Empty. Its writer is deleted; the API still selects from it |
 
 `is_whale` is a generated column, `quote_qty > 100000`. On SOL that fires rarely — 116 of
 2.41 M trades in a recent 24 hours, largest single trade $488,913 — so treat it as an
