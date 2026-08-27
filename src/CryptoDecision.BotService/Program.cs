@@ -27,8 +27,6 @@ builder.Services.AddSingleton(ds);
 
 // ─── Repositories ─────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<IFeatureRepository, FeatureRepository>();
-builder.Services.AddSingleton<IMomentumRepository, MomentumRepository>();
-builder.Services.AddSingleton<IPredictionRepository, PredictionRepository>();
 builder.Services.AddSingleton<IFlowBarRepository, FlowBarRepository>();
 
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────

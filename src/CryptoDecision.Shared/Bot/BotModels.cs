@@ -367,26 +367,6 @@ public static class BotLiveness
         TimeSpan.FromSeconds(Math.Max(180, evalIntervalSeconds * 4));
 }
 
-/// <summary>
-/// How old the AI prediction may be before it stops being an opinion and becomes a
-/// leftover row.
-///
-/// One definition, in Shared, because there are two consumers with the same question
-/// — the deterministic strategy's composite and the agent's market snapshot — and a
-/// second copy of this number is a second place for it to drift. The codebase has
-/// already paid for that: the entry thresholds sat at 62/38 while the comment
-/// documenting them said 65/35, three points away from the live risk boundary.
-///
-/// The prediction service runs on a 150-second cadence, so this tolerates roughly
-/// five missed cycles — enough to cover a restart or a slow LLM generation, far short
-/// of the hours a deliberately switched-off service would leave the last row sitting
-/// in prediction_table looking current.
-/// </summary>
-public static class PredictionFreshness
-{
-    public static readonly TimeSpan MaxAge = TimeSpan.FromMinutes(15);
-}
-
 // ── API DTO ───────────────────────────────────────────────────────────────────
 
 public sealed record BotTradeDto(
