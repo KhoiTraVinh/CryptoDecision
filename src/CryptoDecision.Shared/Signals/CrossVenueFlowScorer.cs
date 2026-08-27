@@ -45,6 +45,27 @@ namespace CryptoDecision.Shared.Signals;
 /// own history, not against 50%, because venues have structural biases — a
 /// retail-heavy book sits above 50% buys most of the time and that is its normal,
 /// not a signal.
+///
+/// ONE KNOB, TWO GATES. This value is the aggregate threshold AND the bar a single
+/// venue must clear to count as agreeing. Lowering it loosens both, so "2 of 3
+/// venues agree" is a weaker statement at 1.0 than it was at 1.5.
+///
+/// Lowered 1.5 → 1.0 on 2026-08-27 to BUY OBSERVATIONS, not because 1.0 was shown
+/// to be better. At 1.5 coverage was 8.2% of buckets: six days of live running
+/// produced four in-sample and four out-of-sample trades, which the backtester
+/// prints as "—" because it cannot compute a win rate from that. A threshold that
+/// cannot accumulate evidence inside two months cannot be evaluated at all. At 1.0
+/// with venue agreement held at 2, coverage is 20% — roughly 2.4x the signals, so
+/// thirty R-multiples arrive in about three weeks instead of eight.
+///
+/// It was also the only cell in a 36-configuration sweep that was not negative in
+/// both halves (break-even 9.2 bps in-sample, 17.2 bps out-of-sample, against the
+/// 7 bps this bot actually pays). That is a weak reason and it is stated as one:
+/// n was 9 and 7. Nothing in that sweep cleared the tool's own bar of 20
+/// in-sample and 10 out-of-sample trades — the honest summary was "nothing
+/// survived". See HYPOTHESES.md for the pre-registered decision rule, which
+/// exists so that a negative result three weeks from now reads as a result rather
+/// than as a reason to try the next cell.
 /// </param>
 /// <param name="MinAgreeingVenues">
 /// How many venues must independently lean the same way. This is the actual
@@ -83,7 +104,7 @@ namespace CryptoDecision.Shared.Signals;
 public sealed record FlowSignalOptions(
     int     SignalBars                    = 4,
     int     BaselineBars                  = 44,
-    double  EnterZ                        = 1.5,
+    double  EnterZ                        = 1.0,
     int     MinAgreeingVenues             = 2,
     double  MinVenueVolumeFractionOfMedian = 0.20,
     decimal MinVenueVolumeUsd             = 25_000m,
@@ -569,4 +590,42 @@ public static class CrossVenueFlowScorer
     private static string DescribeExclusions(IEnumerable<VenueVote> votes) =>
         string.Join("; ", votes.Where(v => !v.Participated)
             .Select(v => $"{v.Exchange}: {v.ExclusionReason}"));
+}
+
+/// <summary>
+/// Exit-geometry defaults, in one place because they have now drifted three times.
+///
+/// The pattern each time: a code default here, a different value in
+/// appsettings.json, and the backtester carrying its own literal copy of the code
+/// default. The tool then validates a strategy nobody runs, and nothing errors
+/// because every number looks plausible on its own.
+///
+///   BaselineBars        record said 96, production ran 44, backtester used 96
+///                       — 0 signals in backtest against 6 in 16 live hours
+///   EnterZ              record said 1.5, production moved to 1.0, backtester
+///                       still defaulted 1.5
+///   AtrLookbackMinutes  both code defaults said 1440, appsettings ran 240, so
+///                       every sweep sized stops from a 24-hour ATR while
+///                       production sized them from a 4-hour one
+///
+/// These values ARE what production runs. appsettings may still override them, but
+/// an override that changes behaviour should now also change this file, and a
+/// backtest run with no flags validates what is deployed.
+/// </summary>
+public static class FlowGeometryDefaults
+{
+    /// <summary>Minutes of 1-minute candles the ATR is measured over. 240 = 4 hours.</summary>
+    public const int AtrLookbackMinutes = 240;
+
+    /// <summary>Bar size the true range is resampled to before taking a median.</summary>
+    public const int AtrBarMinutes = 15;
+
+    /// <summary>Stop distance as a multiple of that ATR.</summary>
+    public const double StopAtrMultiple = 1.5;
+
+    /// <summary>Target distance as a multiple of the stop distance.</summary>
+    public const double TargetRiskMultiple = 2.0;
+
+    /// <summary>Hours a position may be held before it is closed regardless.</summary>
+    public const double MaxHoldHours = 12.0;
 }

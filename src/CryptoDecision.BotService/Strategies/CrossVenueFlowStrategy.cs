@@ -341,7 +341,7 @@ public sealed class FlowStrategyOptions
     public TimeSpan MaxBarAge { get; set; } = TimeSpan.FromMinutes(35);
 
     /// <summary>Minutes of 1-minute candles to load. 1440 = 24 hours.</summary>
-    public int AtrLookbackMinutes { get; set; } = 1440;
+    public int AtrLookbackMinutes { get; set; } = FlowGeometryDefaults.AtrLookbackMinutes;
 
     /// <summary>
     /// Bar size the true range is measured on, in minutes.
@@ -352,10 +352,10 @@ public sealed class FlowStrategyOptions
     /// position held for hours inside a window that ranged 15.9%. 15 matches the
     /// signal grid; the backtester sweeps it once there is enough history to.
     /// </summary>
-    public int AtrBarMinutes { get; set; } = 15;
+    public int AtrBarMinutes { get; set; } = FlowGeometryDefaults.AtrBarMinutes;
 
-    public double StopAtrMultiple    { get; set; } = 1.5;
-    public double TargetRiskMultiple { get; set; } = 2.0;
+    public double StopAtrMultiple    { get; set; } = FlowGeometryDefaults.StopAtrMultiple;
+    public double TargetRiskMultiple { get; set; } = FlowGeometryDefaults.TargetRiskMultiple;
 
     /// <summary>
     /// Round-trip cost assumption used when placing the stop and target, as a

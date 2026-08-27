@@ -70,6 +70,25 @@ public static class Report
                 Console.WriteLine(
                     $"    !! {truncated} trade(s) ran past the end of the candle series and were " +
                     "marked to the last close. Exclude them or extend the data.");
+
+            // Louder than TRUNCATED, because these are not merely incomplete — their
+            // outcome is unknowable, and the direction of the error is not random. The
+            // stop may have been hit inside the gap and there is no candle to show it.
+            var gapped = r.TradeLog.Count(t => t.ExitReason == "GAP_UNRESOLVED");
+            if (gapped > 0)
+            {
+                var share = 100.0 * gapped / Math.Max(1, r.Trades);
+                Console.WriteLine(
+                    $"    !! {gapped} of {r.Trades} trade(s) ({share:F0}%) hit a gap in the candle " +
+                    "series before resolving. Their outcome is UNKNOWN, not neutral: the stop may");
+                Console.WriteLine(
+                    "       have been hit inside the gap with no candle to record it. They are marked " +
+                    "to the last price before the gap, which flatters every one of them.");
+                if (share > 15.0)
+                    Console.WriteLine(
+                        "       Above 15% of trades — treat the whole result as unusable and fix the " +
+                        "data coverage first.");
+            }
         }
 
         AbstainBreakdown(r);

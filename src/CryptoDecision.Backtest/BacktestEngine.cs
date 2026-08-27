@@ -32,11 +32,11 @@ namespace CryptoDecision.Backtest;
 /// </param>
 public sealed record PolicyConfig(
     FlowSignalOptions Signal,
-    double  StopAtrMultiple    = 1.5,
-    double  TargetRiskMultiple = 2.0,
-    int     AtrLookbackMinutes = 1440,
-    int     AtrBarMinutes      = 15,
-    double  MaxHoldHours       = 12.0,
+    double  StopAtrMultiple    = FlowGeometryDefaults.StopAtrMultiple,
+    double  TargetRiskMultiple = FlowGeometryDefaults.TargetRiskMultiple,
+    int     AtrLookbackMinutes = FlowGeometryDefaults.AtrLookbackMinutes,
+    int     AtrBarMinutes      = FlowGeometryDefaults.AtrBarMinutes,
+    double  MaxHoldHours       = FlowGeometryDefaults.MaxHoldHours,
     decimal AllInCostRate      = 0.0021m,
     decimal FundingRatePerHour = 0.00005m,
     int     MaxConcurrent      = 1)
@@ -266,9 +266,40 @@ public static class BacktestEngine
         // The entry candle is included from here on: the fill happened at its open,
         // so the remainder of its range can take out the stop before the next minute
         // begins.
+        var previousCandleAt = entryCandle.OpenTime;
+
         for (var i = entryIndex; i < history.Candles.Count; i++)
         {
             var c = history.Candles[i];
+
+            // Rule 4. A gap in the candle series makes the outcome unknowable.
+            //
+            // The barriers are checked candle by candle, so minutes that are not in
+            // the series are minutes in which the stop cannot be seen being hit. Walk
+            // straight through a gap and the trade is scored on the first price after
+            // it, which is unbounded in the favourable direction and silently
+            // optimistic in the unfavourable one.
+            //
+            // This produced the only outlier in the run that made this strategy look
+            // profitable: a LONG entered 08-23 10:30 exited "TIMEOUT" after 30.2 hours
+            // against a 12-hour limit, at +4.31R, because the deadline fell inside a
+            // gap and the next available candle was 18 hours the other side of it.
+            // That single trade carried 90% of the measured edge — without it meanR
+            // fell from +0.26 to +0.03. A validation tool that turns missing data into
+            // profit is worse than no validation tool.
+            //
+            // Reported distinctly rather than dropped, so the count of unknowable
+            // trades is visible instead of quietly shrinking the sample.
+            var gapMinutes = (c.OpenTime - previousCandleAt).TotalMinutes;
+            if (gapMinutes > 2.0)
+            {
+                exitPrice  = history.Candles[Math.Max(entryIndex, i - 1)].Close;
+                exitAt     = previousCandleAt;
+                exitReason = "GAP_UNRESOLVED";
+                break;
+            }
+
+            previousCandleAt = c.OpenTime;
 
             if (c.OpenTime >= deadline)
             {
