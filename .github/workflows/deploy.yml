@@ -253,7 +253,17 @@ jobs:
           # until=24h keeps the day's images so a same-day rollback stays instant;
           # anything older re-pulls from GHCR, which still has every tag.
           docker image prune -af --filter 'until=24h'
-          docker system df | head -2
+
+          # NOT piped to head. `docker system df | head -2` closes the pipe after two
+          # lines, docker takes SIGPIPE, and because this is the last command in the
+          # heredoc its 141 became the exit code of the whole deploy step — a red run
+          # after every real step had already succeeded. Five lines in the log is
+          # cheaper than a failure that has to be diagnosed before it can be ignored,
+          # and a deploy that cries wolf is a deploy nobody reads.
+          #
+          # Same SIGPIPE-under-a-pipe mistake that health.sh carries a comment about.
+          # Writing that comment did not stop me making it again two commits later.
+          docker system df
           REMOTE
 
       - name: Verify the stack came up
@@ -287,7 +297,12 @@ jobs:
           # or if it exited 0 — which is success for a one-shot and failure for nothing.
           failed=0
           for svc in $($COMPOSE config --services); do
-            cid=$($COMPOSE ps -aq "$svc" 2>/dev/null | head -1)
+            # awk rather than `head -1`: awk reads to EOF, head closes the pipe on the
+            # first line. Every service happens to have exactly one container today so
+            # head never truncates, but the moment one has two, compose takes SIGPIPE
+            # and `set -euo pipefail` fails the verify step for a cosmetic reason —
+            # which is how the prune line failed a deploy an hour ago.
+            cid=$($COMPOSE ps -aq "$svc" 2>/dev/null | awk 'NR==1')
 
             if [ -z "$cid" ]; then
               # Not started at all: a profile-gated service. Nothing to assert.
