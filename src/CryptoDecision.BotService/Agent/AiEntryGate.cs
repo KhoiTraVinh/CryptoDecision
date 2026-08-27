@@ -89,9 +89,18 @@ public sealed class AiEntryGate(
         WHAT YOU ARE CHECKING FOR
         The system checks that the evidence is statistically unusual and that the
         venues agree. It cannot check whether the situation makes sense as a whole.
+        EVERY CLAIM IN YOUR REASON MUST BE CHECKABLE AGAINST A NUMBER IN THE BRIEF
+        Do not state a fact the brief does not contain. In particular: only call the
+        agreement thin because venues were EXCLUDED if the brief says the excluded
+        count is greater than zero. A venue that participated and did not reach the
+        threshold was NOT excluded — it was counted, it disagreed, and the aggregate
+        already reflects its disagreement. Those are different situations and only
+        the first one weakens the evidence.
+
         Skip when you see:
-        - The consensus rests on the bare minimum number of venues while the rest
-          were excluded, so "agreement" is thinner than the headline suggests.
+        - Venues were excluded for thin data (the brief says so, count above zero)
+          AND the remaining agreement is at the bare minimum, so "agreement" rests
+          on a smaller sample than the headline suggests.
         - Cross-venue price dispersion is wide, meaning the move is already underway
           and this entry is late.
         - The account has already lost significantly today and this adds to it.
@@ -180,6 +189,8 @@ public sealed class AiEntryGate(
               aggregate z {flow.AggregateZ:+0.00;-0.00}, OFI {flow.AggregateOfi:+0.000;-0.000}
               {flow.AgreeingVenues} of {flow.ParticipatingVenues} participating venues agree
               cross-venue price dispersion {flow.DispersionBps:F1} bps
+              venues excluded for thin data: {flow.Votes.Count - flow.ParticipatingVenues}
+              venues that participated but did not reach the threshold: {flow.ParticipatingVenues - flow.AgreeingVenues}
 
             PER VENUE
             {venues}
