@@ -32,7 +32,6 @@ builder.Services.AddSingleton<IPredictionRepository, PredictionRepository>();
 builder.Services.AddSingleton<IFlowBarRepository, FlowBarRepository>();
 
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────
-builder.Services.AddSingleton<ITradingStrategy, MomentumStrategy>();
 
 // The cross-venue flow strategy. Registered alongside MOMENTUM rather than replacing
 // it, because which strategies run is bot_config.active_strategies — a database edit,
@@ -96,34 +95,34 @@ builder.Services.AddSingleton<IPriceFeed>(sp => sp.GetRequiredService<BinancePri
 builder.Services.AddSingleton<IPriceFeed>(sp => sp.GetRequiredService<OkxPriceFeed>());
 builder.Services.AddSingleton<PriceFeedResolver>();
 
-// ─── AI Agent (tool-calling over Ollama) ──────────────────────────────────────
-// Active only when bot_config.use_ai_agent is set. Tools are singletons so their
-// schemas are built once; AgentContext carries the per-cycle facts they read.
+// ─── Ollama, for the entry gate only ──────────────────────────────────────────
+//
+// The tool-calling agent that used to live here is gone. It handed the model
+// get_market_snapshot / get_open_positions / get_account_state / open_position /
+// close_position and let it decide entries when bot_config.use_ai_agent was set.
+// That flag was false throughout, XVENUE_FLOW owns the entry decision, and 853
+// lines of tool plumbing nothing reached is 853 lines that can still break a
+// build and still has to be read before every change.
+//
+// What remains is one call with no tools array: AiEntryGate hands the model a
+// finished proposal and takes APPROVE or SKIP. Giving it tools would give it a
+// way to act, which is the property being deliberately withheld.
 var agentOptions = new AgentOptions
 {
-    Model          = builder.Configuration["Agent:Model"]   ?? "qwen2.5:7b",
-    BaseUrl        = builder.Configuration["Agent:BaseUrl"] ?? "http://ollama:11434",
-    MaxIterations  = int.TryParse(builder.Configuration["Agent:MaxIterations"], out var mi) ? mi : 8,
+    Model          = builder.Configuration["Agent:Model"]   ?? new AgentOptions().Model,
+    BaseUrl        = builder.Configuration["Agent:BaseUrl"] ?? new AgentOptions().BaseUrl,
     Temperature    = double.TryParse(builder.Configuration["Agent:Temperature"], out var tp) ? tp : 0.1,
-    TimeoutSeconds = int.TryParse(builder.Configuration["Agent:TimeoutSeconds"], out var ts) ? ts : 180,
+    TimeoutSeconds = int.TryParse(builder.Configuration["Agent:TimeoutSeconds"], out var ts) ? ts : 60,
 };
 builder.Services.AddSingleton(agentOptions);
 
 builder.Services.AddHttpClient("ollama", c =>
 {
     c.BaseAddress = new Uri(agentOptions.BaseUrl);
-    // Generous: a tool-calling round trip against a 7B on CPU is tens of seconds.
     c.Timeout = TimeSpan.FromSeconds(agentOptions.TimeoutSeconds);
 });
 
-builder.Services.AddSingleton<AgentContext>();
 builder.Services.AddSingleton<OllamaAgentClient>();
-builder.Services.AddSingleton<ITradingTool, GetMarketSnapshotTool>();
-builder.Services.AddSingleton<ITradingTool, GetOpenPositionsTool>();
-builder.Services.AddSingleton<ITradingTool, GetAccountStateTool>();
-builder.Services.AddSingleton<ITradingTool, OpenPositionTool>();
-builder.Services.AddSingleton<ITradingTool, ClosePositionTool>();
-builder.Services.AddSingleton<TradingAgent>();
 
 
 // ─── Health Checks ─────────────────────────────────────────────────────────────

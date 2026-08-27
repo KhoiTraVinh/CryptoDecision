@@ -70,9 +70,6 @@ services:
         --topic binance.kline.1m.solusdt --partitions 1 --replication-factor 1
         --config retention.ms=604800000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
-        --topic predictions.solusdt --partitions 1 --replication-factor 1
-        --config retention.ms=604800000 &&
-        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
         --topic okx.trade.solusdt --partitions 3 --replication-factor 1
         --config retention.ms=259200000 &&
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists
@@ -317,7 +314,7 @@ services:
       Okx__Leverage:                   "${OKX_LEVERAGE:-3}"
       Okx__MarginMode:                 "${OKX_MARGIN_MODE:-isolated}"
 
-      # The same tag the pull and the prediction service use. Stated here rather than
+      # The same tag the ollama-init pull uses. Stated here rather than
       # left to the code default, which was qwen2.5:7b — and because the availability
       # probe matches only the name before the colon, a 3b-only host would have looked
       # healthy and then refused every entry on a chat call for a missing tag.
@@ -370,12 +367,12 @@ services:
   # disk and wants roughly 6-8 GB of RAM resident while loaded. mem_limit is set
   # above that with headroom for the KV cache; lowering it will get the model
   # OOM-killed mid-generation rather than making it run leaner. If the host
-  # cannot spare that, set OLLAMA_ENABLED=false on the prediction service and the
-  # ensemble runs on the quantitative models alone.
+  # cannot spare that, lower OLLAMA_KEEP_ALIVE from -1 to 30m: the model unloads
+  # when idle and reloads on demand, costing ~13s on the first gate call after a gap.
   #
   # GPU: uncomment the deploy block below on a machine with an NVIDIA GPU and the
   # container toolkit installed. On CPU a generation takes ~20-60s, which is fine
-  # against a 5-minute prediction interval.
+  # against a gate that is called a handful of times a day.
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -390,7 +387,7 @@ services:
     # 3 GB for qwen2.5:3b (~1.9 GB of weights plus KV cache at 8k context).
     mem_limit: 3g
     environment:
-      # Keep the model resident between prediction cycles. The default 5m would
+      # Keep the model resident between gate calls. The default 5m would
       # unload it between runs and pay the multi-second load cost every time.
       # Never unload. With ~4 gate calls a day, a 30-minute keep-alive meant almost
       # every call paid the cold load — 15-18s on 2 Graviton cores, against a 90s
@@ -417,13 +414,13 @@ services:
   # ── One-shot model pull ───────────────────────────────────────────────────
   # Pulls the configured model into the shared volume on first boot and exits.
   #
-  # The tag comes from .env so this pull, the prediction service and the bot agent
+  # The tag comes from .env so this pull and the bot's entry gate
   # cannot disagree about it. They could before: the bot defaulted to qwen2.5:7b in
   # code with no env override, while OllamaAgentClient.IsAvailableAsync matches on the
   # name before the colon — so on a host with only 3b pulled it would report the model
   # available and then fail the actual chat call on a tag that does not exist. That
   # surfaces as the gate refusing every entry, with a log line about JSON parsing.
-  # Nothing blocks on it: the prediction service degrades to quantitative-only
+  # Nothing blocks on it: the gate refuses entries while the model is absent,
   # while the pull runs and picks the LLM up automatically once it lands.
   ollama-init:
     image: ollama/ollama:latest
@@ -443,78 +440,6 @@ services:
       - ollama_models:/root/.ollama
     restart: "no"
 
-  # ── PredictionService ─────────────────────────────────────────────────────
-  prediction:
-    build:
-      context: ./src/CryptoDecision.PredictionService
-      dockerfile: Dockerfile
-    container_name: prediction
-    # Off by default. With XVENUE_FLOW active nothing reads prediction_table: the
-    # strategy scores cross-venue flow directly and the entry gate calls Ollama
-    # itself. Kept in the file, behind a profile, because the ensemble is still the
-    # reference implementation of the daily-horizon model — not running it and
-    # deleting it are separate decisions.
-    profiles: ["ensemble"]
-    # Raised from 128m: the service now builds richer market contexts and holds
-    # prompt/response strings. Inference itself lives in the ollama container.
-    mem_limit: 256m
-    ports:
-      - "8083:8080"   # health endpoint
-    environment:
-      POSTGRES_URL:             "postgresql://${POSTGRES_USER:-crypto}:${POSTGRES_PASS:-crypto}@postgres:5432/${POSTGRES_DB:-crypto}"
-      KAFKA_BOOTSTRAP_SERVERS:  "kafka:9092"
-      SYMBOLS:                  "SOLUSDT"
-      # 150s, down from 300s. The bot evaluates every 30s, so at 300s it read the
-      # same AI direction for ten consecutive cycles. The floor here is LLM
-      # latency, not preference: Qwen 2.5-7B on CPU has been measured at 47-77s
-      # per generation, so a cycle much under ~150s would spend most of itself
-      # waiting and the scheduler would simply run late.
-      PREDICTION_INTERVAL_SECONDS: "150"
-      CONTEXT_HISTORY_DAYS:     "7"
-
-      # ── LLM (Ollama / Qwen 2.5) ──
-      # Set OLLAMA_ENABLED=false to run the ensemble on XGBoost + heuristic only.
-      OLLAMA_ENABLED:           "true"
-      OLLAMA_BASE_URL:          "http://ollama:11434"
-      OLLAMA_MODEL:             "${OLLAMA_MODEL:-qwen2.5:3b}"
-      OLLAMA_TIMEOUT_SECONDS:   "120"
-      OLLAMA_TEMPERATURE:       "0.2"
-      OLLAMA_NUM_CTX:           "8192"
-      OLLAMA_SEED:              "42"
-
-      # ── Ensemble weights (renormalised over whichever models answer) ──
-      ENSEMBLE_WEIGHT_LLM:       "0.35"
-      ENSEMBLE_WEIGHT_XGBOOST:   "0.35"
-      ENSEMBLE_WEIGHT_HEURISTIC: "0.30"
-      # |score| below this is reported NEUTRAL rather than a weak directional call.
-      ENSEMBLE_DEAD_ZONE:        "0.15"
-      # Ceiling on one model's share of the vote after abstentions renormalise
-      # away. xgboost abstains until it has a trained model.pkl, and without this
-      # the renormalisation handed the LLM 0.538 — a single 7B model outvoting
-      # everything else. Binds only while models are missing; the full three-way
-      # split tops out at 0.35 and lifts the cap on its own.
-      ENSEMBLE_MAX_SINGLE_WEIGHT: "0.50"
-    volumes:
-      - prediction_models:/app/models
-    depends_on:
-      kafka-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      db-migrate:
-        condition: service_completed_successfully
-      # Deliberately service_started, not service_healthy: predictions should not
-      # wait on a multi-gigabyte model pull. The LLM joins the ensemble on its own
-      # once it answers an availability probe.
-      ollama:
-        condition: service_started
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
   # ── Dashboard (nginx static + API proxy) ──────────────────────────────────
   dashboard:
@@ -541,7 +466,6 @@ services:
 volumes:
   kafka_data:
   postgres_data:
-  prediction_models:
   # Holds the downloaded Qwen 2.5 weights (~4.7 GB). Persisting this across
   # `docker compose down` is what keeps the re-pull from happening every restart.
   ollama_models:

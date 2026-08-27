@@ -17,8 +17,6 @@ public sealed class TradingBotService(
     BotRepository         repo,
     BotConfigRepository   configRepo,
     IFeatureRepository    featureRepo,
-    TradingAgent          agent,
-    AgentContext          agentContext,
     IEntryGate            gate,
     ILogger<TradingBotService> log) : BackgroundService
 {
@@ -358,56 +356,6 @@ public sealed class TradingBotService(
     }
 
     /// <summary>
-    /// Hand the entry decision to the LLM agent for one turn.
-    ///
-    /// The agent opens positions through its own risk-gated tool, so nothing here
-    /// re-checks limits — that would duplicate the gate and let the two drift apart.
-    /// What this does own is reconciling the agent's actions back into
-    /// BotStateService, since the tools operate on AgentContext rather than on the
-    /// bot's in-memory state directly.
-    ///
-    /// A turn that opens nothing is the expected outcome most cycles.
-    /// </summary>
-    private async Task RunAgentEntryAsync(BotOptions opts, decimal currentPrice, CancellationToken ct)
-    {
-        if (!await agent.IsAvailableAsync(ct))
-        {
-            log.LogWarning(
-                "[TradingBot] AI agent is enabled but Ollama is unreachable. " +
-                "Skipping entries this cycle; open positions are still managed normally.");
-            return;
-        }
-
-        var openBefore = state.GetOpenTrades();
-        var knownIds   = openBefore.Select(t => t.Id).ToHashSet();
-
-        agentContext.BeginTurn(
-            opts, currentPrice, openBefore,
-            state.GetLastEntryAt(AgentContext.AgentStrategyName));
-
-        var outcome = await agent.RunTurnAsync(ct);
-
-        // Reconcile: register anything the agent opened, and drop anything it closed.
-        foreach (var opened in agentContext.TradesOpenedThisTurn(knownIds))
-        {
-            state.AddOpenTrade(opened);
-            state.SetLastEntryAt(AgentContext.AgentStrategyName, DateTime.UtcNow);
-        }
-
-        var stillOpen = agentContext.OpenTrades.Select(t => t.Id).ToHashSet();
-        foreach (var closed in openBefore.Where(t => !stillOpen.Contains(t.Id)))
-        {
-            state.RemoveOpenTrade(closed.Id);
-            state.SetLastClosedAt(DateTime.UtcNow);
-        }
-
-        if (outcome.OrdersRefused > 0)
-            log.LogInformation(
-                "[TradingBot] Risk engine refused {Count} agent order(s) this cycle.",
-                outcome.OrdersRefused);
-    }
-
-    /// <summary>
     /// Ask the gate whether a proposed entry is taken.
     ///
     /// Returns an approval without consulting the gate in exactly two cases, both of
@@ -715,13 +663,12 @@ public sealed class TradingBotService(
         }
 
         // ── 5. Check for new entry ─────────────────────────────────────────────
-        // Exits above are always deterministic. Only the entry decision is
-        // delegated, and only when the operator has explicitly enabled the agent.
-        if (opts.UseAiAgent)
-        {
-            await RunAgentEntryAsync(opts, currentPrice.Value, ct);
-            return;
-        }
+        //
+        // Exits above are always deterministic, and now so is the entry decision.
+        // The alternative branch here handed the whole decision to a tool-calling
+        // agent when bot_config.use_ai_agent was set; that flag was never true in
+        // production and the agent is gone. What survives is narrower on purpose:
+        // XVENUE_FLOW proposes, and the gate may only refuse.
 
         // ── Daily entry cap ───────────────────────────────────────────────────
         //

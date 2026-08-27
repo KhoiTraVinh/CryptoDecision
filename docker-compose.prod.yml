@@ -32,6 +32,3 @@ services:
 
   api:
     image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/api:${IMAGE_TAG:-latest}
-
-  prediction:
-    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/prediction:${IMAGE_TAG:-latest}

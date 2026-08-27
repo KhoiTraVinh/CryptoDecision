@@ -136,7 +136,7 @@ public sealed class BotOptions
     public bool         PaperMode                { get; set; } = true;
     public string       Symbol                   { get; set; } = "BTCUSDT";
     public string       Exchange                 { get; set; } = "BINANCE";
-    public List<string> ActiveStrategies         { get; set; } = ["MOMENTUM"];
+    public List<string> ActiveStrategies         { get; set; } = ["XVENUE_FLOW"];
     public decimal      CapitalUsd               { get; set; } = 100m;
     
     /// <summary>Number of concurrent positions per strategy.</summary>

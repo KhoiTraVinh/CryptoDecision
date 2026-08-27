@@ -49,7 +49,7 @@ public sealed class MomentumRepository(NpgsqlDataSource dataSource) : IMomentumR
     /// Windows are <em>cumulative</em>: the 15m row includes the last 5 minutes,
     /// and the 1h row includes both. This used to bucket each trade into exactly
     /// one window with a CASE expression, which made "15m" mean "between 5 and 15
-    /// minutes ago" — so the two longer timeframes MomentumStrategy weights most
+    /// minutes ago" — so the two longer timeframes the retired MOMENTUM weighted most
     /// heavily excluded the most recent data, and a fresh reversal could not reach
     /// them at all. The labels, the strategy's own comments, and
     /// PredictionService's get_timeframe_flows all describe cumulative windows;

@@ -16,7 +16,7 @@ public sealed record DailyFeature(
 
 
 
-// ── Multi-timeframe momentum for enhanced MomentumStrategy ───────────────────
+// ── Multi-timeframe momentum, read by the API only since MOMENTUM was retired ─
 
 public sealed record TimeframeMomentum(
     string  Timeframe,       // "5m" | "15m" | "1h"

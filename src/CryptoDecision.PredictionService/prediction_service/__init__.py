@@ -1,1 +1,0 @@
-# CryptoDecision PredictionService

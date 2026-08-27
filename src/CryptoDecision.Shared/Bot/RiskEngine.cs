@@ -211,7 +211,7 @@ public static class RiskEngine
 
         // ── Stop loss the bot itself can never reach ──
         //
-        // MomentumStrategy.EvaluateExit tests the trailing stop before the stop loss,
+        // The retired MOMENTUM's EvaluateExit tested the trailing stop before the stop loss,
         // so a trailing stop tighter than the stop loss always fires first and the
         // bot's own stop-loss branch is unreachable.
         //

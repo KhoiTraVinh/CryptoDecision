@@ -44,7 +44,7 @@ public interface IOrderEngine
     /// Whether a SHORT entry can actually be executed under this configuration.
     ///
     /// Asked before a signal becomes an order, not after. A spot cash account
-    /// cannot short, and MomentumStrategy's thresholds are symmetric — roughly
+    /// cannot short, and the retired MOMENTUM strategy's thresholds were symmetric — roughly
     /// half of its actionable signals are SHORT. Discovering that one order at a
     /// time turns a predictable constraint into a stream of errors, and buries the
     /// real failures among them.

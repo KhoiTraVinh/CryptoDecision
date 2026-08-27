@@ -91,7 +91,7 @@ public sealed class BotController(
             // bot worker refuses to start on any other live combination rather than
             // falling back to simulation; see IOrderEngine.DescribeRefusal.
             Exchange                 = req.Exchange?.ToUpperInvariant() ?? "BINANCE",
-            ActiveStrategies         = req.ActiveStrategies ?? new List<string> { "MOMENTUM" },
+            ActiveStrategies         = req.ActiveStrategies ?? new List<string> { "XVENUE_FLOW" },
             CapitalUsd               = req.CapitalUsd > 0 ? req.CapitalUsd : 100m,
             MaxOpenTradesPerStrategy = req.MaxOpenTradesPerStrategy > 0 ? req.MaxOpenTradesPerStrategy : 5,
             PositionPctOfCapital     = req.PositionPct > 0 ? req.PositionPct : 0.10m,

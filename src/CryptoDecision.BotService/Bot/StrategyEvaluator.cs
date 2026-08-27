@@ -56,7 +56,7 @@ public sealed class StrategyEvaluator
 
         // ── Drop signals the execution venue cannot fill ──
         //
-        // MomentumStrategy's thresholds are symmetric (LONG >= 62, SHORT <= 38), so
+        // The retired MOMENTUM strategy's thresholds were symmetric (LONG >= 62, SHORT <= 38), so
         // on a spot account roughly half its actionable signals are unfillable. The
         // order engine refuses them correctly, but refusing there turns a known
         // structural constraint into a stream of errors that buries the real ones.

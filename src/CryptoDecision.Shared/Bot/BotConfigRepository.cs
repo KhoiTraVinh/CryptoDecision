@@ -375,7 +375,7 @@ public sealed class BotConfigStatus
     public decimal      TotalPnlUsd          { get; init; }
     public int          WinCount             { get; init; }
     public int          LossCount            { get; init; }
-    public List<string> ActiveStrategies     { get; init; } = ["MOMENTUM"];
+    public List<string> ActiveStrategies     { get; init; } = ["XVENUE_FLOW"];
     public int          MaxOpenTradesPerStrategy { get; init; } = 5;
     public decimal      PositionPctOfCapital { get; init; } = 0.10m;
     public int          CooldownSeconds      { get; init; } = 120;
