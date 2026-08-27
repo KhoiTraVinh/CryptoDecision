@@ -787,6 +787,8 @@ public sealed class OkxOrderEngine(
                 algoId, trade.Id, closedBase, trade.Quantity, instrument.BaseCcy);
 
         ApplyExit(trade, closedBase, exitPrice, detail.FeeAbs, algo.OrdId!, reason);
+        await ReconcileRealisedPnlAsync(
+            trade, instrument, trade.Side == "SHORT" ? "short" : "long", ct);
 
         trade.ExitAlgoId = null;
         await repo.CloseTradeAsync(trade, ct);
@@ -915,6 +917,7 @@ public sealed class OkxOrderEngine(
         }
 
         ApplyExit(trade, closedBase, fill.AveragePrice, fill.FeeAbs, orderId, reason);
+        await ReconcileRealisedPnlAsync(trade, instrument, positionSide, ct);
 
         try
         {
@@ -959,6 +962,87 @@ public sealed class OkxOrderEngine(
     /// order. A position held across funding will show a small unexplained gap
     /// between this figure and the account balance.
     /// </summary>
+    /// <summary>
+    /// Replace a derived P&L with the exchange's own realised figure when it can be
+    /// read.
+    ///
+    /// ApplyExit computes P&L from entry price, exit price and both legs' fees, and
+    /// that arithmetic is right as far as it goes — but it cannot see funding. OKX
+    /// charges or pays funding every eight hours against the position and settles it
+    /// in the account bills rather than on either order, so a derived figure is short
+    /// by whatever funding accrued.
+    ///
+    /// Measured against positions-history for the three live trades, rather than
+    /// estimated:
+    ///
+    ///     trade 14  held 5.7h   derived -0.1258   exchange -0.1267872   funding -0.0009832
+    ///     trade 15  held 4.7h   derived +0.1681   exchange +0.1681183   funding  0
+    ///     trade 16  held 0.2h   derived -0.4935   exchange -0.4934884   funding  0
+    ///
+    /// So one trade in three crossed a funding boundary, and the whole gap on that
+    /// one was the funding: -0.119 pnl, -0.006804 fee, -0.0009832 funding sums to the
+    /// exchange figure exactly. That is 1.0 bps on a $9.81 notional — smaller than the
+    /// 0.75-3 bps I guessed before measuring, and worth having anyway: it is
+    /// one-directional (a long paying funding reads as a better trade than it was),
+    /// the live R-multiples are the only evidence being accumulated, and the measured
+    /// break-even margin is itself single-digit bps.
+    ///
+    /// The other two trades also confirm the derived arithmetic to within $0.00002,
+    /// which is worth knowing separately.
+    ///
+    /// SettleVanishedPositionAsync already reasons this way for liquidations and
+    /// external closes. This applies the same rule to the ordinary path, where all
+    /// three live trades so far have closed.
+    ///
+    /// Best-effort by design: a failed read leaves the derived number in place and
+    /// says so. Closing the row matters more than the last basis point, and a trade
+    /// that will not close is retried forever.
+    /// </summary>
+    private async Task ReconcileRealisedPnlAsync(
+        BotTrade trade, OkxInstrument instrument, string positionSide, CancellationToken ct)
+    {
+        OkxPositionHistory? history = null;
+        try
+        {
+            history = await trading.GetLastClosedPositionAsync(instrument.InstId, positionSide, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning(ex,
+                "[OKX] Trade {Id}: could not read position history, so P&L stays derived from price " +
+                "and fees and EXCLUDES funding. The recorded result is optimistic by whatever funding " +
+                "accrued over {Hours:F1}h.",
+                trade.Id,
+                (DateTime.UtcNow - trade.OpenedAt).TotalHours);
+            return;
+        }
+
+        if (history?.RealisedPnl is not { } realised)
+        {
+            log.LogWarning(
+                "[OKX] Trade {Id}: no position-history entry on {InstId}, so P&L stays derived and " +
+                "EXCLUDES funding.",
+                trade.Id, instrument.InstId);
+            return;
+        }
+
+        var derived = trade.PnlUsd ?? 0m;
+        var delta   = realised - derived;
+
+        trade.PnlUsd = Math.Round(realised, 4);
+        trade.PnlPct = trade.NotionalUsd > 0m
+            ? Math.Round(realised / trade.NotionalUsd, 6)
+            : 0m;
+
+        // Logged with the gap, because the gap IS the funding plus any fee rounding,
+        // and it is the number that was previously invisible.
+        log.LogInformation(
+            "[OKX] Trade {Id} P&L reconciled to the exchange figure: {Realised:+0.0000;-0.0000} USD " +
+            "against {Derived:+0.0000;-0.0000} derived, a {Delta:+0.0000;-0.0000} difference that is " +
+            "funding and fee rounding the derived figure could not see.",
+            trade.Id, realised, derived, delta);
+    }
+
     private static void ApplyExit(
         BotTrade trade, decimal closedBase, decimal exitPrice, decimal exitFeeUsd,
         string? orderId, string reason)

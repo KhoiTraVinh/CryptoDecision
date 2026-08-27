@@ -608,7 +608,43 @@ public sealed class TradingBotService(
 
         // Price comes from the venue orders are placed on — see PriceFeedResolver.
         var currentPrice = await strategy.GetCurrentPriceAsync(opts, ct);
-        if (currentPrice is null) return;
+
+        // A failed price read used to be `if (currentPrice is null) return;` — no log,
+        // no verdict, nothing. The heartbeat is stamped by TouchEval above, so the
+        // loop went on reporting alive while this cycle did nothing at all.
+        //
+        // "Nothing at all" understates it. Exits are managed here too: trailing stop,
+        // breakeven, max-hold. Skipping the cycle skips those, so a persistent price
+        // failure leaves open positions with no bot-side exit management. The
+        // exchange-side OCO still holds — that is exactly why it is armed at the
+        // exchange and not kept in this process — but the operator had no way to know
+        // the bot had stopped managing anything.
+        //
+        // The price layer logs its own warning per venue. What was missing is the
+        // consequence at this level, and a named state in bot_config so it is visible
+        // in one query instead of a log search.
+        if (currentPrice is null)
+        {
+            var openCount = openTrades.Count;
+
+            log.LogError(
+                "[TradingBot] No price for {Symbol} from {Exchange}, so this cycle is skipped " +
+                "entirely: no entry evaluation, and no exit management for {Open} open position(s). " +
+                "Exchange-side OCO still protects them. See the [Price] warning above for the venue " +
+                "error.",
+                opts.Symbol, opts.Exchange, openCount);
+
+            await SafeRecordAsync(
+                configRepo.RecordVerdictAsync(
+                    "NO_PRICE",
+                    $"No price available for {opts.Symbol} from {opts.Exchange}. The cycle was " +
+                    $"skipped, so nothing was evaluated and {openCount} open position(s) went " +
+                    "unmanaged this pass; the exchange OCO is what is protecting them.",
+                    0.0, 0, 0, ct),
+                "no-price verdict");
+
+            return;
+        }
 
         // ── 3. Update peak price for trailing stop tracking ─────────────────────
         foreach (var trade in openTrades)
