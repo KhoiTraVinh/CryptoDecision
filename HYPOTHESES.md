@@ -165,3 +165,85 @@ same daily cap and per-order ceiling as everything else.
 ### Result
 
 _Open._
+
+---
+
+## H3 — Binance may vouch alone at z≥1.5; the thin venues still need each other
+
+- **Opened** 2026-08-28
+- **Change** three parameters in `FlowSignalOptions`, in both places that hold them
+  (the record defaults the backtester reads, and `FlowStrategy:Signal:*` in
+  appsettings):
+  - `MaxDispersionBps` 25.0 → **0.0** — the dispersion check is off.
+  - `VenueAgreementZ` — **new**, 1.5. The bar an individual venue must clear, split
+    out from `EnterZ` (1.0), which stays the bar for the aggregate.
+  - `SufficientVenue` — **new**, "BINANCE". A venue whose agreement alone satisfies
+    the consensus requirement.
+  - `MinAgreeingVenues` stays **2**, and now means: two venues, when Binance is not
+    one of them.
+- **Purpose** Operator's rule: if Binance is clearly unusual, that is enough. If the
+  case rests on OKX and Bybit, both have to say so.
+
+### Why
+
+The venues are not interchangeable and the old rule treated them as if they were.
+Measured median volume in a 15-minute bucket: **Binance $7.0M, OKX $2.07M, Bybit
+$0.89M** — an eightfold spread. An imbalance that is statistically unusual on Binance
+is unusual across most of the traded market; the same z on Bybit is unusual across a
+tenth of it. "Two of three agree" counted a Bybit vote and a Binance vote as one each.
+
+Splitting `VenueAgreementZ` from `EnterZ` fixes a second conflation. The aggregate is
+volume-weighted and standardised against its own history, so it is already a quieter
+series than any single venue; asking both to clear 1.0 asked much more of the
+aggregate. 1.5 for a venue against 1.0 for the aggregate says the aggregate must be
+unusual and its voucher must be *clearly* unusual.
+
+The dispersion check goes off because it shows no relationship to outcomes in the
+data that exists (winners at 4.3 and 7.5 bps, losers 2.2-13.2), it fired once in the
+24 hours audited, and disabling it removes the gate's most-used excuse: `AiEntryGate`
+permits the "late entry" ground only at 80% of the ceiling, and with no ceiling the
+brief states the ground is unavailable.
+
+**What is not claimed.** Nothing here is read off outcome data. Per-venue z was never
+recorded for the fifteen signals with known results, so the sufficient-venue rule is
+a judgement about market structure that the existing data cannot test. It becomes
+testable from now on: `signal_outcomes.venue_votes` stores every venue's z, so "would
+a Bybit-led signal have won" is a query once enough of them exist.
+
+**Direction still comes from the aggregate.** Binance clearing 1.5 satisfies the
+*consensus* requirement; it does not bypass `EnterZ`. If Binance is at +1.6 while the
+aggregate sits inside ±1.00, the bucket still abstains as AGGREGATE_BELOW_THRESHOLD.
+That is deliberate — the aggregate falling below the band while Binance is extreme
+means the other two venues are actively leaning the other way — but it is a narrower
+reading than "Binance above 1.5 enters", and reversing it is a one-line change if the
+abstain counts show it binding often.
+
+Third live change open at once (H1 EnterZ, H2 gate brief). H1's decision rule reads
+signal frequency, which this affects in both directions: the sufficient-venue rule
+admits Binance-led signals the old rule refused, while raising the per-venue bar to
+1.5 refuses marginal ones it used to accept.
+
+### Decision rule, fixed in advance
+
+Evaluate when **60 signals** are recorded in `signal_outcomes` after this ships, or
+after **two weeks**, whichever comes first. Judged per source, from `venue_votes`:
+
+- **Keep** if Binance-alone signals (Binance agreed, fewer than 2 venues agreed) have
+  mean R no worse than signals with 2+ agreeing venues, and the overall mean R is
+  ≥ −0.60R (the mean of the 15 audited signals under the old rule).
+- **Revert `SufficientVenue` to null** if Binance-alone signals are materially worse
+  than corroborated ones — that is the rule failing on its own terms.
+- **Revert `VenueAgreementZ` to 1.0** only if signal count collapses below ~5/day,
+  and never in the same window as another change.
+- Dispersion stays off either way unless section 6 of `scripts/gate-report.sql` shows
+  a win-rate gradient across dispersion buckets.
+
+### Cost of being wrong
+
+Bounded by the caps that do not move: 4 entries/day, one position at a time, ~$0.30
+risk per trade, $30 per-order ceiling, 15% daily loss limit. Two weeks at the cap is
+roughly $17 if every trade loses.
+
+### Result
+
+_Open._

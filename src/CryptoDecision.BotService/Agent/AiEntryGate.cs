@@ -319,9 +319,11 @@ public sealed class AiEntryGate(
 
             CHECKS ALREADY PASSED IN CODE, with the threshold each was judged against
               dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
-                                {(c.MaxDispersionBps > 0 && flow.DispersionBps >= 0.8 * c.MaxDispersionBps
-                                    ? "AT OR NEAR THE CEILING — 'late entry' is available as a ground"
-                                    : "well inside the ceiling — 'late entry' is NOT available as a ground")}
+                                {(c.MaxDispersionBps <= 0
+                                    ? "no dispersion limit is in force — 'late entry' is NOT available as a ground"
+                                    : flow.DispersionBps >= 0.8 * c.MaxDispersionBps
+                                        ? "AT OR NEAR THE CEILING — 'late entry' is available as a ground"
+                                        : "well inside the ceiling — 'late entry' is NOT available as a ground")}
               excluded venues   {excluded,6}       — {(excluded > 0
                                     ? "above zero — 'thin evidence' is available as a ground"
                                     : "zero — 'thin evidence' is NOT available as a ground")}

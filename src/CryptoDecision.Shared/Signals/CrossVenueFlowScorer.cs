@@ -68,11 +68,47 @@ namespace CryptoDecision.Shared.Signals;
 /// than as a reason to try the next cell.
 /// </param>
 /// <param name="MinAgreeingVenues">
-/// How many venues must independently lean the same way. This is the actual
-/// cross-venue corroboration, and it is the thing the old ensemble claimed to do
-/// and did not: three models reading one identical four-number daily feature row
-/// is one opinion counted three times, whereas Binance, Bybit and OKX have
-/// different participants and their books can genuinely disagree.
+/// How many venues must independently lean the same way, for venues that are not
+/// <see cref="FlowSignalOptions.SufficientVenue"/>. This is the actual cross-venue
+/// corroboration, and it is the thing the old ensemble claimed to do and did not:
+/// three models reading one identical four-number daily feature row is one opinion
+/// counted three times, whereas Binance, Bybit and OKX have different participants
+/// and their books can genuinely disagree.
+///
+/// Stays at 2. It briefly went to 1 on 2026-08-28 and was reverted the same day, in
+/// favour of the sufficient-venue rule below, which says the same thing more
+/// precisely: 1 was never wanted for Bybit, only for Binance.
+///
+/// Also the minimum number of venues that must PARTICIPATE — except when the
+/// sufficient venue is among them, which is the exception that makes the rule work
+/// at all. Never set it to 0.
+/// </param>
+/// <param name="VenueAgreementZ">
+/// The bar an individual venue must clear to count as agreeing, separate from
+/// <see cref="FlowSignalOptions.EnterZ"/>, which is the bar for the aggregate.
+///
+/// They were one number until 2026-08-28 and should not have been. The aggregate is
+/// volume-weighted across venues and standardised against its own history, so it is
+/// already a quieter series than any single venue's; asking both to clear 1.0 asks
+/// much more of the aggregate than of a venue. 1.5 for a venue against 1.0 for the
+/// aggregate says: the aggregate has to be unusual, and whichever venue vouches for
+/// it has to be *clearly* unusual, not marginally.
+/// </param>
+/// <param name="SufficientVenue">
+/// A venue whose agreement alone satisfies the consensus requirement. Null disables
+/// the exception and restores plain N-of-M agreement.
+///
+/// BINANCE, because the venues are not interchangeable. Measured median volume in a
+/// 15-minute bucket: Binance $7.0M, OKX $2.07M, Bybit $0.89M. An imbalance that is
+/// statistically unusual on Binance is unusual across most of the traded market;
+/// the same z on Bybit is unusual across a tenth of it. Requiring Bybit to be
+/// corroborated while letting Binance stand alone is not favouritism, it is the
+/// eightfold volume spread expressed as a rule.
+///
+/// The honest caveat: this is a judgement about market structure, not a result read
+/// off data. Nothing in the fifteen signals with known outcomes tests it, because
+/// per-venue z was never recorded for them. signal_outcomes.venue_votes records it
+/// from now on, which is what makes the rule falsifiable later.
 /// </param>
 /// <param name="MinVenueVolumeFractionOfMedian">
 /// Share of a venue's <em>own</em> trailing median window volume that it must print
@@ -100,6 +136,22 @@ namespace CryptoDecision.Shared.Signals;
 /// Ceiling on cross-venue VWAP dispersion. Wide dispersion means thin books or a
 /// move already in progress — entering into it is paying for information the
 /// market has already priced. Set to 0 to disable the check.
+///
+/// **Disabled (0) on 2026-08-28 by operator decision — see H3.** What is known about
+/// it, so that turning it back on is a decision rather than a guess:
+///
+///   • It did bind, but rarely: one `VENUE_DISPERSION_TOO_WIDE` abstention in the
+///     24 hours audited, against 23 other abstentions for other reasons.
+///   • It carries no visible information about outcomes in the data that exists. On
+///     the fifteen signals with known results the two winners sat at 4.3 and 7.5 bps
+///     while losers spanned 2.2 to 13.2 bps.
+///   • Every actionable signal on record was between 2.2 and 13.2 bps, so at 25 the
+///     ceiling sat at roughly double the observed maximum.
+///
+/// Disabling it also removes the entry gate's most-used excuse as a side effect:
+/// AiEntryGate permits the "late entry" ground only at 80% of the ceiling or above,
+/// and with no ceiling the brief states plainly that the ground is unavailable. The
+/// gate refused eight entries in one day on that ground at 2.8-13.2 bps.
 /// </param>
 public sealed record FlowSignalOptions(
     int     SignalBars                    = 4,
@@ -110,10 +162,27 @@ public sealed record FlowSignalOptions(
     decimal MinVenueVolumeUsd             = 25_000m,
     int     MinVenueTrades                = 50,
     double  MaxConcentration              = 0.35,
-    double  MaxDispersionBps              = 25.0)
+    // 0 disables the check. Kept identical to appsettings'
+    // FlowStrategy:Signal:MaxDispersionBps — the backtester takes this default rather
+    // than a CLI flag, so a change made only in appsettings would leave the tool
+    // measuring a strategy the bot is not running, which is the drift that has
+    // already cost this repository three parameters.
+    double  MaxDispersionBps              = 0.0,
+    double  VenueAgreementZ               = 1.5,
+    string? SufficientVenue               = "BINANCE")
 {
     /// <summary>Buckets the scorer needs before it can produce anything at all.</summary>
     public int MinimumBars => SignalBars + BaselineBars;
+
+    /// <summary>
+    /// Whether one venue is allowed to corroborate a signal on its own.
+    ///
+    /// Whitespace counts as absent, not as a venue named " ". Configuration binders
+    /// produce empty strings for a key that was written and left blank, and an empty
+    /// SufficientVenue that silently matched nothing would turn the rule off without
+    /// anything saying so — the class of failure this repository keeps paying for.
+    /// </summary>
+    public bool HasSufficientVenue => !string.IsNullOrWhiteSpace(SufficientVenue);
 }
 
 /// <summary>One venue's contribution to a verdict, and whether it counted.</summary>
@@ -243,15 +312,23 @@ public static class CrossVenueFlowScorer
                 $"[{DescribeExclusions(votes)}]",
                 votes);
 
-        // A single venue cannot corroborate itself. Checked before the arithmetic
-        // because the whole premise of this signal is agreement between independent
-        // books, and one book agreeing with itself is the failure mode the old
-        // ensemble shipped with.
-        if (participating.Count < options.MinAgreeingVenues)
+        // A single venue cannot corroborate itself — unless it is the venue the
+        // operator has designated as sufficient on its own. That exception is what
+        // SufficientVenue exists for, so the participation floor has to know about
+        // it: requiring two participants would abstain on a bucket where Binance
+        // qualified and the two thin venues did not, which is precisely the bucket
+        // the rule is meant to admit.
+        var sufficientParticipates = options.HasSufficientVenue
+            && participating.Any(v => string.Equals(
+                   v.Exchange, options.SufficientVenue, StringComparison.OrdinalIgnoreCase));
+
+        if (!sufficientParticipates && participating.Count < options.MinAgreeingVenues)
             return FlowVerdict.Abstain(
                 "TOO_FEW_VENUES",
                 $"Only {participating.Count} venue(s) qualified but " +
-                $"{options.MinAgreeingVenues} must agree. [{DescribeExclusions(votes)}]",
+                $"{options.MinAgreeingVenues} must agree without " +
+                $"{options.SufficientVenue ?? "a sufficient venue"}. " +
+                $"[{DescribeExclusions(votes)}]",
                 votes,
                 participating: participating.Count);
 
@@ -298,7 +375,7 @@ public static class CrossVenueFlowScorer
         foreach (var vote in votes)
         {
             var agreed = vote.Participated
-                      && Math.Abs(vote.Z) >= options.EnterZ
+                      && Math.Abs(vote.Z) >= options.VenueAgreementZ
                       && Math.Sign(vote.Z) == direction;
 
             var updated = vote with { Agreed = agreed };
@@ -306,12 +383,30 @@ public static class CrossVenueFlowScorer
             if (agreed) agreeing.Add(updated);
         }
 
-        if (agreeing.Count < options.MinAgreeingVenues)
+        // ── One designated venue may stand alone ──────────────────────────────
+        //
+        // The operator's rule, and the reason this is not simply MinAgreeingVenues=1:
+        // the venues are not interchangeable. Binance prints roughly $7.0M in a
+        // 15-minute bucket against OKX's $2.07M and Bybit's $0.89M, so a move that
+        // shows up as unusual there is a move in most of the market, while the same
+        // z on Bybit is a move in a tenth of it. So Binance clearing the bar counts
+        // as corroboration on its own; the thinner two have to agree with each other.
+        //
+        // Deliberately NOT expressed as a weight or a score. A venue is either
+        // sufficient or it is not, and which one it is sits in configuration where it
+        // can be read, argued with and reverted — not buried in a coefficient.
+        var sufficientAgreed = options.HasSufficientVenue
+            && agreeing.Any(v => string.Equals(
+                   v.Exchange, options.SufficientVenue, StringComparison.OrdinalIgnoreCase));
+
+        if (!sufficientAgreed && agreeing.Count < options.MinAgreeingVenues)
             return FlowVerdict.Abstain(
                 "NO_CROSS_VENUE_CONSENSUS",
-                $"Aggregate leans {(direction > 0 ? "buy" : "sell")} (z={aggregateZ:F2}) but only " +
-                $"{agreeing.Count} of {participating.Count} venue(s) independently agree at " +
-                $"z≥{options.EnterZ:F2}. [{DescribeVotes(finalVotes)}]",
+                $"Aggregate leans {(direction > 0 ? "buy" : "sell")} (z={aggregateZ:F2}) but " +
+                $"{(options.HasSufficientVenue ? $"{options.SufficientVenue} did not clear " +
+                    $"z≥{options.VenueAgreementZ:F2} on its own and " : "")}" +
+                $"only {agreeing.Count} of {participating.Count} venue(s) independently agree at " +
+                $"z≥{options.VenueAgreementZ:F2}. [{DescribeVotes(finalVotes)}]",
                 finalVotes, aggregateOfi, aggregateZ, agreeing.Count, participating.Count, dispersionBps);
 
         // Dispersion is checked last of the vetoes so its message can report a
