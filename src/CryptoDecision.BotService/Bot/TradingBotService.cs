@@ -1,5 +1,6 @@
 using CryptoDecision.BotService.Agent;
 using CryptoDecision.BotService.Infrastructure;
+using CryptoDecision.BotService.Strategies;
 using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
 
@@ -18,6 +19,14 @@ public sealed class TradingBotService(
     BotConfigRepository   configRepo,
     IFeatureRepository    featureRepo,
     IEntryGate            gate,
+    SignalOutcomeRepository signals,
+    // Only for the model name stamped onto each signal row: a verdict is not
+    // comparable across models, and "the gate got worse" after a model change has to
+    // be answerable from the table rather than from memory.
+    AgentOptions          gateOptions,
+    // Read for its thresholds, not to score anything: the gate's brief states each
+    // checked value against the limit the scorer applied to it.
+    FlowStrategyOptions   flowOptions,
     ILogger<TradingBotService> log) : BackgroundService
 {
     /// <summary>
@@ -420,7 +429,18 @@ public sealed class TradingBotService(
             Geometry:      geometry,
             NotionalUsd:   sizing.NotionalUsd,
             OpenPositions: openPositions,
-            TodayPnlUsd:   todayPnl);
+            TodayPnlUsd:   todayPnl,
+
+            // The four thresholds the gate is allowed to refuse against, carried in so
+            // the brief can state each value next to the limit it was judged by. The
+            // gate refused eight entries in one day for "wide dispersion" at 2.8-13.2
+            // bps while the scorer's ceiling — already enforced, so nothing above it
+            // can reach the gate — is 25 bps. A number handed over without its scale
+            // is an invitation to invent one.
+            CapitalUsd:        opts.CapitalUsd,
+            DailyLossLimitPct: opts.DailyLossLimitPct,
+            MaxDispersionBps:  flowOptions.Signal.MaxDispersionBps,
+            MaxOpenPositions:  opts.MaxOpenTradesPerStrategy);
 
         // One verdict per side per 15-minute bucket. The evidence cannot change
         // until the next bar closes, so asking again inside the same bucket is
@@ -778,6 +798,21 @@ public sealed class TradingBotService(
 
                     if (decision.Pass)
                     {
+                        // ── Record the signal before anyone judges it ──────────
+                        //
+                        // Written here, not after the gate answers, and not only when
+                        // an order is placed. A refused signal is the one this table
+                        // exists for: it is the only way to ever measure whether the
+                        // refusal was right, and until now its only trace was a
+                        // container log that every deploy destroys.
+                        //
+                        // Collapses onto one row per 15-minute bucket, because the
+                        // loop re-proposes the same evidence every 30 seconds until
+                        // the next bar closes — 298 proposals for 15 real signals in
+                        // the window this was built from.
+                        var signalId = await SafeSignalAsync(
+                            opts, strat, decision, currentPrice.Value);
+
                         // ── The gate has the only veto on entry ────────────────
                         //
                         // Everything about the trade is already fixed: direction from
@@ -794,6 +829,12 @@ public sealed class TradingBotService(
                         // the wrong direction.
                         var gate = await ReviewEntryAsync(
                             opts, strat, decision, currentPrice.Value, stratTrades.Count, ct);
+
+                        if (signalId is { } refusedId)
+                            await SafeRecordAsync(
+                                signals.StampGateAsync(
+                                    refusedId, gate.Verdict, gate.Reason, gateOptions.Model, 0, ct),
+                                "gate verdict on the signal row");
 
                         if (!gate.Approved)
                         {
@@ -833,6 +874,16 @@ public sealed class TradingBotService(
 
                             state.AddOpenTrade(trade);
                             state.SetLastEntryAt(strat, DateTime.UtcNow);
+
+                            // Links the signal to the position it became. Only
+                            // approved signals get one, which is what makes "approved
+                            // but never placed" — a sizing refusal, a venue rejection
+                            // — a visible state of its own rather than something that
+                            // reads like a gate refusal.
+                            if (signalId is { } takenId)
+                                await SafeRecordAsync(
+                                    signals.AttachTradeAsync(takenId, trade.Id, ct),
+                                    "signal to trade link");
 
                             // Recorded so the dashboard can show what sizing actually
                             // produced, not only what it asked for. The venue's lot
@@ -947,6 +998,49 @@ public sealed class TradingBotService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning(ex, "[TradingBot] Could not persist {What}.", what);
+        }
+    }
+
+    /// <summary>
+    /// Record an actionable signal, returning the row id, or null if it could not be
+    /// written.
+    ///
+    /// Separate from <see cref="SafeRecordAsync"/> because this one has a value to
+    /// return and the callers downstream need to know whether there is a row to stamp
+    /// a verdict onto. Failure is not an error path: a signal that could not be
+    /// recorded costs a row of research data, and nothing about the trade changes.
+    /// The alternative — letting a research write refuse an entry — would put the
+    /// least important thing in this method in charge of the most important one.
+    /// </summary>
+    private async Task<long?> SafeSignalAsync(
+        BotOptions opts, string strategyName, EntryDecision decision, decimal price)
+    {
+        if (decision.Flow is not { } flow || decision.Geometry is not { } geometry)
+            return null;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            return await signals.RecordSignalAsync(new SignalRecord(
+                Symbol:      opts.Symbol,
+                Side:        decision.Side,
+                Strategy:    strategyName,
+                // The bucket, not the timestamp, is the identity of a decision: the
+                // evidence cannot change until the next bar closes. Same grid the
+                // gate's decline cache uses, from the same helper, so the two cannot
+                // disagree about what "already decided" means.
+                BucketStart: SignalOutcomeRepository.BucketOf(now),
+                SignalAt:    now,
+                Flow:        flow,
+                Geometry:    geometry,
+                SignalPrice: price,
+                Confidence:  decision.Confidence));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning(ex, "[TradingBot] Could not record the signal for research.");
+            return null;
         }
     }
 }

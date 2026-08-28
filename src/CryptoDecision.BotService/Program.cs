@@ -4,7 +4,9 @@ using CryptoDecision.BotService.Bot;
 using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Health;
 using CryptoDecision.BotService.Infrastructure;
+using CryptoDecision.BotService.Research;
 using CryptoDecision.BotService.Strategies;
+using CryptoDecision.Shared.Signals;
 using Npgsql;
 using Serilog;
 
@@ -29,6 +31,12 @@ builder.Services.AddSingleton(ds);
 builder.Services.AddSingleton<IFeatureRepository, FeatureRepository>();
 builder.Services.AddSingleton<IFlowBarRepository, FlowBarRepository>();
 
+// Every signal the strategy produces, what the gate did with it, and what the market
+// did next. The refused signals are the point: until this table existed, the only
+// record of a refusal was a container log that a deploy destroys, so the question
+// "was the gate right to refuse" had no data behind it at all.
+builder.Services.AddSingleton<SignalOutcomeRepository>();
+
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────
 
 // The cross-venue flow strategy. Registered alongside MOMENTUM rather than replacing
@@ -46,6 +54,17 @@ builder.Services.AddSingleton<ITradingStrategy, CrossVenueFlowStrategy>();
 
 // The entry gate. This is the only place a language model can affect whether real
 // funds move, and it can only ever prevent a trade — see AiEntryGate.
+//
+// GateRetrieval controls whether the gate is shown resolved past signals near the one
+// it is judging. Its own section, so switching it off is one config line: it is the
+// newest input to a live veto and therefore the first thing to disable if the gate
+// starts behaving oddly.
+builder.Services.AddSingleton<GateRetrievalOptions>(sp =>
+{
+    var options = new GateRetrievalOptions();
+    builder.Configuration.GetSection(GateRetrievalOptions.Section).Bind(options);
+    return options;
+});
 builder.Services.AddSingleton<IEntryGate, AiEntryGate>();
 
 // ─── Trading Bot ──────────────────────────────────────────────────────────────
@@ -54,6 +73,19 @@ builder.Services.AddSingleton<BotRepository>();
 builder.Services.AddSingleton<BotConfigRepository>();
 builder.Services.AddSingleton<StrategyEvaluator>();
 builder.Services.AddHostedService<TradingBotService>();
+
+// ─── Outcome labelling (research, never in the trading path) ─────────────────
+//
+// Resolves recorded signals against the tick stream on its own timer. A separate
+// hosted service, so it cannot consume any part of the trading loop's cycle
+// deadline, and every failure inside it is caught and logged rather than raised.
+builder.Services.AddSingleton<SignalLabelOptions>(sp =>
+{
+    var options = new SignalLabelOptions();
+    builder.Configuration.GetSection(SignalLabelOptions.Section).Bind(options);
+    return options;
+});
+builder.Services.AddHostedService<SignalOutcomeLabeler>();
 builder.Services.AddHttpClient("binance-public", c =>
 {
     c.BaseAddress = new Uri("https://api.binance.com");

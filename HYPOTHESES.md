@@ -103,3 +103,65 @@ Four entries a day for four weeks is roughly $30 of tuition if every trade loses
 ### Result
 
 _Open._
+
+---
+
+## H2 — Give the gate a scale for every check it is allowed to refuse on
+
+- **Opened** 2026-08-28
+- **Change** `AiEntryGate`: each of the four grounds for skipping now states the
+  arithmetic condition that makes it available, and the brief renders every checked
+  value next to the threshold the scorer applied (dispersion against its 25 bps
+  ceiling, excluded venues against zero, open positions against the limit, today's
+  loss against the daily loss limit). Plus `signal_outcomes` recording and the
+  outcome labeler, which change no behaviour.
+- **Purpose** Stop refusals whose stated premise the brief contradicts. Not a claim
+  that the gate will approve more, and not a threshold change.
+
+### Why
+
+Twenty-three hours of production log, the only window that survived (the container
+log is destroyed by every deploy). Fifteen signals, all fifteen put to the model:
+
+- 5 of 12 refusals cited a premise the brief contradicted — "venues were excluded for
+  thin data" where the brief said 0 excluded, "several positions are already open"
+  where the brief said 0 open and where the loop guarantees 0, since it does not ask
+  the gate while at the position limit.
+- The other 8 refusals cited "dispersion is wide" at 2.8-13.2 bps against the 25 bps
+  ceiling the scorer had already enforced.
+- Replayed under the real constraints: the live gate scored −3.00R over the window,
+  approving everything scored +1.00R.
+
+The −3.00R vs +1.00R is 5 trades and decides nothing. The contradicted premises are
+not a sample-size question: a refusal on a number the brief says is false is a defect
+whichever way the trade would have gone. This entry exists because the fix is still a
+live behaviour change made while H1 is open, and two concurrent live changes are
+exactly what the rules at the top of this file forbid. It is recorded rather than
+avoided because the alternative — leaving a known defect running to protect the
+attribution of a hypothesis about a different parameter — is worse.
+
+### Decision rule, fixed in advance
+
+Evaluate when **60 signals** have been recorded in `signal_outcomes` under the new
+prompt, or after **two weeks**, whichever comes first. Judged on refusal quality, not
+on P&L, because P&L at four trades a day cannot separate this from H1:
+
+- **Keep** if refusals on contradicted premises fall to **zero** (query: section 3 of
+  `scripts/gate-report.sql`) AND the gate still refuses at least one signal in the
+  window — a gate that approves everything is not a gate and would be a different
+  regression.
+- **Revert** if contradicted premises persist above 10% of refusals. That would mean
+  the wording is not the binding constraint and the four grounds should move into
+  code as deterministic checks, leaving the model only the judgement it can actually
+  make.
+- **Either way, stop.** No second prompt edit inside this window.
+
+### Cost of being wrong
+
+If the gate becomes too permissive it approves signals it used to refuse, at ~$0.27
+risk per trade and a 4/day cap. Two weeks is at most ~$15 of tuition, bounded by the
+same daily cap and per-order ceiling as everything else.
+
+### Result
+
+_Open._
