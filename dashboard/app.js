@@ -597,7 +597,13 @@ async function toggleBot() {
                     paperMode: loadedConfig.paperMode ?? true,
                     exchange:  loadedConfig.exchange  ?? 'BINANCE',
                     symbol: activeSymbol,
-                    activeStrategies: ['MOMENTUM'],
+                    // Carried over from the loaded config, never hardcoded. This said
+                    // ['MOMENTUM'] for weeks after that strategy was deleted, so pressing
+                    // Start would have written a strategy name nothing resolves:
+                    // StrategyEvaluator logs "Unknown strategy" and returns no entry, the
+                    // heartbeat keeps beating, and the dashboard reads RUNNING forever
+                    // while the bot never trades again.
+                    activeStrategies: loadedConfig.activeStrategies ?? ['XVENUE_FLOW'],
                     capitalUsd:               loadedConfig.capitalUsd,
                     maxOpenTradesPerStrategy: loadedConfig.maxOpenTradesPerStrategy,
                     positionPct:              loadedConfig.positionPctOfCapital,

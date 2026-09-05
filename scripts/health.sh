@@ -173,7 +173,13 @@ for venue in BINANCE BYBIT OKX; do
     fi
 done
 if [ "$live" -lt 2 ]; then
-    fail "fewer than 2 live venues: consensus needs 2, so the bot can never enter"
+    warn "only $live venue(s) printing. Binance alone can carry a signal (SufficientVenue),"
+    warn "  so this is not necessarily fatal -- but with Binance among the dead ones nothing"
+    warn "  can enter at all. Check which venue is missing above."
+fi
+if ! printf '%s\n' "$ing" | grep -q '^BINANCE'; then
+    fail "BINANCE is not printing. It is the sufficient venue, so most signals become"
+    fail "  unreachable: the other two must then BOTH clear the venue bar on their own."
 fi
 
 # --------------------------------------------------------------- 4 readiness

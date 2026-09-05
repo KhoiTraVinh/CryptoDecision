@@ -82,10 +82,28 @@ public sealed class PaperOrderEngine(
     CryptoDecision.BotService.Exchanges.OkxOptions okxOptions,
     ILogger<PaperOrderEngine> log) : IOrderEngine
 {
-    // Conservative taker fee, applied per leg. Binance spot without the BNB
-    // discount; OKX spot taker is 0.08-0.10%, so this stays on the safe side of
-    // both venues.
-    private const decimal FeeRate = 0.001m;
+    // Per leg, as a fraction of notional. 0.035% in and 0.035% out is ~7 bps round
+    // trip, which is what this bot ACTUALLY PAID over eight live OKX trades:
+    //
+    //     held <6h   -6.93, -6.94, -6.95, -6.96, -7.07, -7.11 bps
+    //
+    // measured as (exchange realised P&L - price-derived P&L) over notional, so it
+    // includes the maker rebate on entry and the taker fee on exit.
+    //
+    // Was 0.001 (20 bps round trip), described as "Binance spot without the BNB
+    // discount" — a venue and product this bot has not traded since it moved to OKX
+    // perpetual swaps with post-only entries. That figure was 3x reality, and on the
+    // tight stops this strategy places it was not a rounding error: at a 0.6% stop,
+    // 13 bps of phantom cost is 0.22R on every single trade. Across the first 28
+    // paper trades it manufactured 5.7R of losses that were never paid.
+    //
+    // What this still does NOT model, and both flatter a long hold:
+    //   • funding, which settles every 8h on OKX and cost 56 bps on the one live
+    //     trade that ran the full 12 hours — 9x the rate the backtester assumes
+    //   • slippage past the stop, which cost 3.9R on paper trade 47 when SOL fell
+    //     2.6% inside one minute
+    // Neither bites at the ~2h median hold, and both would if the horizon grew.
+    private const decimal FeeRate = 0.00035m;
 
     /// <summary>Simulation can honour any configuration, so it never refuses.</summary>
     public string? DescribeRefusal(BotOptions opts) => null;
@@ -169,6 +187,10 @@ public sealed class PaperOrderEngine(
             EntryPrice  = price,
             Quantity    = qty,
             NotionalUsd = notional - fee,
+            // Recorded, not merely deducted. Every paper row had fee_usd NULL while the
+            // live rows carried it, so any query that compared cost across modes
+            // silently read paper as free.
+            FeeUsd      = fee,
             Status      = "OPEN",
             OpenedAt    = DateTime.UtcNow,
             Mode        = "PAPER",
@@ -203,6 +225,9 @@ public sealed class PaperOrderEngine(
             : (exitPrice - trade.EntryPrice) * trade.Quantity;
 
         var pnlUsd = Math.Round(rawPnl - fee, 4);
+
+        // Both legs, matching how OkxOrderEngine accumulates it.
+        trade.FeeUsd = Math.Round((trade.FeeUsd ?? 0m) + fee, 8);
         var pnlPct = Math.Round(pnlUsd / trade.NotionalUsd, 6);
 
         trade.ExitPrice   = exitPrice;

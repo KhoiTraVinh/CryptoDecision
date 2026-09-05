@@ -247,3 +247,98 @@ roughly $17 if every trade loses.
 ### Result
 
 _Open._
+
+---
+
+## H4 — The signal is late; wait for the move to give some of itself back
+
+- **Opened** 2026-09-05
+- **Change** `FlowStrategyOptions.EntryPullbackAtr` — **new**, 0.75. An actionable
+  verdict no longer enters at market. It enters only once price has retraced
+  0.75 × ATR from the close of the bucket that produced it, and abstains as
+  `AWAITING_PULLBACK` until then. Nothing else moves: `EnterZ` 1.0,
+  `VenueAgreementZ` 1.5, `SufficientVenue` BINANCE, `MinAgreeingVenues` 2,
+  `StopAtrMultiple` 1.5, `TargetRiskMultiple` 2.0 all stay.
+- **Purpose** Fix entry *timing*, not entry *selection*. This is the operator's
+  point and it is the right one: every threshold change proposed so far only
+  removes signals, and most of them remove them by preferring a higher z — which
+  is the reading that is most late.
+
+### Why
+
+The signal is late by construction and it is now measured how late. Aggregate z
+correlates **+0.467** with the PRECEDING hour's return and **−0.116** with the
+following one, over 440 buckets. Order flow is what moves price, so a closed
+15-minute bucket showing an imbalance is describing a move that has happened.
+Entering at market on that reading buys the end of the move, and the retracement
+then counts as adverse excursion against the position.
+
+Bucketing outcomes by |z| says the same thing from the other side — the *weakest*
+signals do best, which is the opposite of what a threshold is supposed to buy:
+
+    z 1.0-1.5   n=8    mean R -0.184
+    z 1.5-2.0   n=10   mean R -0.400
+    z >= 2.0    n=9    mean R -0.333
+
+Measured on the first 28 paper trades, over the 12 hours after entry:
+
+    entry                median MFE   median MAE   ratio   win at 2R
+    at market (current)    2.00 ATR     3.46 ATR    0.58       14.3%
+    0.25 ATR pullback      2.00 ATR     3.18 ATR    0.63       17.4%
+    0.50 ATR pullback      2.06 ATR     2.96 ATR    0.70       25.0%
+    0.75 ATR pullback      1.96 ATR     2.72 ATR    0.72       27.3%
+    1.00 ATR pullback      2.05 ATR     2.51 ATR    0.82       26.3%
+
+The favourable excursion barely moves; the adverse one falls by a fifth. Waiting
+does not find better trades, it finds a better price in the same trade. That is
+precisely what a late entry costs, and the mechanism was predicted before the
+numbers were run rather than read off them afterwards.
+
+**Why this and not more geometry.** An 80-cell sweep of stop width (1.5–5.0 × ATR)
+against target multiple (0.75–3.0 × stop) produced **no positive cell**; the best
+was −0.286R and the 2R win rate stayed pinned at 17.9% however wide the stop went,
+because the target scales with it. The exit-geometry lever is exhausted. Entry
+timing is the first thing that has moved the win rate at all.
+
+### What is not claimed
+
+Read off 28 trades, in-sample, one market regime, from a 24-cell grid — and picking
+a cell from a grid is what the backtester prints unsorted to discourage. 27.3% is
+still well under the ~42% this geometry needs to break even; the gap narrows from
+28 points to 15, it does not close. The 1.5 ATR / 15-minute cell that shows a 1.67
+ratio is n=3 and is noise.
+
+### Implementation note
+
+Stateless. The reference is the close of the signal bucket's last minute, recomputed
+identically every cycle, so there is no pending-order state to keep or recover. The
+waiting window is therefore however long the verdict stays actionable rather than a
+fixed timer — narrower than the 120 minutes that scored best above, so expect fewer
+fills than the table suggests.
+
+### Decision rule, fixed in advance
+
+Evaluate on trades opened **after 2026-09-05**, when **40 closed paper trades** have
+accumulated or after **7 days**, whichever comes first. Judged against the 28-trade
+pre-change baseline (win rate 28.6%, mean R −0.434, median MFE/MAE 0.58):
+
+- **Keep** if median MAE in ATR units falls below **3.0** (baseline 3.46) AND mean R
+  improves on −0.434. The MAE test is the primary one: it is the mechanism this
+  change claims, it is measurable at n=40, and mean R at n=40 is not.
+- **Revert to 0** if median MAE does not fall, or if fills drop below **4/day**
+  (baseline 7.3) — a rule that waits for a price the market never returns to is a
+  rule that stops trading, and that is a different failure from a better entry.
+- **Do not tune the 0.75.** If it fails, it fails; sweeping the multiple on the same
+  data that produced it is how this file's trial budget gets spent invisibly. A
+  second value needs its own entry.
+
+### Cost of being wrong
+
+None in money — `paper_mode = true`, no funds reachable. The cost is the window:
+7 days of paper trades attributed to this change rather than to something else, and
+H3 (60 signals) evaluated on a sample whose entry timing changed midway. H3's venue
+comparison survives, since both venue configurations are affected equally.
+
+### Result
+
+_Open._

@@ -38,8 +38,7 @@ public sealed record PolicyConfig(
     int     AtrBarMinutes      = FlowGeometryDefaults.AtrBarMinutes,
     double  MaxHoldHours       = FlowGeometryDefaults.MaxHoldHours,
     decimal AllInCostRate      = 0.0021m,
-    decimal FundingRatePerHour = 0.00005m,
-    int     MaxConcurrent      = 1)
+    decimal FundingRatePerHour = 0.00005m)
 {
     public string Describe() =>
         $"z≥{Signal.EnterZ:F2} venues≥{Signal.MinAgreeingVenues} " +

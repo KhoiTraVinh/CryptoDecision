@@ -1,11 +1,26 @@
 name: cryptodecision
 
+# Docker's json-file driver keeps every line a container has ever written, with no
+# limit unless one is set here. Measured on the running host: 858 MB of container logs
+# after three days, 649 MB of it the processor alone at ~215 MB/day, growing without
+# bound. It has never filled the disk only because every deploy recreates the
+# containers and starts the files over — which is luck, not a policy.
+#
+# 50m x 3 caps the whole stack at roughly 1.8 GB and keeps about a day of processor
+# history, which is longer than the window any incident here has needed.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
 
   # ── Kafka (KRaft — no ZooKeeper) ─────────────────────────────────────────────
   kafka:
     image: apache/kafka:3.8.0
     container_name: kafka
+    logging: *default-logging
     # Without this, Docker defaults to "no" and kafka does NOT come back after a
     # host reboot or a daemon restart, while every unless-stopped service does.
     # The bot then runs against a stack that is missing its backbone and looks
@@ -54,6 +69,7 @@ services:
   kafka-init:
     image: apache/kafka:3.8.0
     container_name: kafka-init
+    logging: *default-logging
     depends_on:
       kafka:
         condition: service_healthy
@@ -82,6 +98,7 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
+    logging: *default-logging
     # The whole stack is downstream of this. With no policy Docker defaults to
     # "no", so a reboot brings back bot, processor and ingestion but not their
     # database -- the worst possible half-recovery for an unattended bot.
@@ -162,6 +179,7 @@ services:
   db-check:
     image: postgres:16
     container_name: db-check
+    logging: *default-logging
     mem_limit: 64m
     environment:
       PGHOST:     postgres
@@ -197,6 +215,7 @@ services:
   db-migrate:
     image: postgres:16
     container_name: db-migrate
+    logging: *default-logging
     mem_limit: 128m
     environment:
       PGHOST:     postgres
@@ -232,6 +251,7 @@ services:
       context: ./src/CryptoDecision.IngestionService
       dockerfile: Dockerfile
     container_name: ingestion
+    logging: *default-logging
     mem_limit: 256m
     ports:
       - "8081:8080"   # health endpoint
@@ -260,6 +280,7 @@ services:
       context: ./src/CryptoDecision.ProcessorService
       dockerfile: Dockerfile
     container_name: processor
+    logging: *default-logging
     mem_limit: 256m
     ports:
       - "8082:8080"   # health endpoint
@@ -286,6 +307,7 @@ services:
       context: ./src
       dockerfile: CryptoDecision.BotService/Dockerfile
     container_name: bot
+    logging: *default-logging
     # Raised from 128m. The process was steady at 92 MB against that cap — 72%, with
     # no headroom for a GC to work in — and stalled with every thread in futex_wait.
     # 256m matches the other .NET services here and is still small; the GC mode was
@@ -338,6 +360,7 @@ services:
       context: ./src
       dockerfile: CryptoDecision.ApiService/Dockerfile
     container_name: api
+    logging: *default-logging
     mem_limit: 256m
     profiles: ["ui"]
     ports:
@@ -376,16 +399,27 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    logging: *default-logging
     ports:
       - "11434:11434"
+    # 3500m, raised from 3g on 2026-09-05. The reasoning below still holds; the number
+    # did not. Measured on the running host, ollama sat at 2.97 GiB of its 3 GiB
+    # ceiling — 99% — and had crept there over a week (90.8% -> 92.5% -> 99.0%). It is
+    # not a leak: `ollama ps` shows qwen2.5:3b resident with UNTIL=Forever, so the
+    # weights are fixed and the drift is KV cache. But there was no headroom left, and
+    # an OOM kill here is the quiet kind of failure: the gate becomes unreachable,
+    # allow_entry_without_gate is false so the bot stops entering, and health.sh keeps
+    # reporting ollama "healthy" because the container is still up.
+    #
+    # The rest of the stack measures ~1.33 GB resident (bot 118M, ingestion 108M,
+    # processor 91M, postgres 627M, kafka 386M), not the "under 900 MB" this comment
+    # used to claim. 3.5 GB + 1.33 GB against 7.78 GB total still leaves ~2.9 GB.
+    #
     # 6g, not 10g. Docker on this host has 8.3 GB total, so a 10 GB limit was not a
     # limit at all — it exceeded the VM, so the kernel OOM killer decided the outcome
     # instead of Docker, and what it reaches for is whatever is largest at the time.
-    # That is how Docker Desktop was killed here before. 3g holds qwen2.5:3b (1.9 GB on
-    # disk) with context headroom and leaves the rest of the stack, which measures
-    # under 900 MB in total, comfortably clear.
-    # 3 GB for qwen2.5:3b (~1.9 GB of weights plus KV cache at 8k context).
-    mem_limit: 3g
+    # That is how Docker Desktop was killed here before.
+    mem_limit: 3500m
     environment:
       # Keep the model resident between gate calls. The default 5m would
       # unload it between runs and pay the multi-second load cost every time.
@@ -425,6 +459,7 @@ services:
   ollama-init:
     image: ollama/ollama:latest
     container_name: ollama-init
+    logging: *default-logging
     depends_on:
       ollama:
         condition: service_healthy
@@ -445,6 +480,7 @@ services:
   dashboard:
     image: nginx:1.25-alpine
     container_name: dashboard
+    logging: *default-logging
     profiles: ["ui"]
     ports:
       - "8888:80"

@@ -117,6 +117,72 @@ public sealed class CrossVenueFlowStrategy(
                     "the market. Refusing rather than falling back to a fixed percentage — a stop " +
                     "of the wrong width is what this strategy exists to stop doing.");
 
+
+            // ── Entry timing: wait for the move to give some of itself back ────
+            //
+            // The signal is late by construction and this is the correction for it.
+            // Aggressive order flow IS what moves price, so by the time an imbalance
+            // is measurable on a closed 15-minute bucket the move has already
+            // happened: aggregate z correlates +0.467 with the PRECEDING hour's
+            // return and -0.116 with the following one, measured over 440 buckets.
+            // Entering at market on that reading buys the top of the move and then
+            // counts the retracement as adverse excursion against the position.
+            //
+            // Measured on the first 28 paper trades, over the 12 hours after entry:
+            //
+            //     entry            median MFE   median MAE   ratio   win at 2R
+            //     at market          2.00 ATR     3.46 ATR    0.58       14.3%
+            //     0.75 ATR pullback  1.96 ATR     2.72 ATR    0.72       27.3%
+            //
+            // The favourable excursion barely moves; the ADVERSE one falls by a
+            // fifth. Waiting does not find better trades, it finds a better price in
+            // the same trade — which is exactly what a late entry costs. This was the
+            // only lever that moved the win rate at all: an 80-cell sweep of stop
+            // width against target multiple left it pinned at 17.9%.
+            //
+            // Stateless on purpose. The reference is the close of the signal bucket's
+            // last minute, which every cycle recomputes identically, so there is no
+            // pending-order state to keep, recover after a restart, or get wrong. The
+            // waiting window is therefore however long the verdict stays actionable
+            // rather than a fixed timer — the signal decides how long it is willing to
+            // wait for its own price, which is a more honest bound than a constant.
+            //
+            // NOT PROVEN. Read off 28 trades, in-sample, one market regime, and the
+            // 27.3% it reaches is still well under the ~42% this geometry needs to
+            // break even. It is registered in HYPOTHESES.md as H4 and is to be judged
+            // on trades taken AFTER it shipped. Set EntryPullbackAtr to 0 to disable.
+            if (tuning.EntryPullbackAtr > 0 && set.LatestBucket is { } signalBucket)
+            {
+                // Last minute of the closed bucket that produced this verdict.
+                var referenceAt = signalBucket.AddMinutes(14);
+                var reference   = candles.LastOrDefault(c => c.OpenTime <= referenceAt)?.Close;
+
+                if (reference is { } refPrice && refPrice > 0m)
+                {
+                    var isLong  = verdict.Side == "LONG";
+                    var giveBack = (decimal)(tuning.EntryPullbackAtr * volatility.AtrPct) / 100m;
+
+                    var limit = isLong
+                        ? refPrice * (1m - giveBack)
+                        : refPrice * (1m + giveBack);
+
+                    var reached = isLong
+                        ? ctx.CurrentPrice <= limit
+                        : ctx.CurrentPrice >= limit;
+
+                    if (!reached)
+                        return Refuse("AWAITING_PULLBACK",
+                            $"{verdict.Side} is live (z={verdict.AggregateZ:F2}) but price " +
+                            $"{ctx.CurrentPrice:F4} has not given back " +
+                            $"{tuning.EntryPullbackAtr:F2}xATR from the {refPrice:F4} bucket close — " +
+                            $"waiting for {limit:F4}. Entering here would pay for a move that has " +
+                            "already happened.");
+                }
+                // A missing reference candle is not a reason to refuse: the pullback
+                // rule is an improvement on entry timing, not a safety check, and
+                // failing open costs a worse price rather than an unmanaged position.
+            }
+
             var geometry = VolatilityStops.Resolve(
                 entryPrice:         ctx.CurrentPrice,
                 side:               verdict.Side!,
@@ -373,6 +439,22 @@ public sealed class FlowStrategyOptions
     /// before the gate is asked anything.
     /// </summary>
     public decimal MinRewardRisk { get; set; } = 1.2m;
+
+
+    /// <summary>
+    /// How far the market must give back, in multiples of ATR, before an actionable
+    /// signal is taken. 0 disables the wait and enters at market as before.
+    ///
+    /// 0.75 was read off the first 28 paper trades and is not a proven value — see
+    /// H4 in HYPOTHESES.md. The reasoning, and the reason it is expressed in ATR
+    /// rather than basis points, is in CrossVenueFlowStrategy where it is applied.
+    ///
+    /// The cost of waiting is signals that never fill: at 0.75 ATR, six of those 28
+    /// never came back and would not have been traded. That is the intended trade —
+    /// the ones it drops are the ones that ran away, which are exactly the entries
+    /// this is meant to stop paying for.
+    /// </summary>
+    public double EntryPullbackAtr { get; set; } = 0.75;
 
     /// <summary>
     /// Optional hard ceiling on the stop distance. Null by default, and that is the

@@ -39,11 +39,10 @@ builder.Services.AddSingleton<SignalOutcomeRepository>();
 
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────
 
-// The cross-venue flow strategy. Registered alongside MOMENTUM rather than replacing
-// it, because which strategies run is bot_config.active_strategies — a database edit,
-// not a redeploy. Switching to XVENUE_FLOW is therefore reversible in one UPDATE,
-// which matters while the new signal has not yet been validated on enough history to
-// justify committing to it.
+// The only strategy this build registers. MOMENTUM was deleted; which strategies run
+// is still bot_config.active_strategies — a database edit, not a redeploy — so a name
+// that no longer resolves reaches StrategyEvaluator, logs "Unknown strategy" once per
+// cycle and silently trades nothing. Keep this list and the seeded config in step.
 builder.Services.AddSingleton<FlowStrategyOptions>(sp =>
 {
     var options = new FlowStrategyOptions();

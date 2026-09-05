@@ -94,13 +94,22 @@ public sealed class SignalOutcomeLabeler(
                     "{Decided} decided, {Pending} still open.",
                     labelled, horizon, coverage.Decided, coverage.Pending);
 
-            // Warned every pass, deliberately. This table exists to support claims
+            // Logged every pass, deliberately. This table exists to support claims
             // like "the gate's dispersion refusals lose money", and the first audit
             // that produced such a claim had 15 signals from a single 23-hour window.
             // The sample size belongs next to the numbers, not in a document nobody
             // opens.
+            //
+            // Information, not Warning. It was Warning and the intent was right, but
+            // "the sample is still small" is a steady state, not an event: it fires
+            // every 30 minutes and will keep firing for weeks. Measured on the running
+            // container, 370 of the bot's 379 warnings were this one line — 97.6%. A
+            // level that covers everything covers nothing, and the warnings that
+            // matter here (a live position with no exchange-side stop, a venue feed
+            // gone quiet) were sharing a bucket with it. The message still prints
+            // every pass, which is what the paragraph above actually asks for.
             if (!coverage.Sufficient)
-                log.LogWarning(
+                log.LogInformation(
                     "[Labeler] {Decided} decided signal(s) spanning {Days:F1} day(s) — below the " +
                     "{Minimum}-signal / 7-day floor. Nothing in signal_gate_report is evidence " +
                     "yet; it describes one market regime. Do not tune thresholds from it.",

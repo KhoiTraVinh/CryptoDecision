@@ -507,17 +507,6 @@ public sealed class OkxOrderEngine(
     // ── Exchange-side protection ──────────────────────────────────────────────
 
     /// <summary>
-    /// Place the reduce-only OCO that guards a freshly opened position, and persist
-    /// its id.
-    ///
-    /// Never throws. The position exists either way and the bot's own loop is still
-    /// watching it, so failing to arm the exchange-side guard degrades protection
-    /// rather than removing it, and unwinding a real fill over a transient API error
-    /// would be the worse trade. Logged as critical because on a leveraged position
-    /// the fallback — the bot process staying alive — is now the only thing standing
-    /// between the trade and liquidation.
-    /// </summary>
-    /// <summary>
     /// Rebuild the geometry from levels already stored on a trade, for the re-arming
     /// paths — a position whose OCO was never placed, and the residual left by a
     /// partial exit.
@@ -561,6 +550,17 @@ public sealed class OkxOrderEngine(
             Basis:       "restored from the stored levels");
     }
 
+    /// <summary>
+    /// Place the reduce-only OCO that guards a freshly opened position, and persist
+    /// its id.
+    ///
+    /// Never throws. The position exists either way and the bot's own loop is still
+    /// watching it, so failing to arm the exchange-side guard degrades protection
+    /// rather than removing it, and unwinding a real fill over a transient API error
+    /// would be the worse trade. Logged as critical because on a leveraged position
+    /// the fallback — the bot process staying alive — is now the only thing standing
+    /// between the trade and liquidation.
+    /// </summary>
     private async Task ArmProtectiveExitAsync(
         BotTrade trade, OkxInstrument instrument, string positionSide, decimal contracts,
         StopGeometry? geometry, CancellationToken ct)

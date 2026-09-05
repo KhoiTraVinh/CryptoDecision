@@ -45,7 +45,28 @@ public sealed class BotStateService
 
     public void Stop()
     {
-        lock (_lock) { _isRunning = false; _runningSince = null; }
+        lock (_lock)
+        {
+            _isRunning    = false;
+            _runningSince = null;
+
+            // Forget when the last cycle ran.
+            //
+            // TouchEval returns the gap between consecutive stamps and the loop treats
+            // an implausible gap as the clock having jumped, suspending clock-based
+            // exits for that cycle. A halted bot leaves a stamp behind, so the first
+            // cycle after re-arming compares against however long the halt lasted and
+            // always reads as a jump: the CONSECUTIVE_LOSSES breaker held this bot down
+            // for two days and the re-arm logged "clock jumped 2.01:19:09" at Error,
+            // twice out of two.
+            //
+            // Harmless with nothing open, which is how it was found. Not harmless
+            // otherwise: that first cycle is the one that would notice a position whose
+            // max-hold expired during the halt, and it is exactly the cycle this makes
+            // skip the check. Clearing the stamp makes the first cycle after a restart
+            // trusted, which is already how the first cycle after process start behaves.
+            _lastEvalAt = null;
+        }
     }
 
     public bool IsRunning { get { lock (_lock) return _isRunning; } }
