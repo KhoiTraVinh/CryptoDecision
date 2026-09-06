@@ -24,27 +24,36 @@ public sealed class AgentOptions
     /// <summary>
     /// Context window handed to Ollama, in tokens.
     ///
-    /// 2048, down from 8192, because on this ollama build the cost of a request scales
-    /// with THIS number rather than with the length of the prompt. Measured on the
-    /// production host, same prompt, only num_ctx varied:
+    /// THE USABLE PROMPT IS ABOUT HALF THIS NUMBER. That is the thing to know, and it
+    /// is not documented anywhere in ollama's API. Measured on the production host by
+    /// sending prompts of known size and reading back prompt_eval_count:
     ///
-    ///     num_ctx   total    tokens ollama reported processing
-    ///       2048     50.1s    1,026
-    ///       4096     80.2s    2,050
-    ///       8192    256.7s    5,932
+    ///     prompt sent   num_ctx   ollama actually processed
+    ///          920        2048              926
+    ///        3,680        2048            1,026   <- cut
+    ///        7,360        2048            1,026   <- cut
+    ///        7,360        4096            2,050   <- cut
     ///
-    /// The prompt was identical in all three. At 8192 a request that should cost about
-    /// a thousand tokens cost nearly six thousand, and 257 seconds against a 60-second
-    /// timeout. Every gate call returned empty, every entry was refused, and nothing
-    /// anywhere reported an error: ollama stayed "healthy", the loop kept turning, and
-    /// scripts/health.sh printed "All checks passed" for a bot that could not trade.
+    /// Everything past ~num_ctx/2 is dropped, silently: the slot log still prints
+    /// `truncated = 0`, the request returns 200, and the model answers confidently on
+    /// whatever survived. There is no error to catch.
     ///
-    /// 2048 is sized to the real brief, which measures 1,680 tokens with five retrieved
-    /// examples — enough for the prompt plus a short JSON answer, and nothing spare.
-    /// If the brief grows past ~1,900 this must grow with it, and the cost of doing so
-    /// is now known rather than assumed.
+    /// 4096, because the gate's brief measures 1,680 tokens with five retrieved
+    /// examples and must arrive whole. At 2048 it would be cut to ~1,024 — the model
+    /// would lose the account block, the retrieved cases, and part of the per-venue
+    /// table, then approve or refuse on the remainder. That is worse than the timeout
+    /// this replaced: a timeout fails closed and costs an opportunity, a truncated
+    /// brief produces a confident answer to a question the model was never shown.
+    ///
+    /// Headroom is ~370 tokens and the brief is bounded — five examples is a LIMIT in
+    /// FindSimilarAsync and there are three venues. If either grows, measure again;
+    /// past ~2,048 tokens of brief this must go to 8192, and the cost of that is on
+    /// record in TimeoutSeconds below.
+    ///
+    /// The cost of 4096 over 2048 is time: ~44 s of prompt processing for the real
+    /// brief against ~26 s, at the ~38 tok/s this 2-core host manages.
     /// </summary>
-    public int NumCtx { get; set; } = 2048;
+    public int NumCtx { get; set; } = 4096;
 
     /// <summary>
     /// Per-request timeout.
@@ -52,7 +61,7 @@ public sealed class AgentOptions
     /// 60 s was set when a gate call took 10-27 s with the model resident. That was
     /// measured before the brief carried retrieved examples and before this build of
     /// ollama started charging by context window; the same call now measures ~54 s at
-    /// NumCtx 2048 with a 1,680-token brief on this 2-core host. 60 s left no margin
+    /// NumCtx 4096 with a 1,680-token brief on this 2-core host. 60 s left no margin
     /// and every call came back empty.
     ///
     /// 75 s, and the ceiling on it is not arbitrary: the cycle cancellation token is
@@ -63,7 +72,7 @@ public sealed class AgentOptions
     /// stalled loop and leaves open positions unevaluated for that pass — the same
     /// symptom as a real hang, reported for a cause that is not one.
     ///
-    ///     measured ~54 s  <  75 s here  <  120 s cycle budget  <  240 s liveness
+    ///     measured ~55 s  <  75 s here  <  120 s cycle budget  <  240 s liveness
     ///
     /// Move any one of those and check the other three.
     /// </summary>
