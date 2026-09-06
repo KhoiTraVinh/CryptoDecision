@@ -397,7 +397,21 @@ services:
   # container toolkit installed. On CPU a generation takes ~20-60s, which is fine
   # against a gate that is called a handful of times a day.
   ollama:
-    image: ollama/ollama:latest
+    # PINNED. This was ollama/ollama:latest until 2026-09-06, and an unpinned tag on the
+    # one component whose speed decides whether the bot can trade at all is how a deploy
+    # that changed three C# files silently replaced the inference engine.
+    #
+    # What it cost: the container was recreated (a compose edit touching every service),
+    # `latest` resolved to a newer build, and gate calls went from answering in seconds
+    # to timing out at 60 s on every single one. Entries stopped. Nothing reported an
+    # error — ollama healthy, loop turning, health.sh printing "All checks passed" — and
+    # it took a day and the operator saying "the price is clearly moving, check again"
+    # to find it. The previous image had already been pruned by the same deploy, so
+    # rolling back was not possible: there was nothing to roll back to.
+    #
+    # Raise this deliberately, after measuring a gate call on the new build. Never let
+    # it float.
+    image: ollama/ollama:0.33.3
     container_name: ollama
     logging: *default-logging
     ports:
@@ -457,7 +471,21 @@ services:
   # Nothing blocks on it: the gate refuses entries while the model is absent,
   # while the pull runs and picks the LLM up automatically once it lands.
   ollama-init:
-    image: ollama/ollama:latest
+    # PINNED. This was ollama/ollama:latest until 2026-09-06, and an unpinned tag on the
+    # one component whose speed decides whether the bot can trade at all is how a deploy
+    # that changed three C# files silently replaced the inference engine.
+    #
+    # What it cost: the container was recreated (a compose edit touching every service),
+    # `latest` resolved to a newer build, and gate calls went from answering in seconds
+    # to timing out at 60 s on every single one. Entries stopped. Nothing reported an
+    # error — ollama healthy, loop turning, health.sh printing "All checks passed" — and
+    # it took a day and the operator saying "the price is clearly moving, check again"
+    # to find it. The previous image had already been pruned by the same deploy, so
+    # rolling back was not possible: there was nothing to roll back to.
+    #
+    # Raise this deliberately, after measuring a gate call on the new build. Never let
+    # it float.
+    image: ollama/ollama:0.33.3
     container_name: ollama-init
     logging: *default-logging
     depends_on:

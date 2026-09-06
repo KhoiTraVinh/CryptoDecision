@@ -374,8 +374,23 @@ public sealed record EntryDecision(
 /// </summary>
 public static class BotLiveness
 {
+    /// <summary>
+    /// Four intervals, with a 240-second floor.
+    ///
+    /// The floor was 180 s, giving a 90-second cycle budget (this value halved). That
+    /// was under the gate's own timeout once the gate slowed down, so a slow gate was
+    /// cut by the cycle deadline rather than by its own timeout — logged as a stalled
+    /// loop, with open positions left unevaluated for the pass, for a cause that was
+    /// not a stall.
+    ///
+    /// 240 s keeps the ordering intact: gate timeout 75 s < cycle budget 120 s <
+    /// liveness 240 s. The cost is that a genuinely stopped loop is now noticed in
+    /// four minutes instead of three. That is the trade, and it is the right way
+    /// round: a false stall report on every gate call would have taught the operator
+    /// to ignore the one that mattered.
+    /// </summary>
     public static TimeSpan StaleAfter(int evalIntervalSeconds) =>
-        TimeSpan.FromSeconds(Math.Max(180, evalIntervalSeconds * 4));
+        TimeSpan.FromSeconds(Math.Max(240, evalIntervalSeconds * 4));
 }
 
 // ── API DTO ───────────────────────────────────────────────────────────────────
