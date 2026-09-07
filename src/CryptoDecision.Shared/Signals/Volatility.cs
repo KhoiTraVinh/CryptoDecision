@@ -14,11 +14,13 @@ public sealed record Candle(
 /// <param name="AtrPct">
 /// Average true range over the lookback, as a percentage of the last close.
 /// </param>
-/// <param name="RangePct">
-/// High-to-low span of the whole lookback, as a percentage of the last close. The
-/// figure a stop has to survive if the position is held across the window.
-/// </param>
-public sealed record VolatilityRead(double AtrPct, double RangePct, int Samples)
+/// <remarks>
+/// A RangePct sat here — the lookback's high-to-low span — computed on every
+/// Measure call and read by nothing, in either the bot or the backtester. The stop
+/// is scaled off AtrPct; the span was only ever going to be the figure someone
+/// checked it against by eye.
+/// </remarks>
+public sealed record VolatilityRead(double AtrPct, int Samples)
 {
     public bool IsUsable => Samples > 0 && AtrPct > 0.0;
 }
@@ -71,14 +73,12 @@ public static class Volatility
         var bars = barMinutes <= 1 ? candles : Resample(candles, barMinutes);
 
         if (bars.Count < 3)
-            return new VolatilityRead(0.0, 0.0, bars.Count);
+            return new VolatilityRead(0.0, bars.Count);
 
         var last = bars[^1].Close;
-        if (last <= 0m) return new VolatilityRead(0.0, 0.0, bars.Count);
+        if (last <= 0m) return new VolatilityRead(0.0, bars.Count);
 
         var ranges = new List<double>(bars.Count - 1);
-        var high   = bars[0].High;
-        var low    = bars[0].Low;
 
         for (var i = 1; i < bars.Count; i++)
         {
@@ -93,16 +93,12 @@ public static class Volatility
                 Math.Max(
                     Math.Abs((double)(c.High - prevClose)),
                     Math.Abs((double)(c.Low  - prevClose)))));
-
-            if (c.High > high) high = c.High;
-            if (c.Low  < low)  low  = c.Low;
         }
 
-        var typical  = Median(ranges);
-        var atrPct   = typical / (double)last * 100.0;
-        var rangePct = low > 0m ? (double)((high - low) / last) * 100.0 : 0.0;
+        var typical = Median(ranges);
+        var atrPct  = typical / (double)last * 100.0;
 
-        return new VolatilityRead(atrPct, rangePct, bars.Count);
+        return new VolatilityRead(atrPct, bars.Count);
     }
 
     /// <summary>

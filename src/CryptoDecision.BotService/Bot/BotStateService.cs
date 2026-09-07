@@ -201,7 +201,7 @@ public sealed class BotStateService
             // Only positions in the configured instrument are counted, because only
             // those are managed — EvalCycleAsync skips the rest, since one price per
             // cycle cannot evaluate a stop in a different instrument. Counting them
-            // here would publish an open position to the dashboard that nothing is
+            // here would report an open position that nothing is
             // watching, which reads as safer than it is.
             var openCount = _openTrades.Count(t =>
                 string.Equals(t.Symbol, Options.Symbol, StringComparison.OrdinalIgnoreCase));

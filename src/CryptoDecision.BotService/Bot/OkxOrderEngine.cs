@@ -126,57 +126,40 @@ public sealed class OkxOrderEngine(
         // notional requires. Sizing off margin instead would let a leverage change
         // silently multiply exposure, which is how a working configuration becomes
         // an account-ending one without anybody editing a risk parameter.
-        // Two sizing rules, chosen by whether the strategy supplied a stop distance.
         //
-        // With one, size is whatever makes that stop cost risk_pct_per_trade of
-        // capital — so every trade risks the same money whatever the regime. Without
-        // one, fall back to the older percentage-of-capital rule, which is all a
-        // strategy that does not express a stop distance can support.
-        //
-        // They must not be combined. Sizing a fraction of capital and *then* shrinking
-        // it for volatility, while the stop separately widens for volatility, adjusts
-        // one decision with two readings of the same thing: on this account a 15.9%
-        // daily volatility pinned the scalar at its 0.5 floor and halved every order,
-        // while the 15-minute ATR that sets the stop was 1.07%.
+        // The two rules and the ceiling live in EntrySizing, shared with the paper
+        // engine. Only the reporting is here.
         var sizingOpts = state.Options;
-        PositionSize size;
 
-        if (geometry is { StopPct: > 0m } g)
-        {
-            size = PositionSizer.ResolveByRisk(
-                capitalUsd, sizingOpts.RiskPctPerTrade, g.StopPct, confidence, useAiSizing);
+        var sized = await EntrySizing.ResolveAsync(
+            featureRepo, symbol, capitalUsd, positionPct, sizingOpts.RiskPctPerTrade,
+            okxOptions.MaxOrderNotionalUsd, geometry, confidence, useAiSizing, ct);
 
+        var size     = sized.Size;
+        var notional = sized.NotionalUsd;
+
+        if (sized.RiskBased)
             log.LogInformation(
                 "[OKX] Risk-based size: {Risk:P2} of {Capital} capital over a {Stop:P2} stop = " +
                 "{Notional} notional, {RiskUsd:F2} USD at risk.",
-                sizingOpts.RiskPctPerTrade, capitalUsd, g.StopPct, size.NotionalUsd,
+                sizingOpts.RiskPctPerTrade, capitalUsd, geometry!.StopPct, sized.AskedNotionalUsd,
                 capitalUsd * sizingOpts.RiskPctPerTrade);
-        }
-        else
-        {
-            var feature = await featureRepo.GetTodayAsync(symbol, ct);
-            size = PositionSizer.Resolve(
-                capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
-
+        else if (size.VolatilityScalar < 1.0)
             // Say what sizing did, on the same terms PaperOrderEngine does. The paper
             // engine logged the volatility haircut and this one did not, so the single
             // mode where the number moves real money was the mode where it was invisible.
-            if (size.VolatilityScalar < 1.0)
-                log.LogInformation(
-                    "[OKX] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional={Notional} " +
-                    "(from {Pct:P0} of {Capital})",
-                    feature?.Volatility ?? (decimal)PositionSizer.BaseVolatilityPct,
-                    size.VolatilityScalar, size.NotionalUsd, positionPct, capitalUsd);
-        }
-
-        var notional = size.NotionalUsd;
+            log.LogInformation(
+                "[OKX] Vol-adjusted size: vol={Vol:F1}% scalar={Scalar:P0} notional={Notional} " +
+                "(from {Pct:P0} of {Capital})",
+                sized.VolatilityPct, size.VolatilityScalar, sized.AskedNotionalUsd,
+                positionPct, capitalUsd);
 
         if (useAiSizing && size.ConfidenceScalar != 1.0m)
             log.LogInformation(
                 "[OKX] AI-sized: confidence={Conf:P0} scalar={Scalar:F2} adjustedPct={Pct:P1}",
                 confidence, size.ConfidenceScalar, size.AdjustedPct);
 
-        if (notional > okxOptions.MaxOrderNotionalUsd)
+        if (sized.CapBound)
         {
             // Restate the risk AFTER the cap. The risk-based sizing above already
             // logged "$0.60 USD at risk" from capital x risk_pct, and then this cap
@@ -185,10 +168,9 @@ public sealed class OkxOrderEngine(
             // wrong in the reassuring direction. Whenever the cap binds,
             // risk_pct_per_trade stops describing anything: every order is exactly
             // the ceiling, and the real risk is the ceiling times the stop.
-            var askedRisk  = geometry is { StopPct: > 0m } gA ? notional * gA.StopPct : 0m;
-            var cappedRisk = geometry is { StopPct: > 0m } gC
-                ? okxOptions.MaxOrderNotionalUsd * gC.StopPct
-                : 0m;
+            var stopPct    = geometry is { StopPct: > 0m } g ? g.StopPct : 0m;
+            var askedRisk  = sized.AskedNotionalUsd * stopPct;
+            var cappedRisk = notional * stopPct;
 
             log.LogWarning(
                 "[OKX] Sizing asked for ${Asked} but the per-order ceiling is ${Cap} — capping. " +
@@ -196,10 +178,8 @@ public sealed class OkxOrderEngine(
                 "model asked for. While the ceiling binds, risk_pct_per_trade has no effect and " +
                 "every order is ${Cap}. Raise Okx__MaxOrderNotionalUsd to make the risk setting " +
                 "mean what it says, or lower capital_usd so the two agree.",
-                notional, okxOptions.MaxOrderNotionalUsd, cappedRisk, askedRisk,
+                sized.AskedNotionalUsd, okxOptions.MaxOrderNotionalUsd, cappedRisk, askedRisk,
                 okxOptions.MaxOrderNotionalUsd);
-
-            notional = okxOptions.MaxOrderNotionalUsd;
         }
 
         if (notional < okxOptions.MinOrderNotionalUsd)
@@ -946,23 +926,6 @@ public sealed class OkxOrderEngine(
     }
 
     /// <summary>
-    /// Write an exit onto the trade. Shared by the bot-driven close and by
-    /// reconciliation of an exchange-driven one, so a position closed by the OCO is
-    /// accounted for exactly like one the bot closed itself — the P&amp;L series
-    /// stays comparable regardless of which side pulled the trigger.
-    ///
-    /// The direction term is the whole reason perps were worth the rework: a short
-    /// profits when price falls, so P&amp;L is signed by the side rather than always
-    /// measured upward. Getting this backwards would report every winning short as a
-    /// loss and vice versa, and the circuit breakers act on those numbers.
-    ///
-    /// Fees are quote-denominated on a linear perp, so both legs are already USD.
-    /// Funding is <em>not</em> included: OKX charges or pays it every eight hours
-    /// against the position, and it lands in the account bills rather than on either
-    /// order. A position held across funding will show a small unexplained gap
-    /// between this figure and the account balance.
-    /// </summary>
-    /// <summary>
     /// Replace a derived P&L with the exchange's own realised figure when it can be
     /// read.
     ///
@@ -1043,6 +1006,23 @@ public sealed class OkxOrderEngine(
             trade.Id, realised, derived, delta);
     }
 
+    /// <summary>
+    /// Write an exit onto the trade. Shared by the bot-driven close and by
+    /// reconciliation of an exchange-driven one, so a position closed by the OCO is
+    /// accounted for exactly like one the bot closed itself — the P&amp;L series
+    /// stays comparable regardless of which side pulled the trigger.
+    ///
+    /// The direction term is the whole reason perps were worth the rework: a short
+    /// profits when price falls, so P&amp;L is signed by the side rather than always
+    /// measured upward. Getting this backwards would report every winning short as a
+    /// loss and vice versa, and the circuit breakers act on those numbers.
+    ///
+    /// Fees are quote-denominated on a linear perp, so both legs are already USD.
+    /// Funding is <em>not</em> included: OKX charges or pays it every eight hours
+    /// against the position, and it lands in the account bills rather than on either
+    /// order. A position held across funding will show a small unexplained gap
+    /// between this figure and the account balance.
+    /// </summary>
     private static void ApplyExit(
         BotTrade trade, decimal closedBase, decimal exitPrice, decimal exitFeeUsd,
         string? orderId, string reason)

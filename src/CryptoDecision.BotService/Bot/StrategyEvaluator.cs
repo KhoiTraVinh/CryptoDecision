@@ -153,14 +153,15 @@ public sealed class StrategyEvaluator
             var scale = Math.Max(1m, 1m + volatilityFactor * 10m); // scale 1x-2x
             scale = Math.Min(scale, 2m);
 
-            effectiveOpts = new BotOptions
+            // `with`, not a fresh BotOptions. This built a new object and copied six
+            // properties by hand, so every other one — Symbol, CapitalUsd,
+            // MaxHoldMinutes, the gate switches — silently reverted to its compiled
+            // default before being handed to the strategy. Nothing read them yet, so
+            // it never misbehaved; it was waiting for the first exit rule that did.
+            effectiveOpts = opts with
             {
-                TakeProfitPct  = opts.TakeProfitPct * scale,
-                StopLossPct    = opts.StopLossPct * scale,
-                UseTrailingStop = opts.UseTrailingStop,
-                TrailingStopPct = opts.TrailingStopPct * scale,
-                UseBreakevenStop    = opts.UseBreakevenStop,
-                BreakevenTriggerPct = opts.BreakevenTriggerPct,
+                TakeProfitPct = opts.TakeProfitPct * scale,
+                StopLossPct   = opts.StopLossPct   * scale,
             };
         }
 

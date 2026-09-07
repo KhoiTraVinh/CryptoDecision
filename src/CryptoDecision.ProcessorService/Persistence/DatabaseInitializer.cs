@@ -10,11 +10,17 @@ namespace CryptoDecision.ProcessorService.Persistence;
 ///   trades              — RANGE-partitioned by trade_time (daily partitions)
 ///   klines_1m           — 1-minute OHLCV candles (not partitioned; low volume)
 ///   daily_feature_table — aggregated per-symbol, per-day features
-///   prediction_table    — populated by a downstream ML service (read by ApiService)
+///
+/// A prediction_table was created here too, "populated by a downstream ML service
+/// (read by ApiService)". Both of those were deleted; the DDL was not, so every
+/// boot re-created an empty table with two ALTERs and an index that no line of code
+/// has read or written since. The table is left alone on existing databases rather
+/// than dropped — an unused table costs nothing, and a DROP in a boot path is not
+/// a thing to run against a live account.
 ///
 /// Partition strategy: daily (not monthly) for trades because:
 ///   • Easier to drop old days (just DROP TABLE partition)
-///   • Query planner prunes by date for dashboard queries (last 24h)
+///   • Query planner prunes by date for recent-window queries (last 24h)
 ///   • Binance generates ~500k trades/day per symbol → daily is right-sized
 /// </summary>
 public sealed class DatabaseInitializer(
@@ -32,7 +38,6 @@ public sealed class DatabaseInitializer(
             await CreateTradesTableAsync(conn, ct);
             await CreateKlinesTableAsync(conn, ct);
             await CreateDailyFeatureTableAsync(conn, ct);
-            await CreatePredictionTableAsync(conn, ct);
             await EnsureBotConfigColumnsAsync(conn, ct);
             await EnsureBotTradesAsync(conn, ct);
             await EnsureDailyPartitionsAsync(conn, ct);
@@ -140,28 +145,6 @@ public sealed class DatabaseInitializer(
             """, ct);
     }
 
-    private static async Task CreatePredictionTableAsync(NpgsqlConnection conn, CancellationToken ct)
-    {
-        await Exec(conn, """
-            CREATE TABLE IF NOT EXISTS prediction_table (
-                id              BIGSERIAL      PRIMARY KEY,
-                symbol          VARCHAR(20)    NOT NULL,
-                date            DATE           NOT NULL,
-                direction       VARCHAR(10)    NOT NULL,   -- 'UP' | 'DOWN' | 'NEUTRAL'
-                confidence      NUMERIC(5, 4)  NOT NULL,   -- 0.0000 – 1.0000
-                model_version   VARCHAR(50)    NOT NULL,
-                rationale       TEXT,
-                signals         JSONB,                      -- per-model ensemble breakdown
-                created_at      TIMESTAMPTZ    NOT NULL DEFAULT now(),
-                UNIQUE (symbol, date, model_version)
-            );
-            ALTER TABLE prediction_table ADD COLUMN IF NOT EXISTS rationale TEXT;
-            ALTER TABLE prediction_table ADD COLUMN IF NOT EXISTS signals   JSONB;
-            CREATE INDEX IF NOT EXISTS ix_prediction_symbol_date
-                ON prediction_table (symbol, date DESC);
-            """, ct);
-    }
-
     /// <summary>
     /// Add bot_config columns that newer bot builds read.
     ///
@@ -181,14 +164,16 @@ public sealed class DatabaseInitializer(
             BEGIN
                 IF to_regclass('public.bot_config') IS NOT NULL THEN
                     ALTER TABLE bot_config
-                        ADD COLUMN IF NOT EXISTS use_ai_agent BOOLEAN NOT NULL DEFAULT FALSE,
+                        -- use_ai_agent was added here. Nothing reads it any more —
+                        -- the agent it switched on was deleted — so a fresh database
+                        -- no longer grows the column. Existing ones keep theirs.
+                        --
                         -- Why the last entry was not placed, and how many the bot has
                         -- refused today. A refused entry is a normal outcome and was
                         -- logged as one, which meant a bot that had refused every
-                        -- entry for hours was indistinguishable on screen from a bot
-                        -- waiting patiently for a signal. Persisted rather than held
-                        -- in memory because the API is a separate process and cannot
-                        -- see the worker's state.
+                        -- entry for hours was indistinguishable from one waiting
+                        -- patiently for a signal. Persisted rather than held in
+                        -- memory so it survives a restart and can be read with SQL.
                         ADD COLUMN IF NOT EXISTS last_refusal_reason TEXT,
                         ADD COLUMN IF NOT EXISTS last_refusal_at     TIMESTAMPTZ,
                         ADD COLUMN IF NOT EXISTS refusal_count       INTEGER NOT NULL DEFAULT 0,

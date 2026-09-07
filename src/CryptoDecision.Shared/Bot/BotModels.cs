@@ -17,12 +17,16 @@ public sealed record BotTrade
     public string    Status      { get; set;  } = "OPEN";   // OPEN | CLOSED | STOPPED
     public DateTime  OpenedAt    { get; init; }
     public DateTime? ClosedAt    { get; set;  }
-    public string?   CloseReason { get; set;  }             // TP | SL | TRAILING_STOP | TIMEOUT | MANUAL
+    public string?   CloseReason { get; set;  }             // TP | SL | BREAKEVEN | TIMEOUT | MANUAL
 
     /// <summary>
     /// High-water mark since trade opened. Updated every eval cycle.
-    /// LONG: tracks highest price seen (trailing stop fires when price drops TrailingStopPct from peak).
-    /// SHORT: tracks lowest price seen (trailing stop fires when price rises TrailingStopPct from peak).
+    /// LONG: tracks the highest price seen. SHORT: tracks the lowest.
+    ///
+    /// Read by the breakeven stop, which is the only exit left that needs to know
+    /// where the trade has been rather than only where it is. It used to feed a
+    /// trailing stop as well; that exit was removed with MOMENTUM and this doc
+    /// outlived it by several months, describing a control the code did not have.
     /// </summary>
     public decimal?  PeakPrice   { get; set;  }
 
@@ -130,7 +134,14 @@ public sealed record BotTrade
 
 // ── Bot configuration ─────────────────────────────────────────────────────────
 
-public sealed class BotOptions
+/// <remarks>
+/// A record rather than a class so a caller that needs a variant can say
+/// <c>opts with { TakeProfitPct = x }</c> and carry every other field across.
+/// StrategyEvaluator's dynamic TP/SL branch used to build a fresh BotOptions and
+/// copy six of these properties by hand, which silently reset the other twenty-odd
+/// to their defaults — a BTCUSDT symbol and a 1440-minute hold on a SOL position.
+/// </remarks>
+public sealed record BotOptions
 {
     public bool         Enabled                  { get; set; } = false;
     public bool         PaperMode                { get; set; } = true;
@@ -185,13 +196,6 @@ public sealed class BotOptions
     /// <summary>Seconds between evaluation cycles — the granularity of every bot-side exit.</summary>
     public int     EvalIntervalSeconds { get; set; } = 30;
 
-    // ── Trailing stop ──
-
-    /// <summary>Enable trailing stop. When price retraces TrailingStopPct from peak, the trade is closed.</summary>
-    public bool    UseTrailingStop     { get; set; } = true;
-    /// <summary>How far price can fall from peak before trailing stop fires. Sits inside the 2% target.</summary>
-    public decimal TrailingStopPct     { get; set; } = 0.012m;
-
     // ── Breakeven stop ──
 
     /// <summary>Enable breakeven stop. After trade gains BreakevenTriggerPct, stop loss moves to entry price (risk-free).</summary>
@@ -205,29 +209,17 @@ public sealed class BotOptions
     public bool    UseDynamicTpSl      { get; set; } = false;
 
     // ── AI Integration ──
+    //
+    // UseAiFilter, MinAiConfidence and UseAiAgent used to live here. All three
+    // round-tripped the database, this class and the API without a single line
+    // anywhere reading them to make a decision: the prediction service they filtered
+    // on and the tool-calling agent they enabled were both deleted, and the switches
+    // outlived them. A configuration flag that cannot change behaviour is worse than
+    // no flag — an operator setting use_ai_agent = true saw it persist, and nothing
+    // happened.
 
-    /// <summary>Enable AI filter: only enter when AI prediction aligns with trade direction.</summary>
-    public bool    UseAiFilter         { get; set; } = false;
-    /// <summary>Min AI confidence to allow entry (0.0-1.0). Default 0.50 = moderate confidence needed.</summary>
-    public decimal MinAiConfidence     { get; set; } = 0.50m;
     /// <summary>Enable AI-based position sizing: higher confidence = larger position.</summary>
     public bool    UseAiSizing         { get; set; } = false;
-
-    // ── Autonomous agent ──
-
-    /// <summary>
-    /// Hand entry decisions to the LLM agent instead of the deterministic strategies.
-    ///
-    /// The agent only decides *entries*. Stop loss, take profit, trailing and
-    /// breakeven exits stay in the deterministic evaluation loop, and every order the
-    /// agent proposes is still gated by RiskEngine — it cannot size its own position
-    /// or trade past an exposure, drawdown or daily-loss limit.
-    ///
-    /// Off by default: turning this on gives a language model discretion over when
-    /// capital is committed, which is a deliberate decision an operator should make
-    /// explicitly rather than inherit.
-    /// </summary>
-    public bool    UseAiAgent          { get; set; } = false;
 
     // ── Entry gate ──
 
@@ -275,6 +267,19 @@ public sealed class BotOptions
 
 // ── Runtime status ────────────────────────────────────────────────────────────
 
+/// <remarks>
+/// Fourteen optional fields used to trail this record — the refusal trail, the
+/// sizing preview, the last scorer verdict. They existed for the dashboard, which
+/// read them back out of bot_config through the API; the bot's own in-process
+/// status never filled any of them in, so with the dashboard gone every one was a
+/// parameter that only ever took its default.
+///
+/// The facts themselves are not lost: the worker still writes last_refusal_reason,
+/// last_sizing_note and the last_verdict_* columns to bot_config, which is where
+/// they survive a container restart and where SQL can still reach them. What went
+/// away is the second copy that travelled as a C# record so a web page could
+/// render it.
+/// </remarks>
 public sealed record BotStatus(
     bool      IsRunning,
     bool      PaperMode,
@@ -286,39 +291,7 @@ public sealed record BotStatus(
     int       WinCount,
     int       LossCount,
     int       OpenTradeCount,
-    DateTime? LastEvalAt,
-
-    // Everything below defaults, so the three call sites that build a BotStatus
-    // keep compiling and each fills in only what it can actually see: the API
-    // reads the persisted refusal trail, the bot's own in-process status cannot.
-    //
-    // These exist because "is it running?" and "is it doing anything?" turned out
-    // to be different questions. A bot refusing every entry answered yes to the
-    // first and nothing on screen answered the second.
-    string?   LastRefusalReason = null,
-    DateTime? LastRefusalAt     = null,
-    int       RefusalsToday     = 0,
-
-    // What sizing is asking for right now, re-derived from the same PositionSizer
-    // the bot uses rather than reimplemented — one copy of the arithmetic.
-    decimal?  Volatility        = null,
-    double?   VolatilityScalar  = null,
-    decimal?  SizingNotionalUsd = null,
-
-    // What the last real attempt produced, which only the bot can know: the venue's
-    // lot grid is applied there, not here.
-    string?   LastSizingNote    = null,
-
-    // The scorer's verdict on the last cycle. This replaced a panel that rendered
-    // prediction_table, whose writer has been deleted — so the dashboard was
-    // showing an empty row from a service that no longer exists while the number
-    // that actually decides entries was not on screen at all.
-    string?   LastVerdictCode   = null,
-    string?   LastVerdictDetail = null,
-    decimal?  LastVerdictZ      = null,
-    int?      LastVerdictAgree  = null,
-    int?      LastVerdictVenues = null,
-    DateTime? LastVerdictAt     = null
+    DateTime? LastEvalAt
 );
 
 /// <param name="Composite">
@@ -362,12 +335,12 @@ public sealed record EntryDecision(
 /// rather than merely between cycles.
 ///
 /// One definition, because there are now two callers with different views of the
-/// same fact — the API judging a heartbeat column, and the bot's own health check
-/// judging its in-process clock — and two copies of this arithmetic would drift
+/// same fact — the evaluation loop budgeting a cycle, and the health check
+/// judging the in-process clock — and two copies of this arithmetic would drift
 /// into disagreeing about whether the bot is alive.
 ///
-/// The window has to cover a whole cycle, not a fixed minute. With the AI agent
-/// enabled one cycle is the eval interval plus three sequential LLM tool calls,
+/// The window has to cover a whole cycle, not a fixed minute. With the gate
+/// enabled one cycle is the eval interval plus a sequential LLM call,
 /// which on CPU runs 60-90s, so a flat 60s threshold reported a perfectly healthy
 /// bot as dead between heartbeats. Four intervals with a 180s floor covers that
 /// while still noticing a genuinely stopped loop within a few minutes.
@@ -393,25 +366,3 @@ public static class BotLiveness
         TimeSpan.FromSeconds(Math.Max(240, evalIntervalSeconds * 4));
 }
 
-// ── API DTO ───────────────────────────────────────────────────────────────────
-
-public sealed record BotTradeDto(
-    long     Id,
-    string   Symbol,
-    string   Side,
-    string   Strategy,
-    decimal  EntryPrice,
-    decimal? ExitPrice,
-    decimal  Quantity,
-    decimal  NotionalUsd,
-    decimal? PnlUsd,
-    decimal? PnlPct,
-    string   Status,
-    DateTime OpenedAt,
-    DateTime? ClosedAt,
-    string?  CloseReason,
-    // Defaulted so a caller not yet taught about live trading cannot accidentally
-    // present a real trade as a simulated one.
-    string   Mode     = "PAPER",
-    string   Exchange = "BINANCE"
-);

@@ -34,9 +34,9 @@ public interface IOrderEngine
     /// This exists so the bot can refuse to <em>start</em> on a configuration it
     /// cannot honour, rather than discovering it one order at a time. The failure
     /// it guards against is specific: an operator asks for live trading, the
-    /// deployment has no credentials, and the bot quietly paper-trades while the
-    /// dashboard says LIVE. Simulated P&amp;L presented as real is worse than a
-    /// bot that plainly refuses to run.
+    /// deployment has no credentials, and the bot quietly paper-trades while
+    /// bot_config still says paper_mode = false. Simulated P&amp;L recorded as real
+    /// is worse than a bot that plainly refuses to run.
     /// </summary>
     string? DescribeRefusal(BotOptions opts);
 
@@ -103,7 +103,10 @@ public sealed class PaperOrderEngine(
     //   • slippage past the stop, which cost 3.9R on paper trade 47 when SOL fell
     //     2.6% inside one minute
     // Neither bites at the ~2h median hold, and both would if the horizon grew.
-    private const decimal FeeRate = 0.00035m;
+    // Per leg, so two legs come to TradingCosts.PostOnlyRoundTrip — maker in, taker
+    // out, which is what OkxOrderEngine actually does. Derived rather than written as
+    // 0.00035m so it cannot drift away from the live engine's cost model.
+    private const decimal FeeRate = TradingCosts.PostOnlyRoundTrip / 2m;
 
     /// <summary>Simulation can honour any configuration, so it never refuses.</summary>
     public string? DescribeRefusal(BotOptions opts) => null;
@@ -126,42 +129,24 @@ public sealed class PaperOrderEngine(
         // onto the row for the exit evaluation to read — the same field the live
         // engine populates, so a simulated run exits where a real one would.
         //
-        // Sizing follows the same two rules as the live engine, by design: a paper run
-        // whose position sizing differs from the live one is not a rehearsal of
-        // anything. See PositionSizer.ResolveByRisk.
-        PositionSize size;
+        // Sizing is the live engine's, literally — the same EntrySizing call, including
+        // the per-order ceiling. A paper run whose position sizing differs from the live
+        // one is not a rehearsal of anything: risk-based sizing once asked for $44.54
+        // here while OkxOrderEngine would have capped the same entry at $10, so paper
+        // P&L ran about 4.5x live and the two were not comparable. It flattered the
+        // simulation, since the cap only ever shrinks the order.
+        var sized = await EntrySizing.ResolveAsync(
+            featureRepo, symbol, capitalUsd, positionPct, state.Options.RiskPctPerTrade,
+            okxOptions.MaxOrderNotionalUsd, geometry, confidence, useAiSizing, ct);
 
-        if (geometry is { StopPct: > 0m } g)
-        {
-            size = PositionSizer.ResolveByRisk(
-                capitalUsd, state.Options.RiskPctPerTrade, g.StopPct, confidence, useAiSizing);
-        }
-        else
-        {
-            var feature = await featureRepo.GetTodayAsync(symbol, ct);
-            size = PositionSizer.Resolve(
-                capitalUsd, positionPct, (double)(feature?.Volatility ?? 2.0m), confidence, useAiSizing);
-        }
+        var size     = sized.Size;
+        var notional = sized.NotionalUsd;
 
-        var notional = size.NotionalUsd;
-
-        // The same per-order ceiling the live engine applies.
-        //
-        // Without it a paper run and a live run size differently from identical inputs:
-        // risk-based sizing asked for $44.54 here while OkxOrderEngine would have capped
-        // the same entry at $10, so paper P&L ran about 4.5x live and the two were not
-        // comparable. A simulation whose position size does not match the venue's is
-        // measuring a different strategy — and it flatters it, since the cap only ever
-        // shrinks the order.
-        if (notional > okxOptions.MaxOrderNotionalUsd)
-        {
+        if (sized.CapBound)
             log.LogInformation(
                 "[PaperBot] Sizing asked for {Asked} but the per-order ceiling is {Cap} — capping, " +
                 "so this simulated fill matches what the live engine would have placed.",
-                notional, okxOptions.MaxOrderNotionalUsd);
-
-            notional = okxOptions.MaxOrderNotionalUsd;
-        }
+                sized.AskedNotionalUsd, okxOptions.MaxOrderNotionalUsd);
 
         var qty      = Math.Round(notional / price, 6);
         var fee      = Math.Round(notional * FeeRate, 4);

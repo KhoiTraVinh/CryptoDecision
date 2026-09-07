@@ -25,10 +25,3 @@ public sealed record OkxTrade(
     [property: JsonPropertyName("ts")]      string Ts        // unix ms timestamp
 );
 
-/// <summary>
-/// Envelope for server-sent events (subscribe confirmation, heartbeat, error).
-/// Only the event type is needed for routing.
-/// </summary>
-public sealed record OkxEventEnvelope(
-    [property: JsonPropertyName("event")] string? Event
-);

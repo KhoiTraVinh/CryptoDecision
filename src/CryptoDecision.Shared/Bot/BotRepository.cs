@@ -247,7 +247,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         return result;
     }
 
-    // ── Update peak price (trailing stop tracking) ────────────────────────────
+    // ── Update peak price (the breakeven stop reads it) ───────────────────────
 
     public async Task UpdatePeakPriceAsync(long tradeId, decimal peakPrice, CancellationToken ct = default)
     {
@@ -316,25 +316,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("symbol", symbol ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("mode",   mode   ?? (object)DBNull.Value);
         return (decimal)(await cmd.ExecuteScalarAsync(ct))!;
-    }
-
-    // ── Get latest price for a symbol (for unrealized PnL calculation) ─────────
-
-    public async Task<decimal?> GetLatestPriceAsync(string symbol, CancellationToken ct = default)
-    {
-        const string sql = """
-            SELECT close_price FROM klines_1m
-            WHERE symbol = @symbol
-            ORDER BY open_time DESC
-            LIMIT 1
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("symbol", symbol);
-
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is decimal d ? d : null;
     }
 
     // ── Mapper ────────────────────────────────────────────────────────────────

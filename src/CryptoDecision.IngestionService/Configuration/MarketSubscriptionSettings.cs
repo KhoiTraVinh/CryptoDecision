@@ -40,11 +40,6 @@ public sealed class MarketSubscriptionSettings
         Normalised.Select(p => p.Replace("-", "", StringComparison.Ordinal));
 
     /// <summary>
-    /// Deduplicated, because a repeated pair is a repeated subscription: the same
-    /// trade arrives twice, and every buy/sell ratio computed from it counts that
-    /// trade twice. Cheap to guard against here, invisible if it happens.
-    /// </summary>
-    /// <summary>
     /// Throw if nothing is configured.
     ///
     /// An empty list is not a quiet no-op, it is the worst kind of failure this
@@ -65,6 +60,11 @@ public sealed class MarketSubscriptionSettings
                 "to nothing, and report healthy while ingesting no data.");
     }
 
+    /// <summary>
+    /// Deduplicated, because a repeated pair is a repeated subscription: the same
+    /// trade arrives twice, and every buy/sell ratio computed from it counts that
+    /// trade twice. Cheap to guard against here, invisible if it happens.
+    /// </summary>
     private IEnumerable<string> Normalised => Pairs
         .Where(p => !string.IsNullOrWhiteSpace(p))
         .Select(p => p.Trim().ToUpperInvariant())

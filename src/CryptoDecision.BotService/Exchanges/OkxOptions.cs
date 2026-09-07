@@ -6,10 +6,10 @@ namespace CryptoDecision.BotService.Exchanges;
 /// Two separate switches have to be thrown before a real order can leave this
 /// process: <see cref="EnableLiveTrading"/> here, which is deployment
 /// configuration an operator sets on the container, and <c>bot_config.paper_mode
-/// = false</c>, which is a runtime decision made through the API. Neither alone
-/// is enough. The split is deliberate — the API is reachable from the dashboard,
-/// and a single mis-click there should not be able to start spending real money
-/// on a deployment that was never provisioned for it.
+/// = false</c>, which is a runtime decision written into the database. Neither
+/// alone is enough. The split is deliberate: one careless UPDATE against a
+/// database should not be able to start spending real money on a deployment
+/// that was never provisioned for it.
 /// </summary>
 public sealed class OkxOptions
 {
@@ -65,8 +65,8 @@ public sealed class OkxOptions
     /// <summary>
     /// Hard ceiling on a single order's notional, in USD, applied after position
     /// sizing. This is the backstop against a fat-fingered capital_usd: sizing is
-    /// a percentage of a number the API accepts without an upper bound, so a
-    /// misplaced zero there would otherwise become a real order.
+    /// a percentage of a number nothing bounds from above, so a misplaced zero
+    /// there would otherwise become a real order.
     /// </summary>
     public decimal MaxOrderNotionalUsd { get; set; } = 100m;
 

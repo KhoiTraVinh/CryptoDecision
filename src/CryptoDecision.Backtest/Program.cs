@@ -109,7 +109,9 @@ if (!opts.Sweep)
         TargetRiskMultiple: opts.TargetRr,
         MaxHoldHours:       opts.MaxHoldHours,
         AllInCostRate:      opts.CostRate,
-        FundingRatePerHour: opts.FundingPerHour);
+        FundingRatePerHour: opts.FundingPerHour,
+        EntryPullbackAtr:   opts.EntryPullbackAtr,
+        MinRewardRisk:      opts.MinRewardRisk);
 
     Report.Single(BacktestEngine.Run(history, config, null, splitAt),  "IN-SAMPLE");
     Report.Single(BacktestEngine.Run(history, config, splitAt, null), "OUT-OF-SAMPLE");
@@ -127,6 +129,15 @@ double[] zGrid       = [1.0, 1.5, 2.0, 2.5];
 int[]    venueGrid   = [1, 2, 3];
 double[] rrGrid      = [1.5, 2.0, 3.0];
 
+// Stop width, which this sweep did not vary for its first 36 cells.
+//
+// StopAtrMultiple was pinned to opts.StopAtr in every one of them while the header
+// printed a grid, so a run that looked like it had searched the geometry had held the
+// single parameter most likely to be wrong constant. That mattered: the stop is
+// measured to sit at the 28th percentile of SOL's 12-hour noise, which is the defect
+// the sweep existed to find and the one thing it could not see.
+double[] stopGrid    = [1.0, 1.5, 2.0, 3.0];
+
 Console.WriteLine();
 Console.WriteLine($"SWEEP — cost {opts.CostRate * 10_000m:F0} bps all-in, funding " +
                   $"{opts.FundingPerHour * 10_000m:F2} bps/h, hold ≤ {opts.MaxHoldHours:F0}h");
@@ -137,21 +148,24 @@ var rows = new List<(PolicyConfig Config, BacktestResult InSample, BacktestResul
 
 foreach (var z in zGrid)
 foreach (var v in venueGrid)
+foreach (var stop in stopGrid)
 foreach (var rr in rrGrid)
 {
     var config = new PolicyConfig(
         Signal:             baseSignal with { EnterZ = z, MinAgreeingVenues = v },
-        StopAtrMultiple:    opts.StopAtr,
+        StopAtrMultiple:    stop,
         TargetRiskMultiple: rr,
         MaxHoldHours:       opts.MaxHoldHours,
         AllInCostRate:      opts.CostRate,
-        FundingRatePerHour: opts.FundingPerHour);
+        FundingRatePerHour: opts.FundingPerHour,
+        EntryPullbackAtr:   opts.EntryPullbackAtr,
+        MinRewardRisk:      opts.MinRewardRisk);
 
     var inSample = BacktestEngine.Run(history, config, null, splitAt);
     var oos      = BacktestEngine.Run(history, config, splitAt, null);
 
     rows.Add((config, inSample, oos));
-    Report.SweepRow(z, v, rr, inSample, oos);
+    Report.SweepRow(z, v, stop, rr, inSample, oos);
 }
 
 Report.SweepFooter(rows);

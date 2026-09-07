@@ -8,7 +8,7 @@ namespace CryptoDecision.BotService.Bot;
 ///
 /// Entries follow the current configuration; exits follow the trade. That
 /// asymmetry is the whole reason this class exists. <c>paper_mode</c> lives in
-/// bot_config and can be flipped through the API at any moment, including while
+/// bot_config and can be flipped at any moment, including while
 /// positions are open — and an exit routed by the current setting instead of by
 /// the trade's own record would simulate the close of a real position (leaving
 /// coins sitting on the exchange with the bot believing it had sold them), or

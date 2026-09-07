@@ -1,6 +1,6 @@
 namespace CryptoDecision.BotService.Domain;
 
-// ── Entities used by the Bot Engine (subset of ApiService domain) ────────────
+// ── Entities used by the Bot Engine ─────────────────────────────────────────
 
 public sealed record DailyFeature(
     string   Symbol,

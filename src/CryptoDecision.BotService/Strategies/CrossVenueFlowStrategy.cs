@@ -263,6 +263,18 @@ public sealed class CrossVenueFlowStrategy(
     private int    _repeatCount;
 
     /// <summary>
+    /// Cycles between the periodic restatements of an unchanged abstention.
+    ///
+    /// 120 cycles is an hour at the default 30-second interval. Without it the
+    /// transition-only rule went too far the other way: waiting for 100 buckets to
+    /// accumulate is an eighteen-hour condition that does not change, so the bot would
+    /// have logged one line and then said nothing for the rest of the day. That is the
+    /// silence that has cost this project money before — a bot with a good reason to do
+    /// nothing and a bot that has quietly broken look identical from outside.
+    /// </summary>
+    private const int RestateEveryCycles = 120;
+
+    /// <summary>
     /// Report an abstention at Information when the reason <em>changes</em>, and at
     /// Debug while it repeats.
     ///
@@ -278,18 +290,6 @@ public sealed class CrossVenueFlowStrategy(
     /// news; the four hundredth repetition of it is not, but the count is — so the
     /// count comes out with the next transition.
     /// </summary>
-    /// <summary>
-    /// Cycles between the periodic restatements of an unchanged abstention.
-    ///
-    /// 120 cycles is an hour at the default 30-second interval. Without it the
-    /// transition-only rule went too far the other way: waiting for 100 buckets to
-    /// accumulate is an eighteen-hour condition that does not change, so the bot would
-    /// have logged one line and then said nothing for the rest of the day. That is the
-    /// silence that has cost this project money before — a bot with a good reason to do
-    /// nothing and a bot that has quietly broken look identical from outside.
-    /// </summary>
-    private const int RestateEveryCycles = 120;
-
     private void LogAbstention(string? symbol, string code, string reason)
     {
         if (code == _lastAbstainCode)
@@ -424,21 +424,25 @@ public sealed class FlowStrategyOptions
     public double TargetRiskMultiple { get; set; } = FlowGeometryDefaults.TargetRiskMultiple;
 
     /// <summary>
-    /// Round-trip cost assumption used when placing the stop and target, as a
-    /// fraction of notional.
+    /// Round-trip cost assumed when placing the stop and target, as a fraction of
+    /// notional.
     ///
-    /// 10 bps is taker in and taker out on OKX perpetual swaps, which is what the
-    /// order engine actually does today. Note this is not what RiskEngine assumes —
-    /// its 20 bps default is documented as "Binance spot without BNB discount", a
-    /// venue and product this bot no longer trades. Neither figure includes slippage.
+    /// Deliberately the taker-both-legs figure rather than the 7 bps the bot actually
+    /// pays with a post-only entry: at the moment the geometry is fixed it is not yet
+    /// settled whether the resting order fills as maker or gets crossed, and erring high
+    /// puts the target slightly further out and rejects marginal reward:risk. That fails
+    /// toward not trading. Excludes slippage and funding — see <see cref="TradingCosts"/>.
+    ///
+    /// RiskEngine's default used to disagree with this at 20 bps, documented as
+    /// "Binance spot without BNB discount". Both now come from the same constant.
     /// </summary>
-    public decimal RoundTripFeeRate { get; set; } = 0.001m;
+    public decimal RoundTripFeeRate { get; set; } = TradingCosts.TakerRoundTrip;
 
     /// <summary>
     /// Refuse an entry whose reward:risk after fees is below this. Arithmetic, checked
     /// before the gate is asked anything.
     /// </summary>
-    public decimal MinRewardRisk { get; set; } = 1.2m;
+    public decimal MinRewardRisk { get; set; } = FlowGeometryDefaults.MinRewardRisk;
 
 
     /// <summary>
@@ -454,7 +458,7 @@ public sealed class FlowStrategyOptions
     /// the ones it drops are the ones that ran away, which are exactly the entries
     /// this is meant to stop paying for.
     /// </summary>
-    public double EntryPullbackAtr { get; set; } = 0.75;
+    public double EntryPullbackAtr { get; set; } = FlowGeometryDefaults.EntryPullbackAtr;
 
     /// <summary>
     /// Optional hard ceiling on the stop distance. Null by default, and that is the

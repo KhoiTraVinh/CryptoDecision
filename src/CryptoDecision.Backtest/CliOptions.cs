@@ -1,3 +1,4 @@
+using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.Backtest;
@@ -5,12 +6,12 @@ namespace CryptoDecision.Backtest;
 /// <summary>
 /// Command-line arguments, parsed by hand to keep the tool dependency-free.
 ///
-/// The cost default is 21 bps rather than the exchange's headline taker fee. That is
-/// a stress level, chosen because published audits of this exact class of strategy
-/// found policies that looked viable at an optimistic 10 bps and were solidly
-/// negative at a realistic 21+, and because the bot's own risk arithmetic was still
-/// assuming a Binance *spot* fee schedule while placing orders on OKX perpetuals.
-/// A policy that only survives at the optimistic number has not survived.
+/// The cost default is TradingCosts.BacktestStressRoundTrip (21 bps), not the 7 bps
+/// the bot actually pays. That is a stress level, chosen because published audits of
+/// this exact class of strategy found policies that looked viable at an optimistic
+/// 10 bps and were solidly negative at a realistic 21+ once slippage and adverse
+/// selection on the resting order are counted. A policy that only survives at the
+/// optimistic number has not survived. Override with --cost-bps.
 /// </summary>
 public sealed record CliOptions(
     string   ConnectionString,
@@ -27,6 +28,8 @@ public sealed record CliOptions(
     double   OosFraction,
     int      SignalBars,
     int      BaselineBars,
+    double   EntryPullbackAtr,
+    decimal  MinRewardRisk,
     bool     Sweep,
     bool     DumpTrades)
 {
@@ -76,7 +79,8 @@ public sealed record CliOptions(
                 Symbol:           (map.GetValueOrDefault("symbol") ?? "SOLUSDT").ToUpperInvariant(),
                 From:             ParseDate(map.GetValueOrDefault("from")),
                 To:               ParseDate(map.GetValueOrDefault("to")),
-                CostRate:         ParseDecimal(map.GetValueOrDefault("cost-bps"), 21m) / 10_000m,
+                CostRate:         ParseDecimal(map.GetValueOrDefault("cost-bps"),
+                                      TradingCosts.BacktestStressRoundTrip * 10_000m) / 10_000m,
                 FundingPerHour:   ParseDecimal(map.GetValueOrDefault("funding-bps-per-hour"), 0.5m) / 10_000m,
                 EnterZ:           ParseDouble(map.GetValueOrDefault("z"),
                                       new FlowSignalOptions().EnterZ),
@@ -93,6 +97,12 @@ public sealed record CliOptions(
                                       new FlowSignalOptions().SignalBars),
                 BaselineBars:     (int)ParseDecimal(map.GetValueOrDefault("baseline-bars"),
                                       new FlowSignalOptions().BaselineBars),
+                // Defaults are the live FlowStrategyOptions values, so a run with no flag
+                // simulates the deployed strategy rather than a simplified one.
+                EntryPullbackAtr: ParseDouble(map.GetValueOrDefault("pullback-atr"),
+                                      FlowGeometryDefaults.EntryPullbackAtr),
+                MinRewardRisk:    ParseDecimal(map.GetValueOrDefault("min-rr"),
+                                      FlowGeometryDefaults.MinRewardRisk),
                 Sweep:            flags.Contains("sweep"),
                 DumpTrades:       flags.Contains("trades"));
         }
@@ -130,6 +140,11 @@ public sealed record CliOptions(
               --z <n>                      venue z threshold, default 1.5
               --min-venues <n>             venues that must agree, default 2
               --stop-atr <n>               stop as a multiple of ATR, default 1.5
+              --pullback-atr <n>           ATR multiples price must give back before entry,
+                                           default 0.75 (the live value); 0 enters at the
+                                           next open, which is what this tool used to do
+              --min-rr <n>                 refuse a signal under this post-fee reward:risk,
+                                           default 1.2 (the live value)
               --target-rr <n>              target as a multiple of the stop, default 2.0
               --max-hold-hours <n>         default 12
               --oos <frac>                 out-of-sample tail fraction, default 0.4

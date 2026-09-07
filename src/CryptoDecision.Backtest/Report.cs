@@ -141,17 +141,18 @@ public static class Report
     public static void SweepHeader()
     {
         Console.WriteLine(
-            $"  {"z",4} {"vn",3} {"rr",4} │ {"n",4} {"cov",6} {"win",6} {"meanR",6} {"net",8} {"be",6} │ " +
+            $"  {"z",4} {"vn",3} {"stop",5} {"rr",4} │ {"n",4} {"cov",6} {"win",6} {"meanR",6} {"net",8} {"be",6} │ " +
             $"{"n",4} {"win",6} {"meanR",6} {"net",8} {"be",6}");
         Console.WriteLine(
-            $"  {new string(' ', 12)} │ {"────── in-sample ──────────────────────",-38} │ " +
+            $"  {new string(' ', 18)} │ {"────── in-sample ──────────────────────",-38} │ " +
             "───── out-of-sample ─────────────");
     }
 
-    public static void SweepRow(double z, int venues, double rr, BacktestResult ins, BacktestResult oos)
+    public static void SweepRow(
+        double z, int venues, double stopAtr, double rr, BacktestResult ins, BacktestResult oos)
     {
         Console.WriteLine(
-            $"  {z,4:F1} {venues,3} {rr,4:F1} │ " +
+            $"  {z,4:F1} {venues,3} {stopAtr,5:F2} {rr,4:F1} │ " +
             $"{ins.Trades,4} {ins.Coverage,6:P1} {Fmt(ins.WinRate, ins.Trades),6} " +
             $"{Fmt2(ins.MeanR, ins.Trades),6} {Fmt3(ins.TotalReturn, ins.Trades),8} " +
             $"{Fmt2(ins.BreakevenCostBps, ins.Trades),6} │ " +
@@ -173,8 +174,12 @@ public static class Report
 
         // The only summary offered, and it is a count rather than a ranking. Naming a
         // winner from a grid this size over this little data is the mistake the tool
-        // exists to prevent — a sweep of 36 cells will always contain a good-looking
-        // one whether or not an edge exists.
+        // exists to prevent — a sweep of 144 cells will always contain a good-looking
+        // one whether or not an edge exists, and it is now 144 rather than 36 because
+        // stop width was added to the grid. Four times the cells is four times the
+        // chances for noise to produce a winner, against the same few hundred buckets.
+        // Whatever this points at is a hypothesis for HYPOTHESES.md with its decision
+        // rule fixed in advance, not a configuration to deploy.
         var viable = rows.Count(r =>
             r.InSample.Trades >= 20 && r.Oos.Trades >= 10 &&
             r.InSample.BreakevenCostBps > assumed && r.Oos.BreakevenCostBps > assumed);

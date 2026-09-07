@@ -14,8 +14,15 @@ namespace CryptoDecision.Shared.Bot;
 /// </summary>
 public static class RiskEngine
 {
-    /// <summary>Round-trip taker fee: 0.1% in, 0.1% out. Binance spot without BNB discount.</summary>
-    public const decimal DefaultRoundTripFeeRate = 0.002m;
+    /// <summary>
+    /// The cost this engine assumes when nobody passes one.
+    ///
+    /// Was 0.002m, documented as "Binance spot without BNB discount" — a venue and
+    /// product the bot stopped trading months earlier, so the startup risk report was
+    /// judging an OKX perpetual configuration at twice its real cost. See
+    /// <see cref="TradingCosts"/> for the four numbers that were in force at once.
+    /// </summary>
+    public const decimal DefaultRoundTripFeeRate = TradingCosts.TakerRoundTrip;
 
     /// <summary>
     /// Above this required win rate a configuration is treated as unachievable.
@@ -63,17 +70,6 @@ public static class RiskEngine
             BreakevenWinRate: Math.Clamp(breakevenWinRate, 0m, 1m));
     }
 
-    /// <summary>
-    /// Expected value per trade in currency, given an assumed win rate.
-    /// Positive means the configuration makes money at that hit rate.
-    /// </summary>
-    public static decimal ExpectedValuePerTrade(
-        ExpectancyProfile profile, decimal assumedWinRate, decimal notionalUsd)
-    {
-        var p = Math.Clamp(assumedWinRate, 0m, 1m);
-        return notionalUsd * (p * profile.NetWinPct - (1m - p) * profile.NetLossPct);
-    }
-
     // ── Configuration validation ──────────────────────────────────────────────
 
     /// <summary>
@@ -81,16 +77,9 @@ public static class RiskEngine
     /// the account than intended. Returns findings; the caller decides whether to
     /// warn or refuse to start.
     /// </summary>
-    /// <param name="realizedVolatilityPct">
-    /// The day's high-low range as a percentage of its open, if known — the same
-    /// figure PositionSizer already uses to shrink positions. Optional so existing
-    /// callers keep working; without it the volatility check is skipped rather than
-    /// guessed at.
-    /// </param>
     public static RiskAssessment Validate(
         BotOptions opts,
-        decimal roundTripFeeRate = DefaultRoundTripFeeRate,
-        decimal? realizedVolatilityPct = null)
+        decimal roundTripFeeRate = DefaultRoundTripFeeRate)
     {
         var findings = new List<RiskFinding>();
         var profile  = Expectancy(opts.TakeProfitPct, opts.StopLossPct, roundTripFeeRate);
@@ -169,68 +158,14 @@ public static class RiskEngine
                 "between evaluation cycles, so it cannot prevent this."));
         }
 
-        // ── Trailing stop tighter than the noise it sits in ──
-        if (opts.UseTrailingStop && opts.TrailingStopPct <= roundTripFeeRate)
-        {
-            findings.Add(new RiskFinding(
-                RiskSeverity.Warning,
-                "TRAILING_STOP_TOO_TIGHT",
-                $"A {opts.TrailingStopPct:P2} trailing stop is inside the {roundTripFeeRate:P2} " +
-                "fee band and will exit on noise."));
-        }
-
-        // ── Trailing stop small against the day's actual range ──
-        //
-        // The fee check above compares the trailing stop to a fixed cost and passes
-        // anything above 0.2%. It therefore said nothing on 2026-08-22, when a 1.20%
-        // trailing stop sat inside a 15.76% daily range and four consecutive entries
-        // were stopped out having moved at most +0.29% in their favour — the stop was
-        // being hit by ordinary intraday movement, not by the trade being wrong.
-        //
-        // A quarter of the daily range is a rule of thumb, not a derivation: intraday
-        // retracements routinely run a quarter to a third of the day's span, so a stop
-        // inside that is expected to be caught by noise. It is a warning, never a
-        // block — a tight stop can be a deliberate choice, and on those same four
-        // trades it did beat the exchange's wider stop.
-        if (opts.UseTrailingStop && realizedVolatilityPct is > 0m)
-        {
-            var trailingPct = opts.TrailingStopPct * 100m;
-            var quarterRange = realizedVolatilityPct.Value / 4m;
-
-            if (trailingPct < quarterRange)
-            {
-                findings.Add(new RiskFinding(
-                    RiskSeverity.Warning,
-                    "TRAILING_STOP_INSIDE_VOLATILITY",
-                    $"A {opts.TrailingStopPct:P2} trailing stop is well inside today's " +
-                    $"{realizedVolatilityPct.Value:F2}% range — under a quarter of it " +
-                    $"({quarterRange:F2}%). Expect exits on ordinary movement rather than " +
-                    "on the trade being wrong."));
-            }
-        }
-
-        // ── Stop loss the bot itself can never reach ──
-        //
-        // The retired MOMENTUM's EvaluateExit tested the trailing stop before the stop loss,
-        // so a trailing stop tighter than the stop loss always fires first and the
-        // bot's own stop-loss branch is unreachable.
-        //
-        // Worth saying, and worth being precise about: the stop loss is NOT disabled.
-        // It is armed at the exchange as the OCO's slTriggerPx, which is what catches
-        // a gap between the bot's 30-second polls and what protects the position when
-        // the bot is not running at all. What this describes is dead code and a
-        // misleading configuration reading, not an unprotected position: the typical
-        // exit is the trailing stop, while the worst case remains the stop loss.
-        if (opts.UseTrailingStop && opts.TrailingStopPct < opts.StopLossPct)
-        {
-            findings.Add(new RiskFinding(
-                RiskSeverity.Warning,
-                "BOT_STOP_LOSS_UNREACHABLE",
-                $"The {opts.TrailingStopPct:P2} trailing stop is checked before the " +
-                $"{opts.StopLossPct:P2} stop loss and is tighter, so the bot's stop-loss " +
-                $"branch never fires. Typical risk per trade is {opts.TrailingStopPct:P2}; " +
-                $"{opts.StopLossPct:P2} remains the worst case, enforced by the exchange OCO."));
-        }
+        // Three trailing-stop findings used to sit here: TRAILING_STOP_TOO_TIGHT,
+        // TRAILING_STOP_INSIDE_VOLATILITY and BOT_STOP_LOSS_UNREACHABLE. All three
+        // reasoned about an exit that no longer exists — the trailing stop went with
+        // MOMENTUM, and XVENUE_FLOW exits on the stop and target fixed at entry.
+        // They kept firing against bot_config.trailing_stop_pct, so the risk report
+        // described a control the bot did not have and stayed silent about the one it
+        // did. What they were really measuring — a stop narrower than the market's own
+        // movement — is now enforced where it belongs, in VolatilityStops.
 
         // ── Breakeven trigger unreachable before the target ──
         if (opts.UseBreakevenStop && opts.BreakevenTriggerPct >= opts.TakeProfitPct)
@@ -391,7 +326,6 @@ public sealed record RiskAssessment(
 )
 {
     public bool HasCritical => Findings.Any(f => f.Severity == RiskSeverity.Critical);
-    public bool IsClean     => Findings.Count == 0;
 
     public IEnumerable<RiskFinding> Critical => Findings.Where(f => f.Severity == RiskSeverity.Critical);
     public IEnumerable<RiskFinding> Warnings => Findings.Where(f => f.Severity == RiskSeverity.Warning);

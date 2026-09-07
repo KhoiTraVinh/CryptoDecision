@@ -15,9 +15,9 @@ namespace CryptoDecision.BotService.Health;
 /// check, from one trading normally.
 ///
 /// The information was never missing. <see cref="BotStateService.LastEvalAt"/> holds it
-/// in memory and bot_config.last_heartbeat holds it on disk; the dashboard even renders
-/// STOPPED from the same fact. Nothing turned it into a signal, so the only detection
-/// path was a human noticing on the exchange that nothing had traded.
+/// in memory and bot_config.last_heartbeat holds it on disk. Nothing turned either of
+/// them into a signal, so the only detection path was a human noticing on the
+/// exchange that nothing had traded.
 ///
 /// This asks the in-process clock rather than the database on purpose: the failure to
 /// catch is the loop not running, and a check that depends on the loop's own writes

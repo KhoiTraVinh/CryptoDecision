@@ -8,8 +8,15 @@ namespace CryptoDecision.BotService.Bot;
 
 /// <summary>
 /// BackgroundService that drives the trading bot evaluation loop.
-/// Polls bot_config from PostgreSQL to receive start/stop commands from the API.
-/// Writes heartbeat + stats back to bot_config so Dashboard can display status.
+///
+/// Polls bot_config from PostgreSQL for start/stop. That row used to be written by
+/// an API on behalf of a dashboard; both are gone, so it is written by hand:
+/// <c>UPDATE bot_config SET enabled = true WHERE id = 1;</c>
+///
+/// The heartbeat and stats still go back to bot_config. They were put there so a
+/// second process could display them, but the reason that outlives the dashboard is
+/// the one that mattered anyway — they survive a container restart, and a container
+/// log does not.
 /// </summary>
 public sealed class TradingBotService(
     BotStateService       state,
@@ -17,7 +24,6 @@ public sealed class TradingBotService(
     IOrderEngine          orderEngine,
     BotRepository         repo,
     BotConfigRepository   configRepo,
-    IFeatureRepository    featureRepo,
     IEntryGate            gate,
     SignalOutcomeRepository signals,
     // Only for the model name stamped onto each signal row: a verdict is not
@@ -41,15 +47,15 @@ public sealed class TradingBotService(
     /// a model that declines nine times and approves on the tenth enters at
     /// whatever moment it happened to change its mind.
     ///
-    /// Only declines are cached. An approval leads straight to an order, and
-    /// re-serving a stale approval from a dictionary is the one direction where
-    /// being wrong costs money rather than an opportunity.
+    /// Only declines ON THE MERITS are cached. An approval leads straight to an order,
+    /// and re-serving a stale approval from a dictionary is the one direction where
+    /// being wrong costs money rather than an opportunity. A gate failure is not
+    /// cached either, for the opposite reason: it is not a verdict about the evidence,
+    /// so the argument for the cache does not apply to it, and caching one turned a
+    /// momentary Ollama hiccup into a fifteen-minute blackout.
     /// </summary>
     private readonly Dictionary<(string Symbol, string Side, DateTime Bucket), GateDecision>
         _declinedThisBucket = new();
-
-    private static DateTime BucketOf(DateTime utc) =>
-        new(utc.Ticks - utc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -58,7 +64,7 @@ public sealed class TradingBotService(
         // ── Seed in-memory stats from the DB ──
         //
         // Narrowed to the configured instrument and execution mode, because these
-        // counters are what the dashboard shows as the bot's record. Unfiltered they
+        // counters are the bot's record of this account. Unfiltered they
         // blend simulated results into a live P&L figure, which is the one number an
         // operator is most likely to act on. Reading the config first is what makes
         // the narrowing possible at all — Options is still at its defaults here.
@@ -85,7 +91,7 @@ public sealed class TradingBotService(
         {
             try
             {
-                // ── Poll config from DB (API writes start/stop here) ──────────
+                // ── Poll config from DB (an operator writes enabled here) ─────
                 var dbConfig = await configRepo.GetConfigAsync(stoppingToken);
                 if (dbConfig is null)
                 {
@@ -95,24 +101,24 @@ public sealed class TradingBotService(
 
                 if (dbConfig.Enabled && !state.IsRunning)
                 {
-                    // API sent start command → validate the risk profile before
+                    // bot_config.enabled went true → validate the risk profile before
                     // committing capital to it. A configuration that cannot profit
                     // arithmetically will not be rescued by a good entry signal.
-                    if (!await PassesRiskGateAsync(dbConfig, stoppingToken))
+                    if (!PassesRiskGate(dbConfig))
                     {
                         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
                         continue;
                     }
 
                     state.Start(dbConfig);
-                    log.LogInformation("[TradingBot] Received START command from API. Strategies: [{Strats}]",
+                    log.LogInformation("[TradingBot] bot_config.enabled is true — starting. Strategies: [{Strats}]",
                         string.Join(", ", dbConfig.ActiveStrategies));
                 }
                 else if (!dbConfig.Enabled && state.IsRunning)
                 {
-                    // API sent stop command → stop bot
+                    // bot_config.enabled went false → stop bot
                     state.Stop();
-                    log.LogInformation("[TradingBot] Received STOP command from API.");
+                    log.LogInformation("[TradingBot] bot_config.enabled is false — stopping.");
                 }
                 else if (dbConfig.Enabled && state.IsRunning)
                 {
@@ -176,8 +182,8 @@ public sealed class TradingBotService(
                     // alive", not "did this cycle do anything". EvalCycleAsync
                     // returns early on perfectly normal conditions — a failed price
                     // fetch, a tripped circuit breaker — and skipping the heartbeat
-                    // on those made a healthy bot read as STOPPED in the dashboard
-                    // after 60 seconds, which is exactly when an operator most needs
+                    // on those made a healthy bot read as STOPPED to anything watching
+                    // bot_config, after 60 seconds — exactly when an operator most needs
                     // to trust the status.
                     if (state.IsRunning)
                     {
@@ -302,8 +308,12 @@ public sealed class TradingBotService(
     /// the target, an inverted reward:risk, exposure beyond the account) blocks the
     /// start. The config stays Enabled in the database, so this re-evaluates every
     /// 30 seconds and the bot starts on its own once the operator fixes the setup.
+    ///
+    /// Synchronous now that the volatility read is gone — every check here is
+    /// arithmetic over the configuration and a question to the order engine, neither
+    /// of which touches the network.
     /// </summary>
-    private async Task<bool> PassesRiskGateAsync(BotOptions opts, CancellationToken ct)
+    private bool PassesRiskGate(BotOptions opts)
     {
         // ── Can the configured execution mode actually be honoured? ──
         //
@@ -327,20 +337,11 @@ public sealed class TradingBotService(
                 "Capital ${Capital}, {Pct:P0} per position, up to {Max} positions per strategy.",
                 opts.Exchange, opts.CapitalUsd, opts.PositionPctOfCapital, opts.MaxOpenTradesPerStrategy);
 
-        // Today's realised range, so the gate can judge the trailing stop against the
-        // market rather than only against fees. Best-effort: a missing feature row
-        // must not stop the bot, it just costs one warning.
-        decimal? volatility = null;
-        try
-        {
-            volatility = (await featureRepo.GetTodayAsync(opts.Symbol, ct))?.Volatility;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log.LogWarning("[Risk] Could not read today's volatility: {Err}", ex.Message);
-        }
-
-        var assessment = RiskEngine.Validate(opts, realizedVolatilityPct: volatility);
+        // Today's realised range used to be read here and handed to Validate, purely
+        // to judge the trailing stop against the market. That check is gone with the
+        // trailing stop, so this is one fewer database read on every start attempt —
+        // and the reading it produced was never used for anything else.
+        var assessment = RiskEngine.Validate(opts);
         var profile    = assessment.Expectancy;
 
         log.LogInformation(
@@ -445,8 +446,13 @@ public sealed class TradingBotService(
         // One verdict per side per 15-minute bucket. The evidence cannot change
         // until the next bar closes, so asking again inside the same bucket is
         // asking an identical question and accepting a different answer.
+        // Same helper the signal row is bucketed with, not a second copy of the
+        // arithmetic. There *were* two identical private implementations, and the
+        // comment in SafeSignalAsync already claimed they were one — which is the
+        // shape of a drift nobody would notice until the gate cache and the signal
+        // table disagreed about which bucket a decision belonged to.
         (string Symbol, string Side, DateTime Bucket) key =
-            (opts.Symbol, decision.Side, BucketOf(DateTime.UtcNow));
+            (opts.Symbol, decision.Side, SignalOutcomeRepository.BucketOf(DateTime.UtcNow));
 
         if (_declinedThisBucket.TryGetValue(key, out var cached))
         {
@@ -458,7 +464,14 @@ public sealed class TradingBotService(
 
         var verdict = await gate.ReviewAsync(candidate, ct);
 
-        if (!verdict.Approved)
+        // Only a refusal ON THE MERITS is cached. A failure is not a verdict, and
+        // caching one turned a single Ollama hiccup into a fifteen-minute blackout:
+        // the bucket was marked declined, every later cycle in that bucket served the
+        // cached failure without retrying, and the gate could be healthy again within
+        // seconds with nothing to notice it. The cache exists because the evidence
+        // cannot change inside a bucket — that argument applies to a judgement about
+        // the evidence, and not at all to the model having been unreachable.
+        if (!verdict.Approved && !verdict.Unavailable)
         {
             // Bounded by dropping everything older than the current bucket. The
             // loop runs for weeks, so an unpruned dictionary keyed on a timestamp
@@ -471,12 +484,12 @@ public sealed class TradingBotService(
 
         if (verdict.Approved || !opts.AllowEntryWithoutGate) return verdict;
 
-        // Refused for want of a reachable gate, and the operator has allowed trading
-        // to continue without one. Distinguished from a refusal on the merits: the
-        // gate having an opinion and the gate being absent are different facts, and
-        // only the second one may be overridden.
-        if (verdict.Reason.StartsWith("Gate unreachable", StringComparison.Ordinal)
-            || verdict.Reason.StartsWith("Gate call failed", StringComparison.Ordinal))
+        // The gate having an opinion and the gate being absent are different facts, and
+        // only the second one may be overridden. That distinction now travels on the
+        // decision as GateDecision.Unavailable rather than being recovered by matching
+        // the first two words of the reason string — which silently missed four of the
+        // six failure paths, including the empty answer that actually occurred.
+        if (verdict.Unavailable)
         {
             log.LogWarning(
                 "[Gate] {Reason} allow_entry_without_gate is set, so this entry proceeds " +
@@ -633,8 +646,8 @@ public sealed class TradingBotService(
         // no verdict, nothing. The heartbeat is stamped by TouchEval above, so the
         // loop went on reporting alive while this cycle did nothing at all.
         //
-        // "Nothing at all" understates it. Exits are managed here too: trailing stop,
-        // breakeven, max-hold. Skipping the cycle skips those, so a persistent price
+        // "Nothing at all" understates it. Exits are managed here too: the stop and
+        // target, breakeven, max-hold. Skipping the cycle skips those, so a persistent price
         // failure leaves open positions with no bot-side exit management. The
         // exchange-side OCO still holds — that is exactly why it is armed at the
         // exchange and not kept in this process — but the operator had no way to know
@@ -666,7 +679,7 @@ public sealed class TradingBotService(
             return;
         }
 
-        // ── 3. Update peak price for trailing stop tracking ─────────────────────
+        // ── 3. Update peak price (the breakeven stop reads it) ──────────────────
         foreach (var trade in openTrades)
         {
             var newPeak = trade.Side == "SHORT"
@@ -833,7 +846,8 @@ public sealed class TradingBotService(
                         if (signalId is { } refusedId)
                             await SafeRecordAsync(
                                 signals.StampGateAsync(
-                                    refusedId, gate.Verdict, gate.Reason, gateOptions.Model, 0, ct),
+                                    refusedId, gate.Verdict, gate.Reason, gateOptions.Model,
+                                    gate.LatencyMs, ct),
                                 "gate verdict on the signal row");
 
                         if (!gate.Approved)
@@ -885,7 +899,7 @@ public sealed class TradingBotService(
                                     signals.AttachTradeAsync(takenId, trade.Id, ct),
                                     "signal to trade link");
 
-                            // Recorded so the dashboard can show what sizing actually
+                            // Recorded so an operator can see what sizing actually
                             // produced, not only what it asked for. The venue's lot
                             // grid is applied inside the order engine, so this is the
                             // only place the surviving number is known.

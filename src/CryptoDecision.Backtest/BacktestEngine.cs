@@ -1,3 +1,4 @@
+using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.Backtest;
@@ -37,8 +38,29 @@ public sealed record PolicyConfig(
     int     AtrLookbackMinutes = FlowGeometryDefaults.AtrLookbackMinutes,
     int     AtrBarMinutes      = FlowGeometryDefaults.AtrBarMinutes,
     double  MaxHoldHours       = FlowGeometryDefaults.MaxHoldHours,
-    decimal AllInCostRate      = 0.0021m,
-    decimal FundingRatePerHour = 0.00005m)
+    decimal AllInCostRate      = TradingCosts.BacktestStressRoundTrip,
+    decimal FundingRatePerHour = 0.00005m,
+
+    // ── The two live entry rules this used to omit ──
+    //
+    // Both are in force in CrossVenueFlowStrategy and neither was modelled here, so the
+    // backtester was reporting on a policy nobody was running: it took every actionable
+    // signal at the next open, including the ones the bot refuses outright and the ones
+    // it waits for a better price on. Defaults match FlowStrategyOptions so an unflagged
+    // run simulates the deployed configuration.
+
+    /// <summary>
+    /// How far price must give back, in ATR multiples, before an actionable signal is
+    /// taken. 0 enters at the next open, which is what this engine did unconditionally.
+    /// </summary>
+    double  EntryPullbackAtr   = FlowGeometryDefaults.EntryPullbackAtr,
+
+    /// <summary>
+    /// Refuse a signal whose post-fee reward:risk is below this, before it becomes a
+    /// trade. Checked in the live strategy and not here, so the backtester was counting
+    /// trades the bot would have declined on arithmetic.
+    /// </summary>
+    decimal MinRewardRisk      = FlowGeometryDefaults.MinRewardRisk)
 {
     public string Describe() =>
         $"z≥{Signal.EnterZ:F2} venues≥{Signal.MinAgreeingVenues} " +
@@ -246,6 +268,57 @@ public static class BacktestEngine
             .GetRange(Math.Max(0, atrFrom), entryIndex - Math.Max(0, atrFrom));
 
         var vol = Volatility.Measure(lookback, config.AtrBarMinutes);
+        if (!vol.IsUsable) return null;   // the live strategy refuses on NO_VOLATILITY_READ
+
+        var isLong = verdict.Side == "LONG";
+
+        // ── Entry timing: wait for the move to give some of itself back ────────────
+        //
+        // Mirrors CrossVenueFlowStrategy. The reference is the close of the signal
+        // bucket's last minute, and the wait lasts exactly one bucket: live, the verdict
+        // is recomputed every 30 s from the newest CLOSED bucket, so throughout the
+        // following 15 minutes it is re-deriving the same verdict and still waiting. At
+        // the next boundary a new bucket closes and this signal is gone.
+        //
+        // Not modelling this was the larger of the two omissions: it changes both which
+        // signals become trades and the price they enter at, and the live rule exists
+        // precisely because entering at the next open buys the top of the move.
+        if (config.EntryPullbackAtr > 0)
+        {
+            var referenceAt = signalAt.AddMinutes(14);
+            var reference   = history.Candles.LastOrDefault(c => c.OpenTime <= referenceAt)?.Close;
+
+            // A missing reference candle fails open, as it does live: the pullback is an
+            // improvement on entry timing, not a safety check.
+            if (reference is { } refPrice && refPrice > 0m)
+            {
+                var giveBack = (decimal)(config.EntryPullbackAtr * vol.AtrPct) / 100m;
+                var limit    = isLong ? refPrice * (1m - giveBack) : refPrice * (1m + giveBack);
+
+                var filled = false;
+                for (var i = entryIndex; i < history.Candles.Count; i++)
+                {
+                    var c = history.Candles[i];
+                    if (c.OpenTime >= entryMinute.AddMinutes(15)) break;   // bucket elapsed
+
+                    if (isLong ? c.Low <= limit : c.High >= limit)
+                    {
+                        // Filled at the limit, not at the extreme of the candle that
+                        // touched it. The live bot polls, sees price at or past the
+                        // trigger and sends a market order, so it cannot do better than
+                        // the trigger on average — and assuming it caught the wick is
+                        // exactly the kind of optimism this engine exists to avoid.
+                        entryPrice  = limit;
+                        entryIndex  = i;
+                        entryCandle = c;
+                        filled      = true;
+                        break;
+                    }
+                }
+
+                if (!filled) return null;   // AWAITING_PULLBACK, and the signal expired
+            }
+        }
 
         var geometry = VolatilityStops.Resolve(
             entryPrice:         entryPrice,
@@ -255,7 +328,10 @@ public static class BacktestEngine
             stopAtrMultiple:    config.StopAtrMultiple,
             targetRiskMultiple: config.TargetRiskMultiple);
 
-        var isLong  = verdict.Side == "LONG";
+        // REWARD_RISK_TOO_LOW. Arithmetic the live strategy checks before the gate is
+        // asked anything, so a signal failing it never becomes a trade there either.
+        if (geometry.RewardRisk < config.MinRewardRisk) return null;
+
         var deadline = entryCandle.OpenTime.AddHours(config.MaxHoldHours);
 
         decimal exitPrice = entryCandle.Close;

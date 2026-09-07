@@ -4,8 +4,20 @@ using NpgsqlTypes;
 namespace CryptoDecision.Shared.Bot;
 
 /// <summary>
-/// Reads/writes the singleton bot_config row that bridges API ↔ Bot Worker.
-/// API writes commands (start/stop/config), Bot Worker polls and executes.
+/// Reads/writes the singleton bot_config row.
+///
+/// This used to bridge an API and the worker: the API wrote start/stop and the full
+/// configuration, the worker polled and executed. The API and its dashboard are
+/// gone, so the row is now written by hand and read by the worker — which is why
+/// StartBotAsync was removed rather than left as a method with no caller. Starting
+/// the bot is:
+///
+///     UPDATE bot_config SET enabled = true WHERE id = 1;
+///
+/// and the worker picks it up within one poll. Everything the worker still writes
+/// here — the heartbeat, the refusal trail, the last verdict, the sizing note — is
+/// written so it survives a container restart and can be read with SQL, which was
+/// always the reason and is not affected by there being no web page.
 /// </summary>
 public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
 {
@@ -16,15 +28,11 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             SELECT enabled, paper_mode, symbol, exchange, active_strategies,
                    capital_usd, max_open_trades_per_strategy, position_pct,
                    take_profit_pct, stop_loss_pct, cooldown_seconds, max_hold_minutes,
-                   daily_loss_limit_pct, eval_interval_seconds, use_trailing_stop,
-                   trailing_stop_pct,
+                   daily_loss_limit_pct, eval_interval_seconds,
                    COALESCE(use_breakeven_stop, TRUE) AS use_breakeven_stop,
                    COALESCE(breakeven_trigger_pct, 0.005) AS breakeven_trigger_pct,
                    COALESCE(use_dynamic_tp_sl, FALSE) AS use_dynamic_tp_sl,
-                   COALESCE(use_ai_filter, FALSE) AS use_ai_filter,
-                   COALESCE(min_ai_confidence, 0.500) AS min_ai_confidence,
                    COALESCE(use_ai_sizing, FALSE) AS use_ai_sizing,
-                   COALESCE(use_ai_agent,  FALSE) AS use_ai_agent,
                    COALESCE(require_ai_gate, TRUE) AS require_ai_gate,
                    COALESCE(allow_entry_without_gate, FALSE) AS allow_entry_without_gate,
                    COALESCE(max_entries_per_day, 6) AS max_entries_per_day,
@@ -62,15 +70,10 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             MaxHoldMinutes           = r.GetInt32(r.GetOrdinal("max_hold_minutes")),
             DailyLossLimitPct        = r.GetDecimal(r.GetOrdinal("daily_loss_limit_pct")),
             EvalIntervalSeconds      = r.GetInt32(r.GetOrdinal("eval_interval_seconds")),
-            UseTrailingStop          = r.GetBoolean(r.GetOrdinal("use_trailing_stop")),
-            TrailingStopPct          = r.GetDecimal(r.GetOrdinal("trailing_stop_pct")),
             UseBreakevenStop         = r.GetBoolean(r.GetOrdinal("use_breakeven_stop")),
             BreakevenTriggerPct      = r.GetDecimal(r.GetOrdinal("breakeven_trigger_pct")),
             UseDynamicTpSl           = r.GetBoolean(r.GetOrdinal("use_dynamic_tp_sl")),
-            UseAiFilter              = r.GetBoolean(r.GetOrdinal("use_ai_filter")),
-            MinAiConfidence          = r.GetDecimal(r.GetOrdinal("min_ai_confidence")),
             UseAiSizing              = r.GetBoolean(r.GetOrdinal("use_ai_sizing")),
-            UseAiAgent               = r.GetBoolean(r.GetOrdinal("use_ai_agent")),
             RequireAiGate            = r.GetBoolean(r.GetOrdinal("require_ai_gate")),
             AllowEntryWithoutGate    = r.GetBoolean(r.GetOrdinal("allow_entry_without_gate")),
             MaxEntriesPerDay         = r.GetInt32(r.GetOrdinal("max_entries_per_day")),
@@ -78,7 +81,7 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         };
     }
 
-    /// <summary>Update heartbeat + runtime stats so API/Dashboard can read bot status from DB (used by Bot worker).</summary>
+    /// <summary>Update heartbeat + runtime stats so the bot's state survives a restart and is readable with SQL.</summary>
     public async Task UpdateHeartbeatAsync(
         DateTime lastEvalAt, int openTradeCount, int totalTrades,
         decimal totalPnlUsd, int winCount, int lossCount,
@@ -109,66 +112,6 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Write start command + full config to DB for the Bot Worker to pick up (used by API).</summary>
-    public async Task StartBotAsync(BotOptions opts, CancellationToken ct = default)
-    {
-        const string sql = """
-            UPDATE bot_config
-            SET enabled                      = TRUE,
-                paper_mode                   = @paperMode,
-                symbol                       = @symbol,
-                exchange                     = @exchange,
-                active_strategies            = @strategies,
-                capital_usd                  = @capital,
-                max_open_trades_per_strategy = @maxTrades,
-                position_pct                 = @posPct,
-                take_profit_pct              = @tp,
-                stop_loss_pct                = @sl,
-                cooldown_seconds             = @cooldown,
-                max_hold_minutes             = @maxHold,
-                daily_loss_limit_pct         = @dailyLoss,
-                eval_interval_seconds        = @evalInterval,
-                use_trailing_stop            = @trailing,
-                trailing_stop_pct            = @trailingPct,
-                use_breakeven_stop           = @breakeven,
-                breakeven_trigger_pct        = @breakevenPct,
-                use_dynamic_tp_sl            = @dynamicTpSl,
-                use_ai_filter                = @aiFilter,
-                min_ai_confidence            = @aiConf,
-                use_ai_sizing                = @aiSizing,
-                use_ai_agent                 = @aiAgent,
-                updated_at                   = NOW()
-            WHERE id = 1
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("paperMode",    opts.PaperMode);
-        cmd.Parameters.AddWithValue("symbol",       opts.Symbol);
-        cmd.Parameters.AddWithValue("exchange",     opts.Exchange);
-        cmd.Parameters.AddWithValue("strategies",   opts.ActiveStrategies.ToArray());
-        cmd.Parameters.AddWithValue("capital",      NpgsqlDbType.Numeric, opts.CapitalUsd);
-        cmd.Parameters.AddWithValue("maxTrades",    opts.MaxOpenTradesPerStrategy);
-        cmd.Parameters.AddWithValue("posPct",       NpgsqlDbType.Numeric, opts.PositionPctOfCapital);
-        cmd.Parameters.AddWithValue("tp",           NpgsqlDbType.Numeric, opts.TakeProfitPct);
-        cmd.Parameters.AddWithValue("sl",           NpgsqlDbType.Numeric, opts.StopLossPct);
-        cmd.Parameters.AddWithValue("cooldown",     opts.CooldownSeconds);
-        cmd.Parameters.AddWithValue("maxHold",      opts.MaxHoldMinutes);
-        cmd.Parameters.AddWithValue("dailyLoss",    NpgsqlDbType.Numeric, opts.DailyLossLimitPct);
-        cmd.Parameters.AddWithValue("evalInterval", opts.EvalIntervalSeconds);
-        cmd.Parameters.AddWithValue("trailing",     opts.UseTrailingStop);
-        cmd.Parameters.AddWithValue("trailingPct",  NpgsqlDbType.Numeric, opts.TrailingStopPct);
-        cmd.Parameters.AddWithValue("breakeven",    opts.UseBreakevenStop);
-        cmd.Parameters.AddWithValue("breakevenPct", NpgsqlDbType.Numeric, opts.BreakevenTriggerPct);
-        cmd.Parameters.AddWithValue("dynamicTpSl",  opts.UseDynamicTpSl);
-        cmd.Parameters.AddWithValue("aiFilter",     opts.UseAiFilter);
-        cmd.Parameters.AddWithValue("aiConf",       NpgsqlDbType.Numeric, opts.MinAiConfidence);
-        cmd.Parameters.AddWithValue("aiSizing",     opts.UseAiSizing);
-        cmd.Parameters.AddWithValue("aiAgent",      opts.UseAiAgent);
-
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     /// <summary>
     /// Record that an entry was not placed, and why (used by Bot worker).
     ///
@@ -179,8 +122,8 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     /// only evidence buried in `docker compose logs`. The operator's first sign of
     /// trouble was noticing on the exchange that nothing had traded.
     ///
-    /// Written to bot_config because the API is a separate process and cannot read
-    /// the worker's memory. The counter resets on date change rather than being
+    /// Written to bot_config rather than kept in memory, so it survives the restart
+    /// that would otherwise erase it. The counter resets on date change rather than being
     /// cleared by anyone, so a quiet morning cannot hide behind yesterday's total.
     /// </summary>
     public async Task RecordEntryRefusalAsync(
@@ -202,8 +145,8 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
-        // Truncated: this lands on a dashboard line, and an exception message with a
-        // stack-trace tail would push the reason itself off the screen.
+        // Truncated: this is meant to be read at a glance, and an exception message with a
+        // stack-trace tail would bury the reason itself.
         cmd.Parameters.AddWithValue("reason",
             reason.Length > 300 ? reason[..300] : reason);
 
@@ -245,7 +188,7 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
 
         cmd.Parameters.AddWithValue("code",
             code.Length > 48 ? code[..48] : code);
-        // Same reasoning as the refusal reason: this is read on one dashboard line.
+        // Same reasoning as the refusal reason: it is meant to be read at a glance.
         cmd.Parameters.AddWithValue("detail",
             detail.Length > 400 ? detail[..400] : detail);
         cmd.Parameters.AddWithValue("z",      (decimal)Math.Round(aggregateZ, 4));
@@ -258,7 +201,7 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     /// <summary>
     /// Record what the last sizing decision actually produced (used by Bot worker).
     ///
-    /// The API can re-derive what <see cref="PositionSizer"/> would ask for, but not
+    /// <see cref="PositionSizer"/> can be re-run to see what sizing would ask for, but not
     /// what survived the venue's lot grid — so the number that was really sent has
     /// to come from the process that sent it.
     /// </summary>
@@ -285,160 +228,4 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Read current bot status from DB (written by Bot Worker heartbeat) (used by API).</summary>
-    public async Task<BotConfigStatus> GetStatusAsync(CancellationToken ct = default)
-    {
-        const string sql = """
-            SELECT enabled, paper_mode, symbol, capital_usd,
-                   last_heartbeat, last_eval_at, open_trade_count,
-                   total_trades, total_pnl_usd, win_count, loss_count,
-                   active_strategies, max_open_trades_per_strategy,
-                   position_pct, cooldown_seconds, eval_interval_seconds,
-                   take_profit_pct, stop_loss_pct,
-                   last_refusal_reason, last_refusal_at,
-                   COALESCE(refusal_count, 0) AS refusal_count,
-                   refusal_count_date, last_sizing_note,
-                   last_verdict_code, last_verdict_detail, last_verdict_z,
-                   last_verdict_agree, last_verdict_venues, last_verdict_at
-            FROM bot_config WHERE id = 1
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        await using var r    = await cmd.ExecuteReaderAsync(ct);
-        if (!await r.ReadAsync(ct))
-            return new BotConfigStatus();
-
-        // By name, for the same reason GetConfigAsync is: this method read by ordinal,
-        // so adding a column anywhere but the end renumbered every field after it and
-        // fed the wrong number into a status display. Names make that impossible and
-        // cost one dictionary lookup each.
-        decimal? Nullable(string column)
-        {
-            var i = r.GetOrdinal(column);
-            return r.IsDBNull(i) ? null : r.GetDecimal(i);
-        }
-
-        DateTime? Stamp(string column)
-        {
-            var i = r.GetOrdinal(column);
-            return r.IsDBNull(i) ? null : r.GetDateTime(i);
-        }
-
-        string? Text(string column)
-        {
-            var i = r.GetOrdinal(column);
-            return r.IsDBNull(i) ? null : r.GetString(i);
-        }
-
-        return new BotConfigStatus
-        {
-            Enabled              = r.GetBoolean(r.GetOrdinal("enabled")),
-            PaperMode            = r.GetBoolean(r.GetOrdinal("paper_mode")),
-            Symbol               = r.GetString(r.GetOrdinal("symbol")),
-            CapitalUsd           = r.GetDecimal(r.GetOrdinal("capital_usd")),
-            LastHeartbeat        = Stamp("last_heartbeat"),
-            LastEvalAt           = Stamp("last_eval_at"),
-            OpenTradeCount       = r.GetInt32(r.GetOrdinal("open_trade_count")),
-            TotalTrades          = r.GetInt32(r.GetOrdinal("total_trades")),
-            TotalPnlUsd          = r.GetDecimal(r.GetOrdinal("total_pnl_usd")),
-            WinCount             = r.GetInt32(r.GetOrdinal("win_count")),
-            LossCount            = r.GetInt32(r.GetOrdinal("loss_count")),
-            ActiveStrategies     = ((string[])r.GetValue(r.GetOrdinal("active_strategies"))).ToList(),
-            MaxOpenTradesPerStrategy = r.GetInt32(r.GetOrdinal("max_open_trades_per_strategy")),
-            PositionPctOfCapital = r.GetDecimal(r.GetOrdinal("position_pct")),
-            CooldownSeconds      = r.GetInt32(r.GetOrdinal("cooldown_seconds")),
-            EvalIntervalSeconds  = r.GetInt32(r.GetOrdinal("eval_interval_seconds")),
-            TakeProfitPct        = Nullable("take_profit_pct") ?? 0m,
-            StopLossPct          = Nullable("stop_loss_pct")   ?? 0m,
-            LastRefusalReason    = Text("last_refusal_reason"),
-            LastRefusalAt        = Stamp("last_refusal_at"),
-            RefusalCount         = r.GetInt32(r.GetOrdinal("refusal_count")),
-            RefusalCountDate     = r.IsDBNull(r.GetOrdinal("refusal_count_date"))
-                                       ? null
-                                       : DateOnly.FromDateTime(
-                                             r.GetDateTime(r.GetOrdinal("refusal_count_date"))),
-            LastSizingNote       = Text("last_sizing_note"),
-            LastVerdictCode      = Text("last_verdict_code"),
-            LastVerdictDetail    = Text("last_verdict_detail"),
-            LastVerdictZ         = Nullable("last_verdict_z"),
-            LastVerdictAgree     = r.IsDBNull(r.GetOrdinal("last_verdict_agree"))
-                                       ? null : (int)r.GetInt16(r.GetOrdinal("last_verdict_agree")),
-            LastVerdictVenues    = r.IsDBNull(r.GetOrdinal("last_verdict_venues"))
-                                       ? null : (int)r.GetInt16(r.GetOrdinal("last_verdict_venues")),
-            LastVerdictAt        = Stamp("last_verdict_at"),
-        };
-    }
-}
-
-/// <summary>Read-only status from bot_config (populated by Bot Worker heartbeat).</summary>
-public sealed class BotConfigStatus
-{
-    public bool         Enabled              { get; init; }
-    public bool         PaperMode            { get; init; } = true;
-    public string       Symbol               { get; init; } = "BTCUSDT";
-    public decimal      CapitalUsd           { get; init; } = 100m;
-    public DateTime?    LastHeartbeat        { get; init; }
-    public DateTime?    LastEvalAt           { get; init; }
-    public int          OpenTradeCount       { get; init; }
-    public int          TotalTrades          { get; init; }
-    public decimal      TotalPnlUsd          { get; init; }
-    public int          WinCount             { get; init; }
-    public int          LossCount            { get; init; }
-    public List<string> ActiveStrategies     { get; init; } = ["XVENUE_FLOW"];
-    public int          MaxOpenTradesPerStrategy { get; init; } = 5;
-    public decimal      PositionPctOfCapital { get; init; } = 0.10m;
-    public int          CooldownSeconds      { get; init; } = 120;
-    public int          EvalIntervalSeconds  { get; init; } = 30;
-    public decimal      TakeProfitPct        { get; init; }
-    public decimal      StopLossPct          { get; init; }
-
-    /// <summary>Why the last entry was not placed, or null if none has been refused.</summary>
-    public string?      LastRefusalReason    { get; init; }
-    public DateTime?    LastRefusalAt        { get; init; }
-
-    /// <summary>Entries refused on <see cref="RefusalCountDate"/>; see the property below.</summary>
-    public int          RefusalCount         { get; init; }
-    public DateOnly?    RefusalCountDate     { get; init; }
-    public string?      LastSizingNote       { get; init; }
-
-    // The strategy's current verdict, written every cycle. Distinct from the
-    // refusal trail above: that counts refusals that mattered (the daily cap, the
-    // gate declining a proposal), this is what the scorer said on the last pass —
-    // and it is the only thing that answers "how close was it".
-    public string?      LastVerdictCode      { get; init; }
-    public string?      LastVerdictDetail    { get; init; }
-    public decimal?     LastVerdictZ         { get; init; }
-    public int?         LastVerdictAgree     { get; init; }
-    public int?         LastVerdictVenues    { get; init; }
-    public DateTime?    LastVerdictAt        { get; init; }
-
-    /// <summary>
-    /// Refusals today, as opposed to whenever the counter was last touched.
-    ///
-    /// The stored counter resets lazily — on the next refusal after a date change —
-    /// so reading it raw would report yesterday's tally all morning until something
-    /// happened to reset it. That is precisely the kind of stale-but-plausible
-    /// number that gets trusted.
-    /// </summary>
-    public int RefusalCountToday =>
-        RefusalCountDate == DateOnly.FromDateTime(DateTime.UtcNow) ? RefusalCount : 0;
-
-    /// <summary>
-    /// Whether the bot worker is still alive, judged from its last heartbeat.
-    ///
-    /// The staleness window lives in <see cref="BotLiveness"/> — the bot's own health
-    /// check asks the same question of its in-process clock, and the two answers
-    /// disagreeing about whether the bot is alive would be worse than either alone.
-    /// </summary>
-    public bool IsWorkerAlive
-    {
-        get
-        {
-            if (!LastHeartbeat.HasValue) return false;
-
-            return DateTime.UtcNow - LastHeartbeat.Value
-                   < BotLiveness.StaleAfter(EvalIntervalSeconds);
-        }
-    }
 }
