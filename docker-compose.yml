@@ -355,35 +355,6 @@ services:
       retries: 3
       start_period: 60s
 
-  api:
-    build:
-      context: ./src
-      dockerfile: CryptoDecision.ApiService/Dockerfile
-    container_name: api
-    logging: *default-logging
-    mem_limit: 256m
-    profiles: ["ui"]
-    ports:
-      - "8080:8080"   # HTTP (health + Swagger)
-    environment:
-      ASPNETCORE_ENVIRONMENT:          Production
-      ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=${POSTGRES_DB:-crypto};Username=${POSTGRES_USER:-crypto};Password=${POSTGRES_PASS:-crypto};Pooling=true;MinPoolSize=2;MaxPoolSize=30;"
-      Kafka__BootstrapServers:         kafka:9092
-    depends_on:
-      kafka-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      db-migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
   # ── Ollama — local LLM runtime serving Qwen 2.5 7B ────────────────────────
   #
   # Resource note: qwen2.5:3b at Q4_K_M is ~1.9 GB on
@@ -503,30 +474,6 @@ services:
       - ollama_models:/root/.ollama
     restart: "no"
 
-
-  # ── Dashboard (nginx static + API proxy) ──────────────────────────────────
-  dashboard:
-    image: nginx:1.25-alpine
-    container_name: dashboard
-    logging: *default-logging
-    profiles: ["ui"]
-    ports:
-      - "8888:80"
-    volumes:
-      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./dashboard/index.html:/usr/share/nginx/html/index.html:ro
-      - ./dashboard/style.css:/usr/share/nginx/html/style.css:ro
-      - ./dashboard/app.js:/usr/share/nginx/html/app.js:ro
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 volumes:
   kafka_data:
   postgres_data:

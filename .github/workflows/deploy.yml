@@ -77,9 +77,6 @@ jobs:
           - service: bot
             context: ./src
             dockerfile: ./src/CryptoDecision.BotService/Dockerfile
-          - service: api
-            context: ./src
-            dockerfile: ./src/CryptoDecision.ApiService/Dockerfile
 
     steps:
       - uses: actions/checkout@v4

@@ -29,6 +29,3 @@ services:
 
   bot:
     image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/bot:${IMAGE_TAG:-latest}
-
-  api:
-    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/api:${IMAGE_TAG:-latest}

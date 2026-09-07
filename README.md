@@ -22,9 +22,15 @@ OKX     ┘                                              │  trades → flow_ba
                                               OKX  ─ post-only entry + OCO exit
 ```
 
-`api` and `dashboard` sit behind the `ui` profile and are not deployed. The Python
-prediction service that used to sit behind an `ensemble` profile has been deleted —
-nothing in the entry path read its output.
+`api` and `dashboard` have been deleted. They sat behind a `ui` profile and were never
+deployed; the API's only client was the dashboard, and of the six endpoints it served
+the dashboard called one. The Python prediction service that used to sit behind an
+`ensemble` profile is gone for the same reason — nothing in the entry path read its
+output.
+
+There is no UI. The bot is started, stopped and configured with SQL against
+`bot_config`, and everything it wants to tell you is in that row or in `bot_trades`,
+`signal_outcomes` and `flow_bars_15m`. See **Operating the bot** below.
 
 ## Services
 
@@ -36,8 +42,6 @@ nothing in the entry path read its output.
 | **Ollama** | ollama/ollama | Serves `qwen2.5:3b` for the entry gate | yes |
 | **Kafka** | KRaft, no ZooKeeper | Trade + kline transport | yes |
 | **PostgreSQL** | 16 | `trades` partitioned daily, 7-day retention | yes |
-| **API** | .NET 9 web | REST + SignalR | `ui` profile |
-| **Dashboard** | nginx | Static single-page UI | `ui` profile |
 
 Exchanges: **Binance, Bybit, OKX**. Each has its own WebSocket client and a normalizer
 onto one internal trade shape. Orders go to OKX only, and the price feed is deliberately
@@ -139,12 +143,6 @@ docker compose up -d
 Startup order is fixed and not incidental: `postgres → db-check → processor → db-migrate
 → bot`. `DatabaseInitializer` (in Processor) owns the base tables; `sql/*.sql` are
 increments on top of them, so running SQL first fails at `006`.
-
-Add the dashboard (http://localhost:8888):
-
-```bash
-docker compose --profile ui up -d
-```
 
 First boot pulls `qwen2.5:3b` (~1.9 GB) into a named volume. `OLLAMA_KEEP_ALIVE=-1` keeps
 it resident, which costs ~2.6 GB of RAM permanently for a model called a handful of times a
@@ -255,23 +253,44 @@ Six days settles nothing either way. `HYPOTHESES.md` records every parameter cha
 without proof, with its decision rule fixed in advance, because at four observations a day
 an untracked search will find whatever it is looking for.
 
-## API
+## Operating the bot
 
-Behind the `ui` profile. `GET /api/market-status/{symbol}`, `/dashboard/{symbol}`,
-`/volume/{symbol}`, `/whales/{symbol}`, `/klines/{symbol}`, `/momentum/{symbol}`, and
-`/api/bot/status` · `/pnl` · `/trades` · `/config` · `/debug`, plus
-`POST /api/bot/start` · `/stop`.
+There is no API and no UI. `bot_config` is the control surface — one row, id 1.
 
-SignalR hub at `/hubs/market` pushes four messages: `ReceiveVolumeAnalysis`,
-`ReceiveWhaleAlert`, `ReceiveMarketStatus` and `ReceiveBotStatus`.
+```sql
+-- start / stop
+UPDATE bot_config SET enabled = true  WHERE id = 1;
+UPDATE bot_config SET enabled = false WHERE id = 1;
+
+-- is it alive, and what did it last decide?
+SELECT enabled, paper_mode, symbol, last_heartbeat, last_eval_at,
+       open_trade_count, total_trades, total_pnl_usd,
+       last_verdict_code, last_verdict_detail, last_verdict_at,
+       last_refusal_reason, last_refusal_at, refusal_count,
+       last_sizing_note
+FROM bot_config WHERE id = 1;
+```
+
+The worker picks up `enabled` within one poll (`eval_interval_seconds`, default 30) and
+refuses to start on a configuration `RiskEngine.Validate` calls impossible — it logs why
+and re-checks every 30 s, so fixing the row is enough.
+
+A tripped circuit breaker writes `enabled = false` itself and does **not** re-arm on its
+own. That is deliberate: re-arming is the `UPDATE` above, run by a person who has looked
+at the trades first.
+
+Everything else worth reading is in `bot_trades` (what was traded and why),
+`signal_outcomes` (every signal including the refused ones, and what the market did next),
+and `flow_bars_15m` (the evidence the scorer runs on). `scripts/gate-report.sql` and
+`scripts/z.sh` are the two queries used most.
 
 ## Known constraints
 
-**The API has no authentication.** Anything that can reach it can start or stop the bot.
-Acceptable on a private LAN; not acceptable exposed. On the EC2 host `5432` and `8080` are
-published in compose but not reachable from outside — use an SSH tunnel rather than opening
-them.
+**Postgres is the control surface and has no application-level auth.** Anything that can
+reach `5432` can start the bot. On the EC2 host `5432` is published in compose but not
+reachable from outside — use an SSH tunnel rather than opening it.
 
 **OKX aggregates same-side positions** on one instrument, so two bot trades of 0.08 show in
 the OKX app as one 0.16 position at the weighted average entry. Both views are correct and
-per-trade reduce-only OCOs sum correctly, but nothing in the UI explains it.
+per-trade reduce-only OCOs sum correctly, but the OKX app cannot show you the split —
+`bot_trades` is where the individual positions live.
