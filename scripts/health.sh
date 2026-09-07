@@ -4,7 +4,7 @@
 #     bash ~/cryptodecision/scripts/health.sh
 #
 # Every bug on this bot that ever mattered left the containers healthy and the
-# dashboard green. So this deliberately does not ask "is anything crashed?" --
+# health endpoint green. So this deliberately does not ask "is anything crashed?" --
 # it asks, for each thing that must be true, whether it is actually true right
 # now, and prints FAIL when it is not.
 #

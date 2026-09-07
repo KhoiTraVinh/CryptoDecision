@@ -170,6 +170,42 @@ var host = builder.Build();
 // about it, and it should be answerable from the first line of the log rather
 // than inferred from the absence of order messages later.
 var startupLog = host.Services.GetRequiredService<ILogger<Program>>();
+
+// ─── State the entry rule once, at startup ────────────────────────────────────
+//
+// Because a mistyped EntryMode binds to the enum's default and the bot then runs
+// ZScore while appsettings says otherwise — silently, with no error, for however
+// long the test lasts. That is the exact failure shape this codebase keeps paying
+// for, so the active rule is asserted in the log rather than assumed from config.
+var flowOpts = host.Services.GetRequiredService<FlowStrategyOptions>();
+
+startupLog.LogWarning(
+    "[Startup] Entry rule is {Mode}. {Detail}",
+    flowOpts.Signal.EntryMode,
+    flowOpts.Signal.EntryMode switch
+    {
+        FlowEntryMode.OfiMagnitude =>
+            $"|OFI| >= {flowOpts.Signal.MinAbsOfi:F2} over {flowOpts.Signal.MagnitudeBars} closed " +
+            $"bucket(s), direction from its sign. EnterZ, VenueAgreementZ, MinAgreeingVenues and " +
+            $"SufficientVenue are NOT read in this mode.",
+        _ =>
+            $"|aggregate z| >= {flowOpts.Signal.EnterZ:F2} over {flowOpts.Signal.SignalBars} " +
+            $"bucket(s), plus {flowOpts.Signal.MinAgreeingVenues} venues at " +
+            $"z >= {flowOpts.Signal.VenueAgreementZ:F2} or {flowOpts.Signal.SufficientVenue} alone.",
+    });
+
+// The pullback wait and a fast-entry rule work against each other: the magnitude
+// rule exists to cut the lag to one bucket, and then the pullback adds an open-ended
+// wait for a price that may never come. Six of eight waits expired unfilled on
+// 2026-09-06 and cost that day's signals.
+if (flowOpts.Signal.EntryMode == FlowEntryMode.OfiMagnitude && flowOpts.EntryPullbackAtr > 0)
+    startupLog.LogWarning(
+        "[Startup] EntryPullbackAtr is {Pullback:F2} while the entry rule is OfiMagnitude. " +
+        "These fight each other — the rule cuts entry lag to one bucket and the pullback then " +
+        "waits an unbounded time for a retracement. Set FlowStrategy:EntryPullbackAtr to 0 " +
+        "unless the interaction is what is being tested.",
+        flowOpts.EntryPullbackAtr);
+
 var liveRefusal = okxOptions.DescribeRefusal();
 
 if (liveRefusal is not null)

@@ -153,6 +153,71 @@ namespace CryptoDecision.Shared.Signals;
 /// and with no ceiling the brief states plainly that the ground is unavailable. The
 /// gate refused eight entries in one day on that ground at 2.8-13.2 bps.
 /// </param>
+/// <summary>
+/// Which rule turns flow into an entry.
+/// </summary>
+public enum FlowEntryMode
+{
+    /// <summary>
+    /// The original rule: the aggregate imbalance must be statistically unusual
+    /// against its own trailing distribution, and venues must independently agree.
+    ///
+    /// Its measured defect is latency, not direction. The statistic is a sum over
+    /// <see cref="FlowSignalOptions.SignalBars"/> buckets — an hour at the default 4 —
+    /// so it reports what happened over the past hour, not what is happening. Measured
+    /// on 440 buckets: aggregate z correlates +0.467 with the PRECEDING hour's return
+    /// and −0.116 with the following one. Observed live on 2026-09-07: price fell 1.5%
+    /// in 45 minutes while z read +1.01, because the one-hour window still held the
+    /// buying from before the fall.
+    /// </summary>
+    ZScore = 0,
+
+    /// <summary>
+    /// Enter on the RAW magnitude of the aggregate imbalance in the single bucket
+    /// that just closed: <c>|OFI| ≥ MinAbsOfi</c>, direction from its sign.
+    ///
+    /// Two things it deliberately drops, and why
+    /// -----------------------------------------
+    /// <b>The trailing sum.</b> ZScore adds up SignalBars buckets — an hour at the
+    /// default — so its centre of mass is 30-45 minutes behind the market. This reads
+    /// one closed bucket, so the lag is 0-15 minutes and nothing else.
+    ///
+    /// <b>The standardisation.</b> Dividing by a trailing MAD converts "the imbalance
+    /// is large" into "the imbalance is unusual for recently", and those are not the
+    /// same claim. A 0.30 imbalance during a volatile stretch has a large MAD under
+    /// it and scores a small z, so ZScore rejects exactly the readings that are big in
+    /// absolute terms. That is the mechanism behind the thing this bot kept doing:
+    /// standing aside through real moves and entering on quiet-period noise.
+    ///
+    /// What the measurement actually says — read this before trusting a result
+    /// ---------------------------------------------------------------------
+    /// Selected on out-of-sample performance across a 22-cell grid of |OFI| against
+    /// volume-ratio thresholds. At the chosen 0.30, forward return in the signal's
+    /// direction at 4 hours:
+    ///
+    ///     all        n=141   +0.174%
+    ///     out-of-s.  n=82    +0.134%   hit 50.0%   t=1.08
+    ///
+    /// and the finer grid rises monotonically with the threshold out-of-sample
+    /// (+0.044 at 0.20 → +0.181 at 0.35), which is the shape a real dose-response has
+    /// and is why this was picked over the alternatives.
+    ///
+    /// But it is NOT significant and the caveats are load-bearing. The hit rate is
+    /// ~50% at every threshold — below the 52.6% you get from going long at random —
+    /// so the positive mean comes from magnitude asymmetry, not from being right more
+    /// often. t never exceeds 1.32, and even that is inflated because 15-minute
+    /// signals against a 4-hour horizon share up to 16 overlapping observations. And
+    /// splitting by direction at 0.30, SHORT ran +0.409% (71.4% hit) in-sample and
+    /// −0.214% (32.4%) out-of-sample while LONG did the reverse — the two sides swap
+    /// which half they work in, which is what noise looks like.
+    ///
+    /// It is being paper-traded because the operator judged 7 days of information a
+    /// fair price for finding out, and paper risks none. Treat the result as the
+    /// experiment, not the expectation.
+    /// </summary>
+    OfiMagnitude = 1,
+}
+
 public sealed record FlowSignalOptions(
     int     SignalBars                    = 4,
     int     BaselineBars                  = 44,
@@ -169,7 +234,37 @@ public sealed record FlowSignalOptions(
     // already cost this repository three parameters.
     double  MaxDispersionBps              = 0.0,
     double  VenueAgreementZ               = 1.5,
-    string? SufficientVenue               = "BINANCE")
+    string? SufficientVenue               = "BINANCE",
+
+    /// <summary>
+    /// Which rule decides an entry. See <see cref="FlowEntryMode"/>.
+    ///
+    /// Defaults to ZScore so nothing changes unless it is configured, and so the two
+    /// modes can be compared on the same history rather than one replacing the other
+    /// in a way that cannot be undone with a config edit.
+    /// </summary>
+    FlowEntryMode EntryMode               = FlowEntryMode.ZScore,
+
+    /// <summary>
+    /// Minimum absolute aggregate OFI for <see cref="FlowEntryMode.OfiMagnitude"/>,
+    /// in OFI units, which run [-1, +1].
+    ///
+    /// 0.30 was selected on out-of-sample performance, not in-sample — see the mode's
+    /// own documentation for the numbers and for why they do not amount to proof. At
+    /// 0.30 the rule fires on about 8 buckets a day, which the one-position limit will
+    /// bind well before the daily entry cap does.
+    ///
+    /// Below ~0.20 it degrades toward the unconditional base rate; above ~0.40 the
+    /// sample thins to nothing (10 buckets in 18 days at 0.50) and the sign reverses,
+    /// which is a sample-size artifact rather than a ceiling.
+    /// </summary>
+    double  MinAbsOfi                     = 0.30,
+
+    /// <summary>
+    /// Buckets summed for the magnitude reading. 1 is the single closed bucket, which
+    /// is the entire point of the mode: every extra bucket adds 15 minutes of lag back.
+    /// </summary>
+    int     MagnitudeBars                 = 1)
 {
     /// <summary>Buckets the scorer needs before it can produce anything at all.</summary>
     public int MinimumBars => SignalBars + BaselineBars;
@@ -292,8 +387,140 @@ public static class CrossVenueFlowScorer
         IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
         FlowSignalOptions options)
     {
+        // Dispatched here rather than at the call sites, so the live strategy and the
+        // backtester cannot end up on different rules. There is exactly one place that
+        // decides what an entry is, and both read it.
+        var prepared = Prepare(barsByVenue, options);
+        if (prepared.Abstained is { } early) return early;
+
+        return options.EntryMode switch
+        {
+            FlowEntryMode.OfiMagnitude => ScoreMagnitude(barsByVenue, options, prepared),
+            _                          => ScoreZ(barsByVenue, options, prepared),
+        };
+    }
+
+    // ── Mode: OfiMagnitude ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The raw-magnitude rule. See <see cref="FlowEntryMode.OfiMagnitude"/>.
+    ///
+    /// Recomputes the aggregate over the last <see cref="FlowSignalOptions.MagnitudeBars"/>
+    /// buckets rather than reusing <see cref="Prepared.AggregateOfi"/>, because that one
+    /// is summed over SignalBars — an hour — and the whole purpose here is to not do
+    /// that. The z from Prepared is still carried onto the verdict: it costs nothing,
+    /// it lands in signal_outcomes, and it is what lets the two modes be compared
+    /// afterwards on the same rows rather than on separate runs.
+    /// </summary>
+    private static FlowVerdict ScoreMagnitude(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        FlowSignalOptions options,
+        Prepared p)
+    {
+        var participating = p.Participating;
+        var bars          = Math.Max(1, options.MagnitudeBars);
+
+        // Volume-weighted across participating venues, on the recent buckets only.
+        // Summing raw volumes rather than averaging ratios is what makes this the
+        // market's imbalance and not the mean of three venues' opinions of it.
+        decimal buy = 0m, sell = 0m;
+        var counted = 0;
+
+        foreach (var vote in participating)
+        {
+            if (!barsByVenue.TryGetValue(vote.Exchange, out var venueBars)) continue;
+            if (venueBars.Count < bars) continue;
+
+            foreach (var bar in venueBars.Skip(venueBars.Count - bars))
+            {
+                buy  += bar.BuyVolumeUsd;
+                sell += bar.SellVolumeUsd;
+            }
+            counted++;
+        }
+
+        var total = buy + sell;
+
+        if (counted == 0 || total <= 0m)
+            return FlowVerdict.Abstain(
+                "NO_RECENT_VOLUME",
+                $"No participating venue had {bars} closed bucket(s) with any volume, so " +
+                "there is no imbalance to measure.",
+                p.Votes, p.AggregateOfi, p.AggregateZ, 0, participating.Count, p.DispersionBps);
+
+        var ofi       = (double)((buy - sell) / total);
+        var direction = Math.Sign(ofi);
+
+        if (direction == 0 || Math.Abs(ofi) < options.MinAbsOfi)
+            return FlowVerdict.Abstain(
+                "OFI_BELOW_MAGNITUDE",
+                $"Aggregate OFI {ofi:+0.000;-0.000} over the last {bars} bucket(s) is inside " +
+                $"±{options.MinAbsOfi:F2}. ${total / 1_000_000m:F2}M traded, " +
+                $"{(double)(buy / total):P1} of it buying.",
+                p.Votes, ofi, p.AggregateZ, 0, participating.Count, p.DispersionBps);
+
+        // Which venues leaned the same way. Not a gate — this rule is on the
+        // aggregate, deliberately, because requiring per-venue agreement is what made
+        // ZScore fire on 26% of buckets and enter on almost none of them. Recorded so
+        // "did the venues actually agree?" stays answerable from signal_outcomes.
+        var finalVotes = p.Votes
+            .Select(v => v with { Agreed = v.Participated && Math.Sign(v.Ofi) == direction })
+            .ToList();
+
+        var agreeing = finalVotes.Count(v => v.Agreed);
+
+        // Dispersion keeps its veto. It is off by default (MaxDispersionBps = 0) but
+        // it is a statement about the venues disagreeing on PRICE, which is orthogonal
+        // to how the direction was chosen and stays valid under either mode.
+        if (options.MaxDispersionBps > 0.0 && p.DispersionBps > options.MaxDispersionBps)
+            return FlowVerdict.Abstain(
+                "VENUE_DISPERSION_TOO_WIDE",
+                $"OFI {ofi:+0.000;-0.000} cleared ±{options.MinAbsOfi:F2} but cross-venue VWAP " +
+                $"dispersion is {p.DispersionBps:F1} bps, over the {options.MaxDispersionBps:F1} " +
+                "bps ceiling — thin books or a move already underway.",
+                finalVotes, ofi, p.AggregateZ, agreeing, participating.Count, p.DispersionBps);
+
+        return new FlowVerdict(
+            Actionable:          true,
+            Side:                direction > 0 ? "LONG" : "SHORT",
+            AggregateOfi:        ofi,
+            AggregateZ:          p.AggregateZ,
+            AgreeingVenues:      agreeing,
+            ParticipatingVenues: participating.Count,
+            DispersionBps:       p.DispersionBps,
+            AbstainCode:         "",
+            Reason:              $"OFI {ofi:+0.000;-0.000} over {bars} bucket(s) past " +
+                                 $"±{options.MinAbsOfi:F2} on ${total / 1_000_000m:F2}M " +
+                                 $"({agreeing}/{participating.Count} venues leaning the same way, " +
+                                 $"z={p.AggregateZ:F2} for reference).",
+            Votes:               finalVotes);
+    }
+
+    /// <summary>
+    /// Everything both modes need: per-venue quality gates, the participating set,
+    /// dispersion, and the aggregate.
+    ///
+    /// Shared because the *quality* floors are not what the two modes disagree about.
+    /// A venue that printed $8k in fifteen minutes, or whose imbalance is one order,
+    /// has nothing to say under either rule — and duplicating those checks per mode is
+    /// how the two would drift into admitting different venues.
+    /// </summary>
+    private readonly record struct Prepared(
+        FlowVerdict?           Abstained,
+        List<VenueVote>        Votes,
+        List<VenueVote>        Participating,
+        double                 DispersionBps,
+        double                 AggregateOfi,
+        double                 AggregateZ);
+
+    private static Prepared Prepare(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        FlowSignalOptions options)
+    {
         if (barsByVenue.Count == 0)
-            return FlowVerdict.Abstain("NO_VENUES", "No venue supplied any flow buckets.");
+            return new Prepared(
+                FlowVerdict.Abstain("NO_VENUES", "No venue supplied any flow buckets."),
+                [], [], 0.0, 0.0, 0.0);
 
         var votes = new List<VenueVote>(barsByVenue.Count);
 
@@ -306,11 +533,11 @@ public static class CrossVenueFlowScorer
         var participating = votes.Where(v => v.Participated).ToList();
 
         if (participating.Count == 0)
-            return FlowVerdict.Abstain(
+            return new Prepared(FlowVerdict.Abstain(
                 "NO_VENUE_QUALIFIED",
                 "No venue met the volume, print-count and concentration floors. " +
                 $"[{DescribeExclusions(votes)}]",
-                votes);
+                votes), votes, participating, 0.0, 0.0, 0.0);
 
         // A single venue cannot corroborate itself — unless it is the venue the
         // operator has designated as sufficient on its own. That exception is what
@@ -323,14 +550,14 @@ public static class CrossVenueFlowScorer
                    v.Exchange, options.SufficientVenue, StringComparison.OrdinalIgnoreCase));
 
         if (!sufficientParticipates && participating.Count < options.MinAgreeingVenues)
-            return FlowVerdict.Abstain(
+            return new Prepared(FlowVerdict.Abstain(
                 "TOO_FEW_VENUES",
                 $"Only {participating.Count} venue(s) qualified but " +
                 $"{options.MinAgreeingVenues} must agree without " +
                 $"{options.SufficientVenue ?? "a sufficient venue"}. " +
                 $"[{DescribeExclusions(votes)}]",
                 votes,
-                participating: participating.Count);
+                participating: participating.Count), votes, participating, 0.0, 0.0, 0.0);
 
         // ── Cross-venue price dispersion ──────────────────────────────────────
         var dispersionBps = DispersionBps(participating.Select(v => v.Exchange), barsByVenue, options);
@@ -352,6 +579,23 @@ public static class CrossVenueFlowScorer
         // dispersion already contains.
         var aggregateZ = AggregateZ(
             participating.Select(v => v.Exchange).ToList(), barsByVenue, options, aggregateOfi);
+
+        return new Prepared(
+            null, votes, participating, dispersionBps, aggregateOfi, aggregateZ);
+    }
+
+    // ── Mode: ZScore ──────────────────────────────────────────────────────────
+
+    private static FlowVerdict ScoreZ(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        FlowSignalOptions options,
+        Prepared p)
+    {
+        var votes         = p.Votes;
+        var participating = p.Participating;
+        var dispersionBps = p.DispersionBps;
+        var aggregateOfi  = p.AggregateOfi;
+        var aggregateZ    = p.AggregateZ;
 
         var direction = Math.Sign(aggregateZ);
 
@@ -723,4 +967,21 @@ public static class FlowGeometryDefaults
 
     /// <summary>Hours a position may be held before it is closed regardless.</summary>
     public const double MaxHoldHours = 12.0;
+
+    /// <summary>
+    /// ATR multiples price must give back before an actionable signal is taken.
+    /// 0 enters at market. See CrossVenueFlowStrategy, where it is applied, and H4 in
+    /// HYPOTHESES.md — it was read off 28 paper trades and is not proven.
+    /// </summary>
+    public const double EntryPullbackAtr = 0.75;
+
+    /// <summary>
+    /// Minimum post-fee reward:risk for a signal to become a trade.
+    ///
+    /// Here rather than only on FlowStrategyOptions because the backtester needs the
+    /// same number and cannot see BotService. Every other parameter in this class is in
+    /// it for that reason: a literal duplicated into the backtester is how a
+    /// configuration gets certified that nobody was running.
+    /// </summary>
+    public const decimal MinRewardRisk = 1.2m;
 }

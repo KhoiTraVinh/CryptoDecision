@@ -35,12 +35,46 @@ public sealed record EntryCandidate(
     int           MaxOpenPositions    = 0);
 
 /// <summary>What the gate decided, and why, in its own words.</summary>
-public sealed record GateDecision(bool Approved, string Verdict, string Reason)
+/// <param name="Unavailable">
+/// True when the gate did not review this candidate at all — unreachable, timed out,
+/// empty, unparseable, or an answer that was neither APPROVE nor SKIP. False when the
+/// model actually read the brief and said no.
+///
+/// This is a field rather than something inferred from <see cref="Reason"/> because it
+/// used to be inferred from <see cref="Reason"/>, and that was a live defect.
+/// TradingBotService applied <c>allow_entry_without_gate</c> only to reasons starting
+/// with "Gate unreachable" or "Gate call failed". Production had that flag ON, the model
+/// returned an empty answer at 2026-09-06 03:48 UTC, "Gate returned an empty answer."
+/// matched neither prefix — and the entry was blocked anyway, by a rule the operator had
+/// explicitly switched off. The two malformed-JSON paths and the unrecognised-decision
+/// path had the same hole.
+///
+/// A refusal on the merits can never be overridden. That is the veto, and it stays.
+/// </param>
+/// <param name="LatencyMs">
+/// How long the model took, in milliseconds. Zero when it was never asked.
+///
+/// Carried so <c>signal_outcomes.gate_latency_ms</c> stops being written as a literal
+/// 0 — which it was for all 34 rows on record, making "what does the gate cost per
+/// call" unanswerable from the one table built to answer questions about the gate.
+/// </param>
+public sealed record GateDecision(
+    bool Approved, string Verdict, string Reason, bool Unavailable = false, int LatencyMs = 0)
 {
     public static GateDecision Approve(string reason)  => new(true,  "APPROVED", reason);
     public static GateDecision Degraded(string reason) => new(true,  "APPROVED_DEGRADED", reason);
-    public static GateDecision Refuse(string reason)   => new(false, "REFUSED", reason);
     public static GateDecision Ungated()               => new(true,  "NOT_GATED", "Gating is off.");
+
+    /// <summary>The model read the brief and declined. Never overridable.</summary>
+    public static GateDecision Refuse(string reason) => new(false, "REFUSED", reason);
+
+    /// <summary>
+    /// The gate could not produce a verdict. Still a refusal — every failure mode
+    /// resolves to "no entry", which costs an opportunity and never a position — but one
+    /// that <c>allow_entry_without_gate</c> is allowed to override, because that flag
+    /// exists for exactly this case.
+    /// </summary>
+    public static GateDecision Unreviewed(string reason) => new(false, "REFUSED", reason, true);
 }
 
 public interface IEntryGate
@@ -171,7 +205,7 @@ public sealed class AiEntryGate(
     public async Task<GateDecision> ReviewAsync(EntryCandidate candidate, CancellationToken ct)
     {
         if (!await client.IsAvailableAsync(options.Model, ct))
-            return GateDecision.Refuse(
+            return GateDecision.Unreviewed(
                 $"Gate unreachable: Ollama is not serving {options.Model}.");
 
         var examples = await RetrieveSimilarAsync(candidate, ct);
@@ -195,16 +229,18 @@ public sealed class AiEntryGate(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return GateDecision.Refuse($"Gate call failed: {ex.Message}");
+            return GateDecision.Unreviewed($"Gate call failed: {ex.Message}");
         }
 
+        var latencyMs = (int)clock.ElapsedMilliseconds;
+
         log.LogDebug("[Gate] Model answered in {Ms} ms with {Count} retrieved case(s) in the brief.",
-            clock.ElapsedMilliseconds, examples.Count);
+            latencyMs, examples.Count);
 
         if (string.IsNullOrWhiteSpace(turn?.Content))
-            return GateDecision.Refuse("Gate returned an empty answer.");
+            return GateDecision.Unreviewed("Gate returned an empty answer.") with { LatencyMs = latencyMs };
 
-        return Parse(turn.Content, candidate);
+        return Parse(turn.Content, candidate) with { LatencyMs = latencyMs };
     }
 
     /// <summary>
@@ -387,7 +423,7 @@ public sealed class AiEntryGate(
         var end   = content.LastIndexOf('}');
 
         if (start < 0 || end <= start)
-            return GateDecision.Refuse(
+            return GateDecision.Unreviewed(
                 $"Gate answer was not JSON: \"{Truncate(content)}\"");
 
         JsonNode? node;
@@ -397,7 +433,7 @@ public sealed class AiEntryGate(
         }
         catch (JsonException ex)
         {
-            return GateDecision.Refuse($"Gate answer was malformed JSON: {ex.Message}");
+            return GateDecision.Unreviewed($"Gate answer was malformed JSON: {ex.Message}");
         }
 
         var decision = node?["decision"]?.ToString()?.Trim().ToUpperInvariant() ?? "";
@@ -438,7 +474,7 @@ public sealed class AiEntryGate(
                 // guessed at. A model that replied "MAYBE" has not approved the trade,
                 // and coercing an ambiguous answer into an approval is how a safety
                 // check turns into a formality.
-                return GateDecision.Refuse(
+                return GateDecision.Unreviewed(
                     $"Gate gave an unrecognised decision \"{decision}\" — treating as no. " +
                     $"Reason field said: {Truncate(reason)}");
         }
