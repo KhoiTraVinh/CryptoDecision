@@ -423,19 +423,37 @@ public static class CrossVenueFlowScorer
         // Volume-weighted across participating venues, on the recent buckets only.
         // Summing raw volumes rather than averaging ratios is what makes this the
         // market's imbalance and not the mean of three venues' opinions of it.
+        //
+        // Each venue's own imbalance is kept over THE SAME window, which is the whole
+        // point of doing it here rather than reusing VenueVote.Ofi. That field is
+        // summed over SignalBars — four buckets — and comparing its sign against a
+        // one-bucket direction is comparing two different hours. It produced
+        // signal_outcomes rows reading "OFI +0.314, 0/3 venues agree", which is not
+        // merely wrong but arithmetically impossible: a volume-weighted sum cannot be
+        // positive when every component is negative. The entry decision never used
+        // the agreement count in this mode, so nothing was mistraded — but the column
+        // is the one the experiment is judged on.
         decimal buy = 0m, sell = 0m;
         var counted = 0;
+        var venueOfi = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var vote in participating)
         {
             if (!barsByVenue.TryGetValue(vote.Exchange, out var venueBars)) continue;
             if (venueBars.Count < bars) continue;
 
+            decimal vBuy = 0m, vSell = 0m;
             foreach (var bar in venueBars.Skip(venueBars.Count - bars))
             {
-                buy  += bar.BuyVolumeUsd;
-                sell += bar.SellVolumeUsd;
+                vBuy  += bar.BuyVolumeUsd;
+                vSell += bar.SellVolumeUsd;
             }
+
+            var vTotal = vBuy + vSell;
+            if (vTotal > 0m) venueOfi[vote.Exchange] = (double)((vBuy - vSell) / vTotal);
+
+            buy  += vBuy;
+            sell += vSell;
             counted++;
         }
 
@@ -459,12 +477,24 @@ public static class CrossVenueFlowScorer
                 $"{(double)(buy / total):P1} of it buying.",
                 p.Votes, ofi, p.AggregateZ, 0, participating.Count, p.DispersionBps);
 
-        // Which venues leaned the same way. Not a gate — this rule is on the
-        // aggregate, deliberately, because requiring per-venue agreement is what made
-        // ZScore fire on 26% of buckets and enter on almost none of them. Recorded so
-        // "did the venues actually agree?" stays answerable from signal_outcomes.
+        // Which venues leaned the same way, over the magnitude window. Not a gate —
+        // this rule is on the aggregate, deliberately, because requiring per-venue
+        // agreement is what made ZScore fire on 26% of buckets and enter on almost
+        // none of them. Recorded so "did the venues actually agree?" stays answerable
+        // from signal_outcomes.
+        //
+        // Ofi is overwritten with the magnitude-window value so the vote describes the
+        // reading this mode actually used. Z and OfiMedian are left as they came from
+        // EvaluateVenue — they are the ZScore statistic over SignalBars, carried along
+        // as the reference that lets the two modes be compared on the same rows.
         var finalVotes = p.Votes
-            .Select(v => v with { Agreed = v.Participated && Math.Sign(v.Ofi) == direction })
+            .Select(v =>
+            {
+                if (!venueOfi.TryGetValue(v.Exchange, out var o))
+                    return v with { Agreed = false };
+
+                return v with { Ofi = o, Agreed = v.Participated && Math.Sign(o) == direction };
+            })
             .ToList();
 
         var agreeing = finalVotes.Count(v => v.Agreed);
