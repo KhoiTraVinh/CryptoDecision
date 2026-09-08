@@ -181,7 +181,14 @@ public sealed class DatabaseInitializer(
                         -- What the last real sizing decision produced. The dashboard
                         -- can compute what sizing *would* ask for, but only the bot
                         -- knows what survived the exchange's lot grid.
-                        ADD COLUMN IF NOT EXISTS last_sizing_note    TEXT;
+                        ADD COLUMN IF NOT EXISTS last_sizing_note    TEXT,
+                        -- Concurrent positions per side. 0 keeps the old behaviour;
+                        -- 1 with max_open_trades_per_strategy = 2 means one LONG and
+                        -- one SHORT may be held but never two of either. Mirrored
+                        -- from sql/030 so a preserved volume self-heals on boot
+                        -- rather than failing the whole config read on a missing
+                        -- column.
+                        ADD COLUMN IF NOT EXISTS max_open_per_side   INTEGER NOT NULL DEFAULT 0;
                 END IF;
             END
             $$;

@@ -826,6 +826,44 @@ public sealed class TradingBotService(
                         var signalId = await SafeSignalAsync(
                             opts, strat, decision, currentPrice.Value);
 
+                        // ── One position per side ──────────────────────────────
+                        //
+                        // Checked here rather than with the concurrency limit above,
+                        // because the side is not known until the strategy has
+                        // decided — and checked BEFORE the gate, because a gate call
+                        // costs 25-42 seconds of inference and there is no point
+                        // spending it on an entry that cannot be placed.
+                        //
+                        // The signal is still recorded first. A signal the position
+                        // book refused is exactly the one worth counting: it is the
+                        // measurement of what the constraint costs, and leaving it
+                        // out would make the rule look free. Its row keeps
+                        // gate_decision NULL, so "never reached the gate" is one
+                        // predicate away.
+                        var sameSide = stratTrades.Count(t =>
+                            string.Equals(t.Side, decision.Side, StringComparison.OrdinalIgnoreCase));
+
+                        if (opts.MaxOpenPerSide > 0 && sameSide >= opts.MaxOpenPerSide)
+                        {
+                            log.LogInformation(
+                                "[TradingBot] {Strat} signalled {Side} but {Count} position(s) on that " +
+                                "side are already open, at the {Max} per-side limit. Holding for the " +
+                                "opposite side. ({Total}/{MaxTotal} positions open overall.)",
+                                strat, decision.Side, sameSide, opts.MaxOpenPerSide,
+                                stratTrades.Count, opts.MaxOpenTradesPerStrategy);
+
+                            await SafeRecordAsync(
+                                configRepo.RecordEntryRefusalAsync(
+                                    $"{strat} {decision.Side} blocked: {sameSide} {decision.Side} " +
+                                    $"already open (max {opts.MaxOpenPerSide}/side)", ct),
+                                "per-side refusal");
+
+                            // No cooldown stamp — nothing was opened, and pacing the
+                            // next attempt would extend a limit that is about
+                            // direction, not about frequency.
+                            continue;
+                        }
+
                         // ── The gate has the only veto on entry ────────────────
                         //
                         // Everything about the trade is already fixed: direction from

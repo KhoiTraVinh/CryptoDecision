@@ -152,6 +152,32 @@ public sealed record BotOptions
     
     /// <summary>Number of concurrent positions per strategy.</summary>
     public int          MaxOpenTradesPerStrategy { get; set; } = 5;
+
+    /// <summary>
+    /// Concurrent positions allowed on the SAME side. 0 disables the constraint.
+    ///
+    /// Set to 1 alongside MaxOpenTradesPerStrategy = 2, this reads "two positions at
+    /// once, but never two the same way" — so a live LONG does not cost the SHORT that
+    /// the next bucket calls for. On the 15-minute grid SOL reverses inside a single
+    /// hold often enough that being full on one side was losing the other side
+    /// entirely, which is a missed trade rather than a risk saved.
+    ///
+    /// It is a per-SIDE cap rather than a "must be hedged" rule: nothing forces the
+    /// second position to exist, and neither side waits for the other.
+    ///
+    /// Two things to be clear-eyed about. Opposite positions of similar size are close
+    /// to market-neutral while both are open, so the pair pays two spreads and two
+    /// round trips for an exposure near zero — the value has to come from the two
+    /// exiting at different times, not from holding both. And both carry stops, so a
+    /// whipsaw can take out the short on the way up and the long on the way back down:
+    /// two losses from one move, which a single position cannot produce.
+    ///
+    /// Requires the venue to keep the sides separate. OKX does this only in
+    /// long_short_mode; in net mode a SHORT against an open LONG reduces or closes it
+    /// instead of opening a second position. Verified long_short_mode on this account
+    /// on 2026-09-08 before the rule was written.
+    /// </summary>
+    public int          MaxOpenPerSide           { get; set; } = 0;
     
     public decimal PositionPctOfCapital{ get; set; } = 0.10m;   // 10% per trade (1/10th)
 
