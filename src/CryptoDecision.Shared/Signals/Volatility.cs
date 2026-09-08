@@ -248,6 +248,122 @@ public static class VolatilityStops
     /// </summary>
     public const decimal MinStopAsFeeMultiple = 4m;
 
+    /// <summary>
+    /// Stop at the low of the recent range, target at its high — the levels price
+    /// actually turns at, rather than a multiple of average movement.
+    ///
+    /// Why this exists alongside <see cref="Resolve"/>
+    /// -----------------------------------------------
+    /// The ATR geometry places both barriers at a fixed multiple of typical movement,
+    /// which says nothing about where this particular market has been rejecting. It
+    /// was measured on 1,486 decision points over 18 days of SOL, first-touch within
+    /// 12 hours, stop taken when a single minute spans both:
+    ///
+    ///     geometry                    stop%   win%    mean R
+    ///     1.5x ATR, 2:1 target        0.672   33.9%   +0.015
+    ///     range boundary, 2h look     0.79    52.9%   +0.107
+    ///     range boundary, 4h look     1.11    52.2%   +0.030
+    ///
+    /// The ATR pair sits on its own break-even line — 33.9% against the 33.3% that a
+    /// 2:1 needs — which is the whole of why two weeks of live trading produced 28%.
+    /// Two hours beats four clearly, so the lookback is short by measurement rather
+    /// than by preference.
+    ///
+    /// What the reward:risk means here, and why it is not fixed
+    /// -------------------------------------------------------
+    /// It falls out of where the entry sits inside the range, so it is information
+    /// rather than a parameter. Measured by quartile of that position, entering long:
+    ///
+    ///     position in range   avg R:R   win%    mean R
+    ///     0-25%   (near low)   13.37    14.2%   +0.390
+    ///     25-50%                1.72    38.8%   +0.025
+    ///     50-75%                0.63    68.9%   +0.105
+    ///     75-100% (near high)   0.17    83.0%   -0.033
+    ///
+    /// So <c>MinRewardRisk</c> becomes a positional filter by the back door: at 1.2 it
+    /// admits only the bottom ~42% of the range, which is the 14-39% win-rate
+    /// territory where a five-loss streak is routine and the consecutive-loss breaker
+    /// would halt the bot. That interaction is the reason the threshold was lowered
+    /// when this shipped, and it is not obvious from either setting alone.
+    ///
+    /// The fee floor and the optional cap apply exactly as they do to the ATR path.
+    /// </summary>
+    /// <param name="rangeHigh">Highest high over the lookback, excluding the entry bar.</param>
+    /// <param name="rangeLow">Lowest low over the lookback, excluding the entry bar.</param>
+    public static StopGeometry ResolveFromRange(
+        decimal entryPrice,
+        string  side,
+        decimal rangeHigh,
+        decimal rangeLow,
+        VolatilityRead volatility,
+        decimal roundTripFeeRate,
+        decimal? maxStopPct = null)
+    {
+        if (entryPrice <= 0m)
+            throw new ArgumentOutOfRangeException(
+                nameof(entryPrice), entryPrice, "Entry price must be positive.");
+
+        var isLong = string.Equals(side, "LONG", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(side, "BUY",  StringComparison.OrdinalIgnoreCase);
+
+        // Distances from the entry to each boundary. A boundary the entry has already
+        // passed gives a non-positive distance — price broke out of the range between
+        // the reading and the fill — and there is no sensible barrier to place there,
+        // so the caller is told rather than handed a negative stop.
+        var stopDistance   = isLong ? entryPrice - rangeLow  : rangeHigh - entryPrice;
+        var targetDistance = isLong ? rangeHigh  - entryPrice : entryPrice - rangeLow;
+
+        if (stopDistance <= 0m || targetDistance <= 0m)
+            return new StopGeometry(
+                StopPct: 0m, TargetPct: 0m, StopPrice: 0m, TargetPrice: 0m,
+                AtrPctUsed: volatility.IsUsable ? volatility.AtrPct : 0.0,
+                RewardRisk: 0m,
+                Basis: $"range unusable: entry {entryPrice} is outside [{rangeLow}, {rangeHigh}]");
+
+        var stopPct   = stopDistance   / entryPrice;
+        var targetPct = targetDistance / entryPrice;
+        var basis     = "range";
+
+        // Same fee floor as the ATR path. A stop inside the fee band exits on cost
+        // rather than on price, and a narrow range does not change that. Widening the
+        // stop without widening the target deliberately worsens the ratio — the
+        // alternative is a barrier that cannot pay for itself.
+        var feeFloor = roundTripFeeRate * MinStopAsFeeMultiple;
+        if (stopPct < feeFloor)
+        {
+            stopPct = feeFloor;
+            basis   = "range, stop raised to fee floor";
+        }
+
+        if (maxStopPct is { } cap && stopPct > cap)
+        {
+            stopPct = cap;
+            basis   = $"{basis}, capped at {cap:P2}";
+        }
+
+        var stopPrice = isLong
+            ? entryPrice * (1m - stopPct)
+            : entryPrice * (1m + stopPct);
+
+        var targetPrice = isLong
+            ? entryPrice * (1m + targetPct)
+            : entryPrice * (1m - targetPct);
+
+        var netWin  = targetPct - roundTripFeeRate;
+        var netLoss = stopPct   + roundTripFeeRate;
+
+        return new StopGeometry(
+            StopPct:     stopPct,
+            TargetPct:   targetPct,
+            StopPrice:   stopPrice,
+            TargetPrice: targetPrice,
+            // Reported for the record even though nothing here scales on it, so a
+            // losing trade can still be attributed to the volatility of its moment.
+            AtrPctUsed:  volatility.IsUsable ? volatility.AtrPct : 0.0,
+            RewardRisk:  netLoss > 0m ? netWin / netLoss : 0m,
+            Basis:       basis);
+    }
+
     public static StopGeometry Resolve(
         decimal entryPrice,
         string  side,

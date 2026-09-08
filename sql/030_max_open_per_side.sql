@@ -21,3 +21,18 @@ COMMENT ON COLUMN bot_config.max_open_per_side IS
     'Concurrent positions per side (LONG/SHORT). 0 disables the constraint. '
     'Pair with max_open_trades_per_strategy: 2 total with 1 per side means the bot '
     'may hold one LONG and one SHORT but never two of either.';
+
+-- Consecutive losses before the bot disables itself. Was hardcoded at 5 in the call
+-- to RiskEngine.CheckCircuitBreakers, which is wrong once the geometry is a setting:
+-- the right number depends on the win rate that geometry implies. At a 39% win rate
+-- five in a row occurs in 8.6% of any five-trade window -- near certain across forty
+-- trades -- so a breaker tuned for a 50% strategy halts a 39% one behaving exactly as
+-- designed.
+
+ALTER TABLE bot_config
+    ADD COLUMN IF NOT EXISTS max_consecutive_losses INTEGER NOT NULL DEFAULT 5;
+
+COMMENT ON COLUMN bot_config.max_consecutive_losses IS
+    'Losing trades in a row on one strategy before the bot writes enabled = false. '
+    'Raise only alongside a measured reason: it is the last thing between a signal '
+    'that has stopped working and an account that finds out slowly.';

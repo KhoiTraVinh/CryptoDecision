@@ -188,7 +188,10 @@ public sealed class DatabaseInitializer(
                         -- from sql/030 so a preserved volume self-heals on boot
                         -- rather than failing the whole config read on a missing
                         -- column.
-                        ADD COLUMN IF NOT EXISTS max_open_per_side   INTEGER NOT NULL DEFAULT 0;
+                        ADD COLUMN IF NOT EXISTS max_open_per_side   INTEGER NOT NULL DEFAULT 0,
+                        -- Was hardcoded at 5. The right value depends on the win
+                        -- rate the geometry implies, and that is now a setting.
+                        ADD COLUMN IF NOT EXISTS max_consecutive_losses INTEGER NOT NULL DEFAULT 5;
                 END IF;
             END
             $$;

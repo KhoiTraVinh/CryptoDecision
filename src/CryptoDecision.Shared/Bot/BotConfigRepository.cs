@@ -37,7 +37,8 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    COALESCE(allow_entry_without_gate, FALSE) AS allow_entry_without_gate,
                    COALESCE(max_entries_per_day, 6) AS max_entries_per_day,
                    COALESCE(risk_pct_per_trade, 0.01) AS risk_pct_per_trade,
-                   COALESCE(max_open_per_side, 0) AS max_open_per_side
+                   COALESCE(max_open_per_side, 0) AS max_open_per_side,
+                   COALESCE(max_consecutive_losses, 5) AS max_consecutive_losses
             FROM bot_config WHERE id = 1
             """;
 
@@ -80,6 +81,7 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             MaxEntriesPerDay         = r.GetInt32(r.GetOrdinal("max_entries_per_day")),
             RiskPctPerTrade          = r.GetDecimal(r.GetOrdinal("risk_pct_per_trade")),
             MaxOpenPerSide           = r.GetInt32(r.GetOrdinal("max_open_per_side")),
+            MaxConsecutiveLosses     = r.GetInt32(r.GetOrdinal("max_consecutive_losses")),
         };
     }
 

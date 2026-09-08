@@ -561,7 +561,8 @@ public sealed class TradingBotService(
         var entriesToday = accountTrades
             .Count(t => t.OpenedAt.Date == DateTime.UtcNow.Date);
 
-        var breach = RiskEngine.CheckCircuitBreakers(closedTrades, opts, todayPnl);
+        var breach = RiskEngine.CheckCircuitBreakers(
+            closedTrades, opts, todayPnl, opts.MaxConsecutiveLosses);
         if (breach is not null)
         {
             // Persisted to bot_config, not only to memory.

@@ -219,6 +219,21 @@ public sealed record BotOptions
 
     public decimal DailyLossLimitPct   { get; set; } = 0.15m;  // -15% of capital/day
 
+    /// <summary>
+    /// Losing trades in a row, on this strategy, before the bot disables itself.
+    ///
+    /// Configurable rather than the hardcoded 5 it was, because the right number
+    /// depends on the win rate the geometry implies and that is now a setting. At a
+    /// 39% win rate five in a row happens in 8.6% of any five-trade window — near
+    /// certain across forty trades — so a breaker tuned for a 50% strategy halts a
+    /// 39% one that is behaving exactly as designed. It halted this bot for fifteen
+    /// hours once already, on a streak that spanned a strategy rewrite.
+    ///
+    /// Raise it only alongside a measured reason. It is the last thing standing
+    /// between a signal that has stopped working and an account that finds out slowly.
+    /// </summary>
+    public int MaxConsecutiveLosses { get; set; } = 5;
+
     /// <summary>Seconds between evaluation cycles — the granularity of every bot-side exit.</summary>
     public int     EvalIntervalSeconds { get; set; } = 30;
 

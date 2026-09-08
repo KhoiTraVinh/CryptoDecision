@@ -183,14 +183,54 @@ public sealed class CrossVenueFlowStrategy(
                 // failing open costs a worse price rather than an unmanaged position.
             }
 
-            var geometry = VolatilityStops.Resolve(
-                entryPrice:         ctx.CurrentPrice,
-                side:               verdict.Side!,
-                volatility:         volatility,
-                roundTripFeeRate:   tuning.RoundTripFeeRate,
-                stopAtrMultiple:    tuning.StopAtrMultiple,
-                targetRiskMultiple: tuning.TargetRiskMultiple,
-                maxStopPct:         tuning.MaxStopPct);
+            // ── Exit levels: the range's own boundaries, or a multiple of ATR ──
+            //
+            // Range is the default because it measured seven times the mean R of the
+            // ATR pair over 1,486 decision points, and because the ATR pair sat on its
+            // own break-even line — see VolatilityStops.ResolveFromRange for the table.
+            // The lookback is deliberately short: 2 hours beat 4 clearly.
+            StopGeometry geometry;
+
+            if (tuning.UseRangeGeometry)
+            {
+                var since = candles.Count > 0
+                    ? candles[^1].OpenTime.AddMinutes(-tuning.RangeLookbackMinutes)
+                    : DateTime.MinValue;
+
+                var window = candles.Where(c => c.OpenTime >= since).ToList();
+
+                if (window.Count < 2)
+                    return Refuse("NO_RANGE_READ",
+                        $"Only {window.Count} candle(s) in the last " +
+                        $"{tuning.RangeLookbackMinutes} minutes, so the range has no boundaries " +
+                        "to place the stop and target on.");
+
+                geometry = VolatilityStops.ResolveFromRange(
+                    entryPrice:       ctx.CurrentPrice,
+                    side:             verdict.Side!,
+                    rangeHigh:        window.Max(c => c.High),
+                    rangeLow:         window.Min(c => c.Low),
+                    volatility:       volatility,
+                    roundTripFeeRate: tuning.RoundTripFeeRate,
+                    maxStopPct:       tuning.MaxStopPct);
+
+                // The entry has already broken out of the range it was measured
+                // against. Refusing beats inventing a barrier: a breakout is exactly
+                // when the boundary stops being the level price respects.
+                if (geometry.StopPct <= 0m)
+                    return Refuse("PRICE_OUTSIDE_RANGE", geometry.Basis);
+            }
+            else
+            {
+                geometry = VolatilityStops.Resolve(
+                    entryPrice:         ctx.CurrentPrice,
+                    side:               verdict.Side!,
+                    volatility:         volatility,
+                    roundTripFeeRate:   tuning.RoundTripFeeRate,
+                    stopAtrMultiple:    tuning.StopAtrMultiple,
+                    targetRiskMultiple: tuning.TargetRiskMultiple,
+                    maxStopPct:         tuning.MaxStopPct);
+            }
 
             // A trade whose reward does not cover its risk after fees is refused here
             // rather than left for the gate. The gate is a judgement call on a
@@ -422,6 +462,28 @@ public sealed class FlowStrategyOptions
 
     public double StopAtrMultiple    { get; set; } = FlowGeometryDefaults.StopAtrMultiple;
     public double TargetRiskMultiple { get; set; } = FlowGeometryDefaults.TargetRiskMultiple;
+
+    /// <summary>
+    /// Place the stop at the recent range's low and the target at its high, instead of
+    /// at multiples of ATR. See <see cref="VolatilityStops.ResolveFromRange"/> for the
+    /// measurement that chose this, and for why it changes what MinRewardRisk means.
+    ///
+    /// StopAtrMultiple and TargetRiskMultiple are not read while this is on. They are
+    /// left in place so switching back is a config edit.
+    /// </summary>
+    public bool UseRangeGeometry { get; set; } = false;
+
+    /// <summary>
+    /// Minutes of 1-minute candles the range boundaries are taken from.
+    ///
+    /// 120 by measurement, not by preference: at a 2-hour lookback the geometry
+    /// returned mean R +0.107 against +0.030 at 4 hours over the same 1,486 decision
+    /// points. A longer window gives wider, staler boundaries — the levels stop being
+    /// where this market is currently turning.
+    ///
+    /// Must not exceed AtrLookbackMinutes, since the candles come from that fetch.
+    /// </summary>
+    public int RangeLookbackMinutes { get; set; } = 120;
 
     /// <summary>
     /// Round-trip cost assumed when placing the stop and target, as a fraction of
