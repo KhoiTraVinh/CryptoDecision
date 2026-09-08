@@ -87,8 +87,19 @@ public sealed class CrossVenueFlowStrategy(
                     $"{tuning.MaxBarAge.TotalMinutes:F0} min limit. Ingestion or aggregation has " +
                     "stopped; trading on this would be trading on the past.");
 
+            // ── Candles ───────────────────────────────────────────────────────
+            //
+            // Fetched before scoring now, because CandleReversal scores on price and
+            // the flow scorer never sees them. The staleness check above still runs
+            // for every mode: flow_bars_15m going cold is the clearest signal that
+            // ingestion has stopped, whether or not this mode reads it.
+            var candles = await flowRepo.GetRecentCandlesAsync(
+                opts.Symbol, tuning.AtrLookbackMinutes, ct);
+
             // ── The signal ────────────────────────────────────────────────────
-            var verdict = CrossVenueFlowScorer.Score(set.ByVenue, tuning.Signal);
+            var verdict = tuning.Signal.EntryMode == FlowEntryMode.CandleReversal
+                ? CrossVenueFlowScorer.ScoreReversal(candles, DateTime.UtcNow, tuning.Signal)
+                : CrossVenueFlowScorer.Score(set.ByVenue, tuning.Signal);
 
             if (!verdict.Actionable)
             {
@@ -106,9 +117,8 @@ public sealed class CrossVenueFlowStrategy(
             }
 
             // ── Exit geometry, from measured volatility ────────────────────────
-            var candles = await flowRepo.GetRecentCandlesAsync(
-                opts.Symbol, tuning.AtrLookbackMinutes, ct);
-
+            // Candles were fetched above, before scoring, since CandleReversal needs
+            // them to score at all. One read serves both.
             var volatility = Volatility.Measure(candles, tuning.AtrBarMinutes);
 
             if (!volatility.IsUsable)

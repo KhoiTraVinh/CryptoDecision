@@ -184,6 +184,14 @@ startupLog.LogWarning(
     flowOpts.Signal.EntryMode,
     flowOpts.Signal.EntryMode switch
     {
+        FlowEntryMode.CandleReversal =>
+            $"LONG when price has fallen at least {flowOpts.Signal.ReversalDropPct:F2}% over " +
+            $"{flowOpts.Signal.ReversalBars} closed 15m bar(s)" +
+            $"{(flowOpts.Signal.ReversalLongOnly ? ", long only" : ", both sides")}. " +
+            "PRICE ONLY — no order flow is read in this mode, so every flow threshold " +
+            "(EnterZ, MinAbsOfi, VenueAgreementZ, SufficientVenue) is inert and " +
+            "signal_outcomes will record AggregateZ = 0 meaning 'not measured'.",
+
         FlowEntryMode.OfiMagnitude =>
             $"|OFI| >= {flowOpts.Signal.MinAbsOfi:F2} over {flowOpts.Signal.MagnitudeBars} closed " +
             $"bucket(s), direction from its sign. EnterZ, VenueAgreementZ, MinAgreeingVenues and " +

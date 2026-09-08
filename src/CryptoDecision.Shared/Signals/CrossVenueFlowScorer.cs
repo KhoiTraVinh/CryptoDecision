@@ -216,6 +216,49 @@ public enum FlowEntryMode
     /// experiment, not the expectation.
     /// </summary>
     OfiMagnitude = 1,
+
+    /// <summary>
+    /// Buy the dip: go long once price has fallen at least
+    /// <see cref="FlowSignalOptions.ReversalDropPct"/> over the last
+    /// <see cref="FlowSignalOptions.ReversalBars"/> closed candles. No order flow in
+    /// it at all — only price.
+    ///
+    /// It is here because the flow data does not contain direction. Over 1,496 buckets
+    /// aggregate OFI correlates −0.015 with the next hour's signed return, and four
+    /// rules built on flow (z-score, OFI sign flip, volume burst, prior-return
+    /// momentum) all landed within noise of going long at random. Price's own recent
+    /// shape carries more than the flow does.
+    ///
+    /// Measured on the 30-minute change into the entry, return from the next candle's
+    /// open:
+    ///
+    ///     prior 30m       n       +30m     +1h      +2h    hit@1h
+    ///     fell >=0.60%   IN  78  +0.237  +0.249  +0.181   61.5%
+    ///                    OOS 40  +0.115  +0.208  +0.026   65.0%
+    ///     fell 0.35-0.60 IN  75  +0.026  -0.044  -0.197   42.7%
+    ///                    OOS 61  +0.013  +0.062  +0.014   52.5%
+    ///     ROSE           IN 291  -0.021  -0.066  -0.049   43.0%
+    ///                    OOS 228 -0.023  -0.068  -0.036   43.9%
+    ///
+    /// The 0.60% threshold is where it starts working and is not a tuned value — the
+    /// band below it flips sign between halves, and the band above is positive at
+    /// every horizon in both halves at better than 60% hit. At one hour it returns
+    /// three times the 7 bps round trip.
+    ///
+    /// The bottom row is the same finding from the other side: buying after a RISE
+    /// loses, in both halves, at every horizon, on n=519. Refusing those is half of
+    /// what this mode does, and it costs nothing because it prevents trades rather
+    /// than creating them.
+    ///
+    /// Long only. Shorting after a rise is the mirror image and measures +0.066/+0.068
+    /// at one hour — real, but sitting exactly on the 0.070% round trip, so it pays
+    /// the exchange rather than the account.
+    ///
+    /// The honest discount: SOL rose 12.65% over the sample, about 0.044% of drift per
+    /// hour. Perhaps a fifth of the one-hour figure is the market going up rather than
+    /// the pattern working, and none of this has been seen in a falling market.
+    /// </summary>
+    CandleReversal = 2,
 }
 
 public sealed record FlowSignalOptions(
@@ -264,7 +307,28 @@ public sealed record FlowSignalOptions(
     /// Buckets summed for the magnitude reading. 1 is the single closed bucket, which
     /// is the entire point of the mode: every extra bucket adds 15 minutes of lag back.
     /// </summary>
-    int     MagnitudeBars                 = 1)
+    int     MagnitudeBars                 = 1,
+
+    /// <summary>
+    /// Minimum fall, in percent, over <see cref="ReversalBars"/> closed candles before
+    /// <see cref="FlowEntryMode.CandleReversal"/> will go long.
+    ///
+    /// 0.60 is where the effect starts rather than where it is largest: the 0.35-0.60
+    /// band flips sign between sample halves while everything at or beyond 0.60 is
+    /// positive at every horizon in both. Lowering it to catch more trades reaches
+    /// straight into the band that does not work.
+    /// </summary>
+    double  ReversalDropPct               = 0.60,
+
+    /// <summary>Closed 15-minute candles the fall is measured over. 2 = 30 minutes.</summary>
+    int     ReversalBars                  = 2,
+
+    /// <summary>
+    /// Refuse the short side. On by default: shorting after a rise measures +0.066
+    /// in-sample and +0.068 out-of-sample at one hour, against a 0.070% round trip —
+    /// a real effect that hands its entire value to the exchange.
+    /// </summary>
+    bool    ReversalLongOnly              = true)
 {
     /// <summary>Buckets the scorer needs before it can produce anything at all.</summary>
     public int MinimumBars => SignalBars + BaselineBars;
@@ -398,6 +462,85 @@ public static class CrossVenueFlowScorer
             FlowEntryMode.OfiMagnitude => ScoreMagnitude(barsByVenue, options, prepared),
             _                          => ScoreZ(barsByVenue, options, prepared),
         };
+    }
+
+    // ── Mode: CandleReversal ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Score the buy-the-dip rule. See <see cref="FlowEntryMode.CandleReversal"/>.
+    ///
+    /// Takes candles rather than flow bars because it reads price and nothing else —
+    /// a FlowBar carries VWAP, which is the bucket's average rather than its close, and
+    /// substituting one for the other would not be the rule that was measured. So this
+    /// is called directly by the strategy instead of going through
+    /// <see cref="Score"/>'s dispatch.
+    ///
+    /// The verdict it returns is shaped like any other so everything downstream — the
+    /// gate brief, signal_outcomes, the geometry — keeps working unchanged. The flow
+    /// fields are zero because no flow was consulted, and that is the honest value: a
+    /// row with AggregateZ = 0 under this mode means "not measured", not "measured as
+    /// nothing".
+    /// </summary>
+    /// <param name="candles">1-minute candles, oldest first.</param>
+    /// <param name="nowUtc">Used to exclude the 15-minute bar still in progress.</param>
+    public static FlowVerdict ScoreReversal(
+        IReadOnlyList<Candle> candles, DateTime nowUtc, FlowSignalOptions options)
+    {
+        var bars   = Math.Max(1, options.ReversalBars);
+        var needed = bars + 1;
+
+        if (candles.Count == 0)
+            return FlowVerdict.Abstain("NO_CANDLES", "No 1-minute candles available.");
+
+        // Resample to the 15-minute grid, then drop the bar still filling. Reading a
+        // live bar is what turned a +0.17 OFI into -0.081 an hour earlier in this same
+        // session, and price is no different: the 16:30 bar on 2026-09-08 showed +0.92%
+        // at minute ten and closed at +0.48%.
+        var openBar = new DateTime(
+            nowUtc.Ticks - nowUtc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+
+        var closed = Volatility.Resample(candles, 15).Where(c => c.OpenTime < openBar).ToList();
+
+        if (closed.Count < needed)
+            return FlowVerdict.Abstain(
+                "NOT_ENOUGH_CANDLES",
+                $"Only {closed.Count} closed 15-minute bar(s); {needed} needed to measure a " +
+                $"{bars}-bar move.");
+
+        var now  = closed[^1].Close;
+        var then = closed[^(bars + 1)].Close;
+
+        if (then <= 0m)
+            return FlowVerdict.Abstain("NO_CANDLES", "Reference close is not positive.");
+
+        var movePct = (double)((now - then) / then) * 100.0;
+
+        if (movePct > -options.ReversalDropPct)
+            return FlowVerdict.Abstain(
+                "NO_DIP",
+                $"Price moved {movePct:+0.00;-0.00}% over the last {bars} closed bar(s) " +
+                $"({then:F4} to {now:F4}). A fall of at least {options.ReversalDropPct:F2}% is " +
+                "required. Buying after a rise measured negative at every horizon in both " +
+                "sample halves.");
+
+        // Long only by default — the short side sits on the round trip. Kept as a
+        // branch rather than assumed so turning it on is a config change, not a patch.
+        if (options.ReversalLongOnly is false && movePct > 0)
+            return FlowVerdict.Abstain("NO_DIP", "Short side is not implemented for this mode.");
+
+        return new FlowVerdict(
+            Actionable:          true,
+            Side:                "LONG",
+            AggregateOfi:        0.0,
+            AggregateZ:          0.0,
+            AgreeingVenues:      0,
+            ParticipatingVenues: 0,
+            DispersionBps:       0.0,
+            AbstainCode:         "",
+            Reason:              $"Price fell {movePct:F2}% over {bars} closed 15m bar(s) " +
+                                 $"({then:F4} to {now:F4}), past the {options.ReversalDropPct:F2}% " +
+                                 "threshold. Buying the dip; no order flow consulted.",
+            Votes:               []);
     }
 
     // ── Mode: OfiMagnitude ────────────────────────────────────────────────────
