@@ -236,6 +236,31 @@ jobs:
 
           $COMPOSE pull --quiet
 
+          # db-migrate is recreated explicitly, before everything else.
+          #
+          # `up -d` will not re-run a one-shot container that already exists and has
+          # exited, when its image and config are unchanged -- and db-migrate's image
+          # is plain postgres:16, so it never changes. A failed migration therefore
+          # stays failed across every subsequent deploy, however thoroughly the SQL
+          # has been fixed in between.
+          #
+          # That is not a cosmetic red container. bot declares
+          # `depends_on: db-migrate: condition: service_completed_successfully`, so
+          # while the stale exit code is 1 the bot is created and never started, while
+          # `up -d` reports success and every other service comes up healthy. It
+          # happened on 2026-09-08: a migration edited in place failed its checksum,
+          # the fix deployed, and the bot sat in Created for 26 minutes of a paper test
+          # with nothing anywhere saying so.
+          #
+          # Migrations are idempotent and the ledger skips what is already applied, so
+          # re-running costs a second and removes the whole failure mode.
+          $COMPOSE up -d --no-build --force-recreate --no-deps db-migrate
+          $COMPOSE wait db-migrate || {
+            echo "db-migrate failed -- schema is not at the expected version." >&2
+            docker logs db-migrate 2>&1 | tail -20 >&2
+            exit 1
+          }
+
           # --no-build makes a fallback to compiling on this host an error rather than a
           # silent twenty-minute stall on two cores.
           $COMPOSE up -d --no-build --remove-orphans
