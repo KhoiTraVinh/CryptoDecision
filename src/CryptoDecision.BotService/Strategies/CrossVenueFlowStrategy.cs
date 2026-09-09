@@ -457,6 +457,12 @@ public sealed class CrossVenueFlowStrategy(
         // has produced, and it comes from cutting the hold short rather than from any
         // change to what gets entered.
         //
+        // Those figures describe the rule WITH the freshness guard in
+        // FlowTurnedAgainstAsync. The first version shipped without it, read the flow
+        // that had caused its own entry, and closed two live trades thirty seconds
+        // after opening them. See the comment on that guard; the numbers above never
+        // described what ran between 2026-09-09 13:34 and 16:20.
+        //
         // NOT PROVEN. 12 short exits is not a sample, the window is one regime, and the
         // long side stays negative. Registered as H6 in HYPOTHESES.md, to be judged on
         // trades closed AFTER it shipped. UseFlowReversalExit = false disables it.
@@ -535,6 +541,36 @@ public sealed class CrossVenueFlowStrategy(
             // because All() over an empty list is true, which would have made this rule
             // close every open position the moment flow_bars_15m came back empty.
             if (recent.Count < bars) return null;
+
+            // The newest bucket has to have closed AFTER the position opened.
+            //
+            // Without this the rule read the very flow that caused the entry. "Buy the
+            // dip" means "buy after price fell", and price falls on selling, so at the
+            // moment a long opens the last three closed buckets are almost guaranteed
+            // to lean sell — the exit condition is already satisfied before the trade
+            // has existed for a second. The two rules are near-negatives of each other
+            // by construction, and only this check separates them.
+            //
+            // Observed live on 2026-09-09, twice within twenty minutes. Trade 62 opened
+            // 15:15:34 and closed 15:16:04 on buckets 14:30, 14:45 and 15:00; trade 63
+            // opened 15:31:08 and closed 15:31:38 on 14:45, 15:00 and 15:15. Every one
+            // of those buckets had closed before its trade opened. Both exits banked
+            // +0.14%, which is what one 30-second evaluation cycle of drift looks like,
+            // while a loser would still have paid the full 2.00% stop: small wins and
+            // whole losses, which is worse than having no exit rule at all.
+            //
+            // The simulation that justified this rule did carry the constraint --
+            // `r.bs > ok.b` in the SQL, the run of buckets had to END after the signal
+            // bucket -- and the constraint was simply not carried into the code. So the
+            // measured +26.1R described a rule that was never shipped. This is the same
+            // failure this repository keeps paying for: not a crash, not a wrong number
+            // in a log, but a live rule quietly doing something its measurement never
+            // tested.
+            //
+            // Earliest possible fire is therefore the first bucket close after entry,
+            // about fifteen minutes, rather than the next thirty-second cycle.
+            if (recent[^1].Bucket.AddMinutes(15) <= trade.OpenedAt)
+                return null;
 
             var isLong = trade.Side != "SHORT";
 

@@ -484,6 +484,36 @@ turn H6 off and re-run H5 alone rather than to reason about which half worked.
 
 _Open._
 
+
+### Correction, 2026-09-09 16:20 — the rule that ran was not the rule that was measured
+
+The first shipped version read the last three closed buckets with no constraint on when
+they closed. At the moment a long opens, those are the buckets that produced the entry:
+"buy the dip" means "buy after price fell", price falls on selling, so the exit
+condition is already satisfied before the position is a second old. The two rules are
+near-negatives of each other by construction.
+
+Observed live, twice inside twenty minutes:
+
+    trade 62   opened 15:15:34   closed 15:16:04   buckets 14:30, 14:45, 15:00
+    trade 63   opened 15:31:08   closed 15:31:38   buckets 14:45, 15:00, 15:15
+
+Every one of those buckets closed before its own trade opened. Both exits banked
++0.14% — one 30-second cycle of drift — while a loser would still have paid the full
+2.00% stop. Small wins and whole losses is worse than having no exit rule.
+
+The simulation did carry the constraint (`r.bs > ok.b`: the run of buckets had to END
+after the signal bucket). It was not carried into the code, so the +26.1R quoted above
+described a rule that was never deployed. Nothing crashed and no log line was wrong,
+which is the failure mode this repository keeps paying for.
+
+Fixed by requiring the newest bucket in the window to have closed after
+`trade.OpenedAt`. Earliest possible fire is now the first bucket close after entry,
+about fifteen minutes.
+
+**The H6 evaluation window therefore restarts.** Trades 62 and 63 are excluded — they
+tested a rule nobody designed. Count from the deploy that carries this fix.
+
 ---
 
 ## H7 — The short side fades a spike, not a rally, so it gets its own window
