@@ -697,7 +697,7 @@ public sealed class TradingBotService(
         // ── 4. Manage all open trades exits ────────────────────────────────────
         foreach (var trade in openTrades)
         {
-            var decision = strategy.EvaluateExit(trade, currentPrice.Value, opts, clockTrusted);
+            var decision = await strategy.EvaluateExitAsync(trade, currentPrice.Value, opts, clockTrusted, ct);
             if (decision.ShouldExit)
             {
                 log.LogInformation("[TradingBot] Closing trade {Id} at ${Price} reason={Reason}",

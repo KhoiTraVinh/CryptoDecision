@@ -394,6 +394,17 @@ public sealed record FlowSignalOptions(
     public bool HasSufficientVenue => !string.IsNullOrWhiteSpace(SufficientVenue);
 }
 
+
+/// <summary>
+/// One closed 15-minute bucket's market-wide aggressive-flow imbalance.
+/// </summary>
+/// <param name="VolumeUsd">
+/// Total notional behind the reading. Carried so a caller can tell a genuine
+/// market-wide lean from an imbalance measured on a nearly empty bucket, which on a
+/// quiet night looks identical in the <paramref name="Ofi"/> alone.
+/// </param>
+public readonly record struct BucketOfi(DateTime Bucket, double Ofi, decimal VolumeUsd);
+
 /// <summary>One venue's contribution to a verdict, and whether it counted.</summary>
 public sealed record VenueVote(
     string  Exchange,
@@ -624,6 +635,64 @@ public static class CrossVenueFlowScorer
                   "threshold. Fading the rally; no order flow consulted.",
             Votes:               []);
     }
+
+    /// <summary>
+    /// Aggregate OFI for each of the last <paramref name="count"/> CLOSED buckets,
+    /// volume-weighted across every venue, oldest first.
+    ///
+    /// The bucket still filling is dropped here rather than by the caller, because
+    /// forgetting to drop it is the single most repeated defect in this file's
+    /// history: a live bucket turned a +0.17 OFI into −0.081 an hour later in one
+    /// session, and the aggregation worker deliberately rewrites the current bucket
+    /// every two minutes, so whatever it currently says is a partial slice that will
+    /// change. A rule that closes real positions must not read it.
+    ///
+    /// Volume-weighted across venues rather than an average of per-venue ratios, for
+    /// the reason given on <see cref="FlowBar.Ofi"/>: the mean of three venues' buy
+    /// ratios is not the market's buy ratio unless they carry equal volume, which
+    /// they never do.
+    ///
+    /// Returns fewer than <paramref name="count"/> entries — possibly none — when
+    /// the history is short. Callers must treat a short list as "I do not know",
+    /// never as agreement.
+    /// </summary>
+    public static IReadOnlyList<BucketOfi> OfiByClosedBucket(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        DateTime nowUtc,
+        int      count)
+    {
+        if (count <= 0 || barsByVenue.Count == 0) return [];
+
+        var openBar = new DateTime(
+            nowUtc.Ticks - nowUtc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+
+        var byBucket = new Dictionary<DateTime, (decimal Buy, decimal Sell)>();
+
+        foreach (var bars in barsByVenue.Values)
+        foreach (var bar in bars)
+        {
+            if (bar.BucketStart >= openBar) continue;
+
+            byBucket.TryGetValue(bar.BucketStart, out var acc);
+            byBucket[bar.BucketStart] =
+                (acc.Buy + bar.BuyVolumeUsd, acc.Sell + bar.SellVolumeUsd);
+        }
+
+        return byBucket
+            .OrderByDescending(kv => kv.Key)
+            .Take(count)
+            .OrderBy(kv => kv.Key)
+            .Select(kv =>
+            {
+                var total = kv.Value.Buy + kv.Value.Sell;
+                return new BucketOfi(
+                    Bucket:     kv.Key,
+                    Ofi:        total > 0m ? (double)((kv.Value.Buy - kv.Value.Sell) / total) : 0.0,
+                    VolumeUsd:  total);
+            })
+            .ToList();
+    }
+
 
     // ── Mode: OfiMagnitude ────────────────────────────────────────────────────
 

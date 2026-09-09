@@ -410,3 +410,76 @@ _Open._
 
 ---
 
+
+---
+
+## H6 — Cutting the hold on a flow reversal is worth more than any entry threshold
+
+**Changed 2026-09-09.** New `UseFlowReversalExit = true`, `FlowExitBars = 3`,
+`FlowExitMinProfitPct = 0`. A position in profit is closed once every one of the last
+three closed 15-minute buckets has leaned against it, without waiting for stop or
+target. Exits are recorded as `FLOW_REVERSAL`.
+
+### The finding this rests on
+
+The entry rules are positive on raw forward returns and negative once packaged into a
+trade. Simulating the shipped geometry — fee-floor stop at 0.40%, target at the
+range boundary, stop resolved before target — over the same 1,562 buckets:
+
+    stop width    LONG mean R    SHORT mean R
+      0.4%          -0.255          -0.435
+      0.6%          -0.183          -0.445
+      0.8%          -0.206          -0.525
+      1.2%          -0.098          -0.316
+
+No stop width is positive. The defect is the hold, not the entry and not the stop
+width: the near stop is reached far more often than the far target. Closing on the
+flow rule instead:
+
+    side    n    exits by flow   mean R with rule   mean R holding to TP/SL
+    LONG   115        23              -0.154              -0.184
+    SHORT   46        12              +0.055              -0.345
+
+A cruder time-boxed cut agrees on direction — SHORT closed at 2 hours returns
+-0.013R against -0.345R held to TP/SL — which is some evidence that the improvement
+is about ending the hold rather than about OFI specifically.
+
+Three buckets rather than the two first simulated, chosen by the operator on the
+reasoning that two consecutive is a common enough coincidence to fire on noise. Not
+swept; the sample cannot support choosing between 2, 3 and 4.
+
+### What this does not claim
+
+Flow still carries no usable direction — aggregate OFI correlates -0.015 with the
+next hour's signed return, which is why entries are on price alone. This asks a
+narrower question: not "which way next" but "is the pressure that was pushing this
+position still there". The first question's failure is not evidence about the second,
+and the second has not been tested on entries.
+
+### Decision rule, fixed in advance
+
+Evaluate when **30 trades have closed** or after **14 days**, whichever comes first.
+Requires at least **8 closes with reason `FLOW_REVERSAL`** to be evaluable at all.
+
+- **Keep** if mean R across all closed trades beats the pre-change simulated baseline
+  of -0.255 (LONG) / -0.435 (SHORT), weighted by the actual side mix.
+- **Revert to `UseFlowReversalExit: false`** if mean R does not beat that baseline, or
+  if `FLOW_REVERSAL` exits average worse R than the `TP` exits they displaced — that
+  would mean the rule is cutting winners rather than saving them.
+- **Fewer than 8 `FLOW_REVERSAL` closes in 14 days** is its own verdict: the rule is
+  too rare to matter and should come out rather than be loosened, since loosening it
+  on the sample that produced it is not a test.
+- **Do not extend this to losing positions** on this sample. Cutting losers early on
+  flow is a separate rule with a separate failure mode and no measurement here.
+
+### Cost of being wrong
+
+None in money — `paper_mode = true`. The real cost is confounding: H5 and H6 shipped
+together, so a 14-day window cannot attribute a change to one or the other. Mitigated
+only partly by `close_reason`, which does separate what the exit rule did from what
+the entry rule did. If the combined result is ambiguous, the honest next step is to
+turn H6 off and re-run H5 alone rather than to reason about which half worked.
+
+### Result
+
+_Open._

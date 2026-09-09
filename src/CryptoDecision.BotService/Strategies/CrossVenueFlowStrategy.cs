@@ -389,7 +389,8 @@ public sealed class CrossVenueFlowStrategy(
     /// their favour. A stop that wide relative to the target is a coin flip with a fee
     /// attached.
     /// </summary>
-    public ExitDecision EvaluateExit(BotTrade trade, decimal currentPrice, BotOptions opts)
+    public async Task<ExitDecision> EvaluateExitAsync(
+        BotTrade trade, decimal currentPrice, BotOptions opts, CancellationToken ct)
     {
         var rawChange = (currentPrice - trade.EntryPrice) / trade.EntryPrice;
         var changePct = trade.Side == "SHORT" ? -rawChange : rawChange;
@@ -428,7 +429,137 @@ public sealed class CrossVenueFlowStrategy(
 
         if (hitTarget) return Exit("TP", currentPrice, changePct);
 
+        // ── Flow-reversal exit: take the profit when the push behind it stops ──
+        //
+        // Checked LAST, after both stored levels, so it can only ever fire on a bar
+        // that hit neither. That ordering is the definition of this exit rather than
+        // an implementation detail: it closes a position "without touching TP or SL",
+        // and if a level was hit, that level is the honest reason to record.
+        //
+        // Why it exists
+        // -------------
+        // The measured defect in this strategy is not the entry, it is the hold. The
+        // entry rule is genuinely positive on raw forward returns — over 19 days of
+        // production candles a 0.60% dip returns +0.237% at one hour, and a 1.00%
+        // rally returns +0.348% to the short side over two — but packaging either into
+        // a trade with a fee-floor stop and a range-boundary target turns both
+        // negative, because the far target is reached far less often than the near
+        // stop is. Simulated over the same 1,562 buckets, closing on this rule instead
+        // of waiting:
+        //
+        //     side    n    exits by flow   mean R with rule   mean R holding to TP/SL
+        //     LONG   115        23              -0.154                -0.184
+        //     SHORT   46        12              +0.055                -0.345
+        //
+        // The short side crosses zero. That is the only positive figure this strategy
+        // has produced, and it comes from cutting the hold short rather than from any
+        // change to what gets entered.
+        //
+        // NOT PROVEN. 12 short exits is not a sample, the window is one regime, and the
+        // long side stays negative. Registered as H6 in HYPOTHESES.md, to be judged on
+        // trades closed AFTER it shipped. UseFlowReversalExit = false disables it.
+        //
+        // Profit-only, deliberately
+        // -------------------------
+        // A losing position is left to the stop. Cutting a loser early on flow is a
+        // different rule with a different failure mode — it turns the stop into
+        // something the market can trigger early and cheaply — and it has not been
+        // measured here. The simulation above only ever exited positions in profit, so
+        // applying this to losers would be shipping a rule with no evidence behind it
+        // under the cover of one that has some.
+        if (tuning.UseFlowReversalExit && changePct > tuning.FlowExitMinProfitPct)
+        {
+            var reversal = await FlowTurnedAgainstAsync(trade, trade.Symbol, ct);
+
+            if (reversal is not null)
+            {
+                log.LogInformation(
+                    "[XFlow] Trade {Id} {Side} closing on flow reversal at {Change:P2}: {Why}",
+                    trade.Id, trade.Side, changePct, reversal);
+
+                return Exit("FLOW_REVERSAL", currentPrice, changePct);
+            }
+        }
+
         return new ExitDecision(false, null, currentPrice, changePct);
+    }
+
+    /// <summary>
+    /// Has aggressive flow leaned against this position for every one of the last
+    /// <see cref="FlowStrategyOptions.FlowExitBars"/> closed buckets?
+    ///
+    /// Returns a sentence describing the reversal, or null for "no" — including every
+    /// case where the question cannot be answered. Not knowing and disagreeing are
+    /// collapsed here on purpose, and in one direction only: an unanswerable question
+    /// is never a reason to close a position that its stop is already protecting.
+    ///
+    /// Requires ALL of the buckets to lean the same way, not a majority. Three
+    /// consecutive is 45 minutes of one-sided pressure; a majority rule would fire on
+    /// two of three, which on this data is ordinary noise between venues rather than a
+    /// market that has turned.
+    /// </summary>
+    private async Task<string?> FlowTurnedAgainstAsync(
+        BotTrade trade, string symbol, CancellationToken ct)
+    {
+        var bars = Math.Max(1, tuning.FlowExitBars);
+
+        try
+        {
+            // One extra bucket, because the newest row is the one still filling — the
+            // aggregation worker rewrites it every two minutes by design.
+            // OfiByClosedBucket drops it, so without the +1 the window would come back
+            // one bucket short and the rule would silently never fire.
+            var set = await flowRepo.GetRecentAsync(symbol, bars + 1, ct);
+
+            if (set.VenueCount == 0) return null;
+
+            // Same staleness bound as the entry path. Flow that stopped updating an
+            // hour ago describes a market that no longer exists, and closing a live
+            // position on it is worse than holding: the stop is still in place and is
+            // still reacting to real prices.
+            var age = set.Age(DateTime.UtcNow);
+            if (age > tuning.MaxBarAge)
+            {
+                log.LogWarning(
+                    "[XFlow] Flow-reversal exit skipped for trade {Id}: newest bucket is " +
+                    "{Age:F0} min old, past the {Limit:F0} min limit. Holding; the stop still applies.",
+                    trade.Id, age.TotalMinutes, tuning.MaxBarAge.TotalMinutes);
+                return null;
+            }
+
+            var recent = CrossVenueFlowScorer.OfiByClosedBucket(set.ByVenue, DateTime.UtcNow, bars);
+
+            // Short history is "I do not know", never "they agree". Checked explicitly
+            // because All() over an empty list is true, which would have made this rule
+            // close every open position the moment flow_bars_15m came back empty.
+            if (recent.Count < bars) return null;
+
+            var isLong = trade.Side != "SHORT";
+
+            // Against a long is selling pressure, against a short is buying pressure.
+            // Strictly signed: a bucket that came out at exactly zero is not evidence
+            // of a turn, and on a thin bucket it is what an empty one looks like.
+            var against = isLong
+                ? recent.All(b => b.Ofi < 0.0)
+                : recent.All(b => b.Ofi > 0.0);
+
+            if (!against) return null;
+
+            var readings = string.Join(", ",
+                recent.Select(b => $"{b.Bucket:HH:mm} {b.Ofi:+0.000;-0.000}"));
+
+            return $"{bars} consecutive closed bucket(s) leaning " +
+                   $"{(isLong ? "sell" : "buy")} against this {trade.Side} — {readings}, " +
+                   $"${recent.Sum(b => b.VolumeUsd) / 1_000_000m:F2}M traded";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Never let a failed read close a position. The stop is the protection that
+            // does not depend on this query succeeding.
+            log.LogError(ex,
+                "[XFlow] Flow-reversal check failed for trade {Id}; holding.", trade.Id);
+            return null;
+        }
     }
 
     private static ExitDecision Exit(string reason, decimal price, decimal changePct) =>
@@ -539,4 +670,44 @@ public sealed class FlowStrategyOptions
     /// trade has to come down, reduce the position size instead.
     /// </summary>
     public decimal? MaxStopPct { get; set; } = null;
+
+    /// <summary>
+    /// Close a position when aggressive flow has leaned against it for
+    /// <see cref="FlowExitBars"/> consecutive closed buckets and the position is in
+    /// profit — without waiting for the stop or the target.
+    ///
+    /// This is the one lever measured to move this strategy across zero. See the block
+    /// in CrossVenueFlowStrategy where it is applied for the table and the caveats;
+    /// H6 in HYPOTHESES.md carries the decision rule.
+    ///
+    /// Note this is flow used for EXIT, which is a different claim from the one this
+    /// repository already measured and rejected. Flow carries no usable DIRECTION —
+    /// aggregate OFI correlates -0.015 with the next hour's signed return, which is
+    /// why entries moved to price alone. It is being asked a narrower question here:
+    /// not "which way next" but "is the pressure that was pushing this position still
+    /// there". Those are not the same question and the first one's failure is not
+    /// evidence about the second.
+    /// </summary>
+    public bool UseFlowReversalExit { get; set; } = true;
+
+    /// <summary>
+    /// Consecutive closed 15-minute buckets that must lean against the position before
+    /// <see cref="UseFlowReversalExit"/> fires. 3 = 45 minutes.
+    ///
+    /// Chosen by the operator over the 2 that was simulated first, on the reasoning
+    /// that two buckets is a common enough coincidence to fire on noise. Not swept:
+    /// the sample cannot support choosing between 2, 3 and 4, and pretending otherwise
+    /// is how this file's trial budget gets spent invisibly.
+    /// </summary>
+    public int FlowExitBars { get; set; } = 3;
+
+    /// <summary>
+    /// Minimum unrealised profit, as a fraction of entry, before the flow-reversal
+    /// exit may fire. 0 means "any profit at all".
+    ///
+    /// Above zero it is not a safety margin but a different rule: it leaves the small
+    /// winners to run into the stop, which is the outcome this exit exists to prevent.
+    /// Raise it only with a measurement that says the small ones are worth keeping.
+    /// </summary>
+    public decimal FlowExitMinProfitPct { get; set; } = 0m;
 }

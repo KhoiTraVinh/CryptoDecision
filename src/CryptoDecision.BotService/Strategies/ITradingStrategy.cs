@@ -16,7 +16,15 @@ public interface ITradingStrategy
     Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct);
 
     /// <summary>Evaluate whether to close an existing position.</summary>
-    ExitDecision EvaluateExit(BotTrade trade, decimal currentPrice, BotOptions opts);
+    /// <remarks>
+    /// Asynchronous because an exit may now consult live market data rather than only
+    /// the trade's own stored levels — the flow-reversal exit reads flow_bars_15m. It
+    /// was synchronous while every exit was pure arithmetic on the row; making the I/O
+    /// explicit here is better than a strategy blocking on a database read inside what
+    /// the signature promises is a pure function.
+    /// </remarks>
+    Task<ExitDecision> EvaluateExitAsync(
+        BotTrade trade, decimal currentPrice, BotOptions opts, CancellationToken ct);
 }
 
 /// <summary>

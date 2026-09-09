@@ -87,8 +87,9 @@ public sealed class StrategyEvaluator
     /// TIMEOUT against a 1440-minute threshold. See
     /// <see cref="BotStateService.TouchEval"/> for how the condition is detected.
     /// </param>
-    public ExitDecision EvaluateExit(
-        BotTrade trade, decimal currentPrice, BotOptions opts, bool clockTrusted = true)
+    public async Task<ExitDecision> EvaluateExitAsync(
+        BotTrade trade, decimal currentPrice, BotOptions opts, bool clockTrusted = true,
+        CancellationToken ct = default)
     {
         var rawChange = (currentPrice - trade.EntryPrice) / trade.EntryPrice;
         var changePct = trade.Side == "SHORT" ? -rawChange : rawChange;
@@ -165,7 +166,7 @@ public sealed class StrategyEvaluator
             };
         }
 
-        return impl.EvaluateExit(trade, currentPrice, effectiveOpts);
+        return await impl.EvaluateExitAsync(trade, currentPrice, effectiveOpts, ct);
     }
 }
 
