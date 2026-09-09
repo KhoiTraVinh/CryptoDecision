@@ -342,3 +342,71 @@ comparison survives, since both venue configurations are affected equally.
 ### Result
 
 _Open._
+
+---
+
+## H5 — The short side pays, but only above a threshold of its own
+
+**Changed 2026-09-09.** `ReversalLongOnly: true -> false`, and a new
+`ReversalRisePct = 1.00` that the short side is gated on instead of the mirrored
+`ReversalDropPct = 0.60`.
+
+### What was believed before, and why it was wrong
+
+The short branch was left unimplemented on a measurement that only ever tested the
+mirrored threshold: fading a 0.60% rally returns +0.066% in-sample and +0.068%
+out-of-sample at one hour, against a 0.070% round trip. That number is correct. The
+error was concluding from it that the short side does not pay, when what it shows is
+that 0.60% is the wrong threshold for that side.
+
+Worse, the branch that claimed to make this a config decision was unreachable. The
+dip guard returned for every move above -0.60%, so the `movePct > 0` test below it
+could never hold, and `ReversalLongOnly: false` silently changed nothing. A switch
+that reports success and alters no behaviour is the same defect class as the stale
+prediction read.
+
+### Measured on production candles, 2026-08-21 to 2026-09-09
+
+1,562 closed 15-minute buckets of SOLUSDT, short return over the two hours following
+the signal bucket:
+
+    rise >=    n    2h return   win %   avg favourable   avg adverse
+      0.60%   126     +0.086%   59.5%       1.359%          1.200%
+      0.80%    79     +0.133%   64.6%       1.541%          1.269%
+      1.00%    49     +0.348%   67.3%       1.994%          1.460%
+      1.25%    27     +0.495%   74.1%       2.283%          1.589%
+      1.50%    20     +0.471%   70.0%       2.291%          1.537%
+
+Split in half, at 1.00%: first half n 38 +0.419% (68.4% win), second half n 11
++0.103% (63.6% win). Both positive.
+
+1.00 is taken rather than the higher-scoring 1.25 because 1.25 rests on 27
+observations and the curve is flat past 1.00.
+
+### Decision rule, fixed in advance
+
+Evaluate when **20 SHORT trades have closed** or after **14 days**, whichever comes
+first, on trades opened after this shipped.
+
+- **Keep** if mean R over closed SHORT trades exceeds the LONG mean R over the same
+  window. The comparison is against the concurrent long side, not against zero,
+  because both sides face the same regime and the same geometry, and a market that
+  is simply falling would flatter the short side on an absolute test.
+- **Revert to `ReversalLongOnly: true`** if SHORT mean R is worse than LONG by more
+  than 0.3R, or if fewer than 8 SHORT trades have been taken in 14 days — a rule that
+  rarely fires cannot be evaluated and should not be carried.
+- **Do not tune the 1.00.** A second threshold needs its own entry in this file.
+
+### Cost of being wrong
+
+None in money — `paper_mode = true`. The cost is that SHORT and LONG now compete for
+attention within one 7-day window, and H4's entry-timing evaluation is diluted by a
+second side entering on a different rule. `EntryPullbackAtr` is 0.0 in the shipped
+config, so H4 is not live and nothing is actually contended.
+
+### Result
+
+_Open._
+
+---
+

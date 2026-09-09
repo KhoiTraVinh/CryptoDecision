@@ -218,10 +218,15 @@ public enum FlowEntryMode
     OfiMagnitude = 1,
 
     /// <summary>
-    /// Buy the dip: go long once price has fallen at least
-    /// <see cref="FlowSignalOptions.ReversalDropPct"/> over the last
+    /// Fade the last move: go long once price has fallen at least
+    /// <see cref="FlowSignalOptions.ReversalDropPct"/>, or short once it has risen at
+    /// least <see cref="FlowSignalOptions.ReversalRisePct"/>, over the last
     /// <see cref="FlowSignalOptions.ReversalBars"/> closed candles. No order flow in
     /// it at all — only price.
+    ///
+    /// The two thresholds are different numbers because the two sides are not
+    /// symmetric: the dip pays from 0.60% and the rally does not pay until 1.00%.
+    /// The table for each is on the option it belongs to.
     ///
     /// It is here because the flow data does not contain direction. Over 1,496 buckets
     /// aggregate OFI correlates −0.015 with the next hour's signed return, and four
@@ -320,15 +325,60 @@ public sealed record FlowSignalOptions(
     /// </summary>
     double  ReversalDropPct               = 0.60,
 
-    /// <summary>Closed 15-minute candles the fall is measured over. 2 = 30 minutes.</summary>
+    /// <summary>Closed 15-minute candles the move is measured over. 2 = 30 minutes.</summary>
     int     ReversalBars                  = 2,
 
     /// <summary>
-    /// Refuse the short side. On by default: shorting after a rise measures +0.066
-    /// in-sample and +0.068 out-of-sample at one hour, against a 0.070% round trip —
-    /// a real effect that hands its entire value to the exchange.
+    /// Minimum RISE, in percent, over <see cref="ReversalBars"/> closed candles before
+    /// <see cref="FlowEntryMode.CandleReversal"/> will go short. Read only when
+    /// <see cref="ReversalLongOnly"/> is false.
+    ///
+    /// Deliberately NOT the mirror of <see cref="ReversalDropPct"/>, and that is the
+    /// whole finding. Fading a rally at the same 0.60% that works for buying a dip
+    /// hands the entire edge to the exchange; the rally has to be bigger before the
+    /// fade pays for its own round trip. Measured on 1,562 closed 15-minute buckets of
+    /// SOLUSDT from production (2026-08-21 to 2026-09-09), short return over the two
+    /// hours after the signal bucket:
+    ///
+    ///     rise &gt;=   n    2h return   win %   avg favourable   avg adverse
+    ///       0.60%   126     +0.086%    59.5%       1.359%          1.200%
+    ///       0.80%    79     +0.133%    64.6%       1.541%          1.269%
+    ///       1.00%    49     +0.348%    67.3%       1.994%          1.460%
+    ///       1.25%    27     +0.495%    74.1%       2.283%          1.589%
+    ///       1.50%    20     +0.471%    70.0%       2.291%          1.537%
+    ///
+    /// Against a 0.070% round trip, 0.60% returns 1.2x its cost and 1.00% returns 5x.
+    /// 1.00 is taken rather than the higher-scoring 1.25 because 1.25 rests on 27
+    /// observations and the curve is flat past it — the extra return sits inside the
+    /// noise of the extra thinning, and picking the argmax of a curve this short is
+    /// how this repository has manufactured edges before.
+    ///
+    /// Split across sample halves, both of which are positive:
+    ///
+    ///     rise &gt;= 1.00%   first half  n 38  +0.419%  68.4% win
+    ///                     second half n 11  +0.103%  63.6% win
+    ///
+    /// The second half is thin and its magnitudes are smaller across every rule
+    /// including the long one, because that stretch was quieter (average favourable
+    /// excursion 0.88% against 2.32%). The sign holds; the size is not established.
+    /// Registered as H5 in HYPOTHESES.md.
     /// </summary>
-    bool    ReversalLongOnly              = true)
+    double  ReversalRisePct               = 1.00,
+
+    /// <summary>
+    /// Refuse the short side.
+    ///
+    /// Was true, on a measurement that only ever tested the mirrored threshold:
+    /// shorting after a 0.60% rise measures +0.066 in-sample and +0.068 out-of-sample
+    /// at one hour against a 0.070% round trip, which is a real effect that hands its
+    /// entire value to the exchange. That number is still correct, and it is exactly
+    /// why <see cref="ReversalRisePct"/> is a separate parameter rather than a sign
+    /// flip on <see cref="ReversalDropPct"/>.
+    ///
+    /// Now false: the same market gives the short side +0.348% over two hours once the
+    /// rise threshold is raised to 1.00%. Turning it back on is a config edit.
+    /// </summary>
+    bool    ReversalLongOnly              = false)
 {
     /// <summary>Buckets the scorer needs before it can produce anything at all.</summary>
     public int MinimumBars => SignalBars + BaselineBars;
@@ -515,31 +565,63 @@ public static class CrossVenueFlowScorer
 
         var movePct = (double)((now - then) / then) * 100.0;
 
-        if (movePct > -options.ReversalDropPct)
+        // ── Which side, if any ────────────────────────────────────────────────
+        //
+        // Two independent thresholds, not one with a sign flip. The asymmetry is the
+        // measurement, not a preference: buying a dip pays from 0.60% while fading a
+        // rally does not pay until 1.00% — see ReversalRisePct for the table. A single
+        // mirrored threshold is what made the short side look worthless, and it is the
+        // reason this branch sat unimplemented.
+        //
+        // The rise arm is checked first so that the two are visibly parallel and
+        // neither can be reached by falling through the other. The previous version
+        // put the short test AFTER the dip guard had already returned for every
+        // non-falling move, which made it unreachable: by that point movePct was at
+        // most -0.60, so `movePct > 0` could never hold. Setting ReversalLongOnly to
+        // false therefore did nothing at all, silently — the config knob was inert and
+        // said so nowhere. Same class of defect as reading a stale prediction: a
+        // switch that reports success and changes no behaviour.
+        var isDip  = movePct <= -options.ReversalDropPct;
+        var isRise = movePct >=  options.ReversalRisePct;
+
+        if (isRise && options.ReversalLongOnly)
             return FlowVerdict.Abstain(
-                "NO_DIP",
+                "SHORT_DISABLED",
+                $"Price rose {movePct:F2}% over the last {bars} closed bar(s) " +
+                $"({then:F4} to {now:F4}), past the {options.ReversalRisePct:F2}% short " +
+                "threshold, but ReversalLongOnly is on. This is a configured refusal, not " +
+                "an absent signal — the distinction matters because the two are the same " +
+                "silence from outside.");
+
+        if (!isDip && !isRise)
+            return FlowVerdict.Abstain(
+                "NO_SETUP",
                 $"Price moved {movePct:+0.00;-0.00}% over the last {bars} closed bar(s) " +
-                $"({then:F4} to {now:F4}). A fall of at least {options.ReversalDropPct:F2}% is " +
-                "required. Buying after a rise measured negative at every horizon in both " +
+                $"({then:F4} to {now:F4}). A fall of at least {options.ReversalDropPct:F2}% " +
+                (options.ReversalLongOnly
+                    ? "is required."
+                    : $"or a rise of at least {options.ReversalRisePct:F2}% is required.") +
+                " Entering inside this band measured negative at every horizon in both " +
                 "sample halves.");
 
-        // Long only by default — the short side sits on the round trip. Kept as a
-        // branch rather than assumed so turning it on is a config change, not a patch.
-        if (options.ReversalLongOnly is false && movePct > 0)
-            return FlowVerdict.Abstain("NO_DIP", "Short side is not implemented for this mode.");
+        var side = isDip ? "LONG" : "SHORT";
 
         return new FlowVerdict(
             Actionable:          true,
-            Side:                "LONG",
+            Side:                side,
             AggregateOfi:        0.0,
             AggregateZ:          0.0,
             AgreeingVenues:      0,
             ParticipatingVenues: 0,
             DispersionBps:       0.0,
             AbstainCode:         "",
-            Reason:              $"Price fell {movePct:F2}% over {bars} closed 15m bar(s) " +
-                                 $"({then:F4} to {now:F4}), past the {options.ReversalDropPct:F2}% " +
-                                 "threshold. Buying the dip; no order flow consulted.",
+            Reason:              isDip
+                ? $"Price fell {movePct:F2}% over {bars} closed 15m bar(s) " +
+                  $"({then:F4} to {now:F4}), past the {options.ReversalDropPct:F2}% " +
+                  "threshold. Buying the dip; no order flow consulted."
+                : $"Price rose {movePct:F2}% over {bars} closed 15m bar(s) " +
+                  $"({then:F4} to {now:F4}), past the {options.ReversalRisePct:F2}% " +
+                  "threshold. Fading the rally; no order flow consulted.",
             Votes:               []);
     }
 
