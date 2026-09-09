@@ -565,3 +565,82 @@ revert H7 first, since it is the newer and thinner of the two, and re-run H5 on 
 ### Result
 
 _Open._
+
+---
+
+## H8 — The stop was inside the noise, and that is where the money went
+
+**Changed 2026-09-09.** New `MinStopPct = 0.020`, applied as a floor alongside the fee
+floor rather than replacing it. The two are kept separate because they are different
+claims: the fee floor is a property of the exchange, the noise floor a property of SOL.
+
+### What was actually happening
+
+Every trade this bot has ever taken carries `stop_pct` of exactly 0.400 -- the fee floor,
+`roundTripFeeRate x MinStopAsFeeMultiple` = 0.001 x 4. The range low that
+`UseRangeGeometry` claims to place the stop on has never once been reached, because the
+entry rule buys after a fall and therefore enters near the range low by construction.
+"Range geometry" in practice meant a fixed 0.40% stop with a range-high target.
+
+SOL's median 15-minute true range is 1.07%. A 0.40% stop sits well inside it, so it is
+not a barrier that fires when the trade is wrong -- it fires when nothing has happened.
+87 of 115 long signals were stopped out.
+
+### Measured, total P&L as a percent of notional over the 19-day window
+
+    stop     total    less the biggest trade    1st half    2nd half
+    0.40%    + 1.07        - 5.59                + 5.28      - 4.21
+    0.60%    + 0.26        - 6.40                + 0.61      - 0.35
+    0.80%    - 5.60        -12.26                - 4.58      - 1.03
+    1.20%    + 4.57        - 2.09                - 1.05      + 5.62
+    1.60%    +12.15        + 5.49                + 4.15      + 8.00
+    2.00%    +15.94        + 9.28                + 2.92      +13.02
+    2.40%    +10.35        + 3.69                + 1.63      + 8.72
+
+1.60, 2.00 and 2.40 pass all three checks. Nothing narrower passes two. A plateau
+rather than a peak is the reason to believe it: every other parameter swept in this
+session produced a good cell sitting between bad ones.
+
+Position size falls as the stop widens -- notional = capital x risk / stop -- so risk
+per trade is unchanged. In money at constant fractional risk the sample returns about
+3.5x what 0.40% did. Signal count falls from 134 to 102, since a wider stop pushes more
+setups under MinRewardRisk. That is the intended trade.
+
+An earlier sweep in the same session found no stop width positive. It was run before
+the H6 flow exit and the H7 short window existed, and it measured mean R rather than
+money -- mean R is not comparable across stop widths, because 1R is the stop. Both
+defects are corrected here.
+
+### Why a wider stop is defensible now and was not before
+
+The H6 flow exit gives the position an active way out, so the stop is a backstop rather
+than the primary exit. That argument has one hole worth stating: the flow exit only
+fires on a position in profit, so a trade that goes against it from the first minute
+never meets that rule and rides the full 2.00% to the stop. Risk per trade is unchanged
+in dollars, but the price distance is five times what it was.
+
+### Decision rule, fixed in advance
+
+Evaluate when **40 trades have closed** or after **21 days**, whichever comes first.
+
+- **Keep** if total P&L as a fraction of risked capital beats the 0.40% baseline over
+  the same window, **after discarding the single largest winning trade**.
+- **Revert to `MinStopPct: null`** if it does not, or if fewer than 25 trades are taken
+  in 21 days -- a floor that pushes most setups under MinRewardRisk has replaced the
+  strategy with a different, rarer one, and that needs its own evaluation rather than
+  inheriting this one.
+- **Do not sweep between 1.6 and 2.4.** The plateau is the finding; picking its argmax
+  is how a plateau gets turned back into a point.
+
+### Cost of being wrong
+
+None in money -- `paper_mode = true`. The real cost is that H5, H6, H7 and now H8 are
+all open at once, and H8 changes the geometry every one of the others was measured
+against. Their decision rules quote R against baselines computed at a 0.40% stop, and
+those baselines no longer describe what is running. If the combined result is
+ambiguous, H8 is the one to revert first: it is the newest, it moves the most, and the
+other three were at least measured under the geometry they shipped with.
+
+### Result
+
+_Open._

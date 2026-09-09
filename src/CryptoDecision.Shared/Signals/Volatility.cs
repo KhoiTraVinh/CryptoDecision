@@ -297,7 +297,8 @@ public static class VolatilityStops
         decimal rangeLow,
         VolatilityRead volatility,
         decimal roundTripFeeRate,
-        decimal? maxStopPct = null)
+        decimal? maxStopPct = null,
+        decimal? minStopPct = null)
     {
         if (entryPrice <= 0m)
             throw new ArgumentOutOfRangeException(
@@ -328,11 +329,30 @@ public static class VolatilityStops
         // rather than on price, and a narrow range does not change that. Widening the
         // stop without widening the target deliberately worsens the ratio — the
         // alternative is a barrier that cannot pay for itself.
-        var feeFloor = roundTripFeeRate * MinStopAsFeeMultiple;
-        if (stopPct < feeFloor)
+        // Two floors, for two different reasons, and kept apart on purpose.
+        //
+        // The FEE floor says a stop must sit outside the cost of the round trip, or
+        // the trade exits on cost rather than on price. It is a property of the
+        // exchange and it scales with fees.
+        //
+        // The NOISE floor says a stop must sit outside the market's ordinary
+        // movement, or it is hit by nothing happening. It is a property of the
+        // instrument and it has nothing to do with fees. Collapsing the two into one
+        // multiple of the fee rate is what hid this for so long: the constant was
+        // named for fees, so nobody read 4x fees as a claim about SOL's volatility --
+        // which is what it silently was, and it was wrong. SOL's median 15-minute
+        // true range is 1.07%; the fee floor placed every stop at 0.40%, well inside
+        // it, so 87 of 115 long signals were stopped out by ordinary noise.
+        var feeFloor   = roundTripFeeRate * MinStopAsFeeMultiple;
+        var noiseFloor = minStopPct ?? 0m;
+        var floor      = Math.Max(feeFloor, noiseFloor);
+
+        if (stopPct < floor)
         {
-            stopPct = feeFloor;
-            basis   = "range, stop raised to fee floor";
+            stopPct = floor;
+            basis   = floor == noiseFloor && noiseFloor > feeFloor
+                ? $"range, stop raised to the {floor:P2} noise floor"
+                : "range, stop raised to fee floor";
         }
 
         if (maxStopPct is { } cap && stopPct > cap)
@@ -371,7 +391,8 @@ public static class VolatilityStops
         decimal roundTripFeeRate,
         double  stopAtrMultiple   = 1.5,
         double  targetRiskMultiple = 2.0,
-        decimal? maxStopPct       = null)
+        decimal? maxStopPct       = null,
+        decimal? minStopPct       = null)
     {
         if (entryPrice <= 0m)
             throw new ArgumentOutOfRangeException(
@@ -387,11 +408,18 @@ public static class VolatilityStops
 
         var stopPct = (decimal)(atrPct * stopAtrMultiple) / 100m;
 
-        var feeFloor = roundTripFeeRate * MinStopAsFeeMultiple;
-        if (stopPct < feeFloor)
+        // Same two floors as ResolveFromRange, and the same reason for keeping them
+        // apart: fees are a property of the exchange, noise is a property of SOL.
+        var feeFloor   = roundTripFeeRate * MinStopAsFeeMultiple;
+        var noiseFloor = minStopPct ?? 0m;
+        var floor      = Math.Max(feeFloor, noiseFloor);
+
+        if (stopPct < floor)
         {
-            stopPct = feeFloor;
-            basis   = $"{basis}, raised to fee floor";
+            stopPct = floor;
+            basis   = floor == noiseFloor && noiseFloor > feeFloor
+                ? $"{basis}, raised to the {floor:P2} noise floor"
+                : $"{basis}, raised to fee floor";
         }
 
         // Capping the stop is a deliberate choice with a cost worth naming: it

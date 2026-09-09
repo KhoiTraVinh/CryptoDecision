@@ -222,7 +222,8 @@ public sealed class CrossVenueFlowStrategy(
                     rangeLow:         window.Min(c => c.Low),
                     volatility:       volatility,
                     roundTripFeeRate: tuning.RoundTripFeeRate,
-                    maxStopPct:       tuning.MaxStopPct);
+                    maxStopPct:       tuning.MaxStopPct,
+                    minStopPct:       tuning.MinStopPct);
 
                 // The entry has already broken out of the range it was measured
                 // against. Refusing beats inventing a barrier: a breakout is exactly
@@ -239,7 +240,8 @@ public sealed class CrossVenueFlowStrategy(
                     roundTripFeeRate:   tuning.RoundTripFeeRate,
                     stopAtrMultiple:    tuning.StopAtrMultiple,
                     targetRiskMultiple: tuning.TargetRiskMultiple,
-                    maxStopPct:         tuning.MaxStopPct);
+                    maxStopPct:         tuning.MaxStopPct,
+                    minStopPct:         tuning.MinStopPct);
             }
 
             // A trade whose reward does not cover its risk after fees is refused here
@@ -670,6 +672,49 @@ public sealed class FlowStrategyOptions
     /// trade has to come down, reduce the position size instead.
     /// </summary>
     public decimal? MaxStopPct { get; set; } = null;
+
+    /// <summary>
+    /// Floor under the stop distance, as a fraction of entry — the market's noise, not
+    /// the exchange's fees. Null leaves only the fee floor in place.
+    ///
+    /// 0.020 because SOL's median 15-minute true range is 1.07% and the fee floor put
+    /// every stop at 0.40%, well inside it. That is not a stop, it is a guarantee of
+    /// being stopped: 87 of 115 long signals were closed by ordinary movement rather
+    /// than by being wrong, and every trade this bot has taken carries stop_pct of
+    /// exactly 0.400 — the range low the geometry claims to use has never once been
+    /// reached before the floor bound.
+    ///
+    /// Measured over the 19-day production window under the shipped rules, total P&amp;L
+    /// as a percent of notional, with the three checks this file applies to everything:
+    ///
+    ///     stop     total    less the biggest trade    1st half    2nd half
+    ///     0.40%    + 1.07        - 5.59                + 5.28      - 4.21
+    ///     0.60%    + 0.26        - 6.40                + 0.61      - 0.35
+    ///     0.80%    - 5.60        -12.26                - 4.58      - 1.03
+    ///     1.20%    + 4.57        - 2.09                - 1.05      + 5.62
+    ///     1.60%    +12.15        + 5.49                + 4.15      + 8.00
+    ///     2.00%    +15.94        + 9.28                + 2.92      +13.02
+    ///     2.40%    +10.35        + 3.69                + 1.63      + 8.72
+    ///
+    /// 1.60, 2.00 and 2.40 all pass all three; nothing narrower passes any two. Three
+    /// adjacent widths agreeing is a plateau rather than a peak, which is the whole
+    /// reason to believe it — every other parameter swept in this session produced a
+    /// good cell sitting alone between bad ones.
+    ///
+    /// Position size falls as the stop widens, since notional = capital x risk / stop,
+    /// so the risk per trade is unchanged and only the notional moves. In money at a
+    /// constant risk fraction the sample returns roughly 3.5x what the 0.40% floor did.
+    ///
+    /// The count falls with it: 134 signals become 102, because a wider stop pushes
+    /// more setups under MinRewardRisk. That is the intended trade.
+    ///
+    /// NOT PROVEN. One 19-day window, and roughly fifty configurations were measured
+    /// against it in the session that produced this. What separates it from the other
+    /// forty-nine is that the mechanism was written down in this repository before it
+    /// was measured — see the stop-geometry note — and that it holds across a plateau
+    /// rather than at a point. H8 in HYPOTHESES.md carries the decision rule.
+    /// </summary>
+    public decimal? MinStopPct { get; set; } = 0.020m;
 
     /// <summary>
     /// Close a position when aggressive flow has leaned against it for
