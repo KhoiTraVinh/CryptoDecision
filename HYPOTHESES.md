@@ -483,3 +483,85 @@ turn H6 off and re-run H5 alone rather than to reason about which half worked.
 ### Result
 
 _Open._
+
+---
+
+## H7 — The short side fades a spike, not a rally, so it gets its own window
+
+**Changed 2026-09-09.** New `ReversalBarsShort = 1`. The rise that triggers a short is
+now measured over a single closed 15-minute bar; the fall that triggers a long stays at
+`ReversalBars = 2`. Previously one window served both sides.
+
+### The gradient
+
+Varying only the window the trigger move is measured over, across the 19-day production
+window, with the shipped geometry and the H6 exit:
+
+    window    SHORT n   mean R   1st half   2nd half     LONG n   mean R
+      15m        17     +1.168    +1.467     +0.619        53     -0.213
+      30m        46     +0.055    -0.014     +0.272       117     -0.151
+       1h        91     -0.027    +0.009     -0.127       191     -0.195
+       2h       166     -0.222    -0.154     -0.337       273     -0.215
+
+Monotone on the short side, absent on the long side, and it has a mechanism: a 1% rise
+inside a single 15-minute bar is a spike, usually a liquidation cascade, and fading a
+spike is a different trade from fading a 1% rise that took two hours to build, which is
+a trend. One window could not tell those apart, and the earlier finding that fading
+rallies loses money in an uptrend (0 wins in 19 trades over the 26-27/08 rally) is the
+same fact seen from the other side.
+
+### Why the headline number is not the reason to believe it
+
+Two of the seventeen trades carry the result:
+
+    2026-08-22 04:30   move +4.34%   TP    +13.32R
+    2026-08-28 15:15   move +1.38%   TP     +5.70R
+    the other fifteen                       +0.83R   (mean +0.055R)
+
+The +13.32R fell on the day SOL ranged 87.72 to 102.74 — 17% in one day. Its R:R of
+13.32 is a restatement of that: the two-hour range was 6.7% wide. That is a market
+event, not a repeatable edge, and stripping it takes the mean from +1.168 to +0.408;
+stripping both takes it to +0.055, which is exactly what the 30-minute window already
+produced.
+
+The honest description is a fat-tailed, low-frequency setup: about one trade a day,
+eight of seventeen stopped out, expectancy concentrated in rare large wins. That shape
+needs far more evidence than a normal one. The second half of the sample carries no
+outlier and returns +0.619R over six trades, which is encouraging and is not a sample.
+
+Shipped on the operator's decision with all of the above stated.
+
+### What else this changes
+
+Both sides can now fire on the same evaluation, which was impossible while one window
+served both: a 30-minute fall of 0.60% whose most recent bar rose 1.00% satisfies each
+rule on its own evidence. The shorter window wins, on the same reasoning that motivates
+the change — a dip whose last bar has already been reclaimed is a dip that has
+finished. The verdict says so in its reason string rather than resolving it silently.
+
+### Decision rule, fixed in advance
+
+Evaluate when **25 SHORT trades have closed** or after **21 days**, whichever comes
+first, on trades opened after this shipped.
+
+- **Keep** if mean R over closed SHORT trades is positive **after discarding the single
+  largest winning R**. The discard is not conservatism, it is the specific failure this
+  entry is exposed to, and it must be fixed in advance or the first outlier will be
+  read as confirmation.
+- **Revert to `ReversalBarsShort = 2`** if that trimmed mean is negative, or if fewer
+  than 12 SHORT trades have been taken in 21 days — the 15-minute window is expected to
+  fire about once a day, and materially less than that means the threshold and the
+  window together are too rare to evaluate.
+- **Do not sweep the window.** 15m was chosen off a four-point gradient with a
+  mechanism, not off an argmax. A fifth point needs its own entry.
+
+### Cost of being wrong
+
+None in money — `paper_mode = true`. The cost is that H5, H6 and H7 are now all open on
+overlapping windows and all touch the short side. H5's threshold and H7's window cannot
+be told apart by outcome alone; if the short side fails, the honest next step is to
+revert H7 first, since it is the newer and thinner of the two, and re-run H5 on its own.
+
+### Result
+
+_Open._

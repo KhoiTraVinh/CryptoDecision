@@ -325,8 +325,43 @@ public sealed record FlowSignalOptions(
     /// </summary>
     double  ReversalDropPct               = 0.60,
 
-    /// <summary>Closed 15-minute candles the move is measured over. 2 = 30 minutes.</summary>
+    /// <summary>
+    /// Closed 15-minute candles the FALL is measured over, for the long side.
+    /// 2 = 30 minutes. See <see cref="ReversalBarsShort"/> for the rise.
+    /// </summary>
     int     ReversalBars                  = 2,
+
+    /// <summary>
+    /// Closed 15-minute candles the RISE is measured over, for the short side.
+    /// 1 = a single bar.
+    ///
+    /// Separate from <see cref="ReversalBars"/> because the two sides responded in
+    /// opposite directions to the same change. Measured over the 19-day production
+    /// window, varying only the window the trigger move is measured on:
+    ///
+    ///     window    SHORT n   mean R   1st half   2nd half     LONG n   mean R
+    ///       15m        17     +1.168    +1.467     +0.619        53     -0.213
+    ///       30m        46     +0.055    -0.014     +0.272       117     -0.151
+    ///        1h        91     -0.027    +0.009     -0.127       191     -0.195
+    ///        2h       166     -0.222    -0.154     -0.337       273     -0.215
+    ///
+    /// The short gradient is monotone and has a mechanism behind it: a 1% rise inside
+    /// a SINGLE 15-minute bar is a spike, usually a liquidation cascade, and fading a
+    /// spike is a different trade from fading a 1% rise that took two hours to build,
+    /// which is a trend. One window could not tell those apart. The long side does not
+    /// share the gradient and stays at 2.
+    ///
+    /// WHAT THE +1.168 IS NOT. Two trades carry it. A single +13.32R on 2026-08-22,
+    /// the day SOL ranged 87.72-102.74 (17% in one day), is 67% of the net; adding the
+    /// next largest reaches 96%, and the remaining fifteen trades total +0.83R — a mean
+    /// of +0.055R, which is exactly what the 30-minute window already produces. This is
+    /// a fat-tailed, low-frequency setup: roughly one trade a day, eight of seventeen
+    /// stopped out, and its expectancy sits in rare large wins. That shape needs far
+    /// more evidence than a normal one before the number means anything, and it is
+    /// shipped on the operator's decision with that stated. H7 in HYPOTHESES.md carries
+    /// a decision rule that discards the largest win before judging, for this reason.
+    /// </summary>
+    int     ReversalBarsShort             = 1,
 
     /// <summary>
     /// Minimum RISE, in percent, over <see cref="ReversalBars"/> closed candles before
@@ -547,8 +582,12 @@ public static class CrossVenueFlowScorer
     public static FlowVerdict ScoreReversal(
         IReadOnlyList<Candle> candles, DateTime nowUtc, FlowSignalOptions options)
     {
-        var bars   = Math.Max(1, options.ReversalBars);
-        var needed = bars + 1;
+        // Two windows, one per side. The dip is measured over ReversalBars and the
+        // rise over ReversalBarsShort, because the two sides are not the same trade:
+        // see ReversalBarsShort for the gradient that separated them.
+        var dipBars  = Math.Max(1, options.ReversalBars);
+        var riseBars = Math.Max(1, options.ReversalBarsShort);
+        var needed   = Math.Max(dipBars, riseBars) + 1;
 
         if (candles.Count == 0)
             return FlowVerdict.Abstain("NO_CANDLES", "No 1-minute candles available.");
@@ -566,15 +605,17 @@ public static class CrossVenueFlowScorer
             return FlowVerdict.Abstain(
                 "NOT_ENOUGH_CANDLES",
                 $"Only {closed.Count} closed 15-minute bar(s); {needed} needed to measure a " +
-                $"{bars}-bar move.");
+                $"{dipBars}-bar fall and a {riseBars}-bar rise.");
 
-        var now  = closed[^1].Close;
-        var then = closed[^(bars + 1)].Close;
+        var now      = closed[^1].Close;
+        var thenDip  = closed[^(dipBars  + 1)].Close;
+        var thenRise = closed[^(riseBars + 1)].Close;
 
-        if (then <= 0m)
+        if (thenDip <= 0m || thenRise <= 0m)
             return FlowVerdict.Abstain("NO_CANDLES", "Reference close is not positive.");
 
-        var movePct = (double)((now - then) / then) * 100.0;
+        var dipMovePct  = (double)((now - thenDip)  / thenDip)  * 100.0;
+        var riseMovePct = (double)((now - thenRise) / thenRise) * 100.0;
 
         // ── Which side, if any ────────────────────────────────────────────────
         //
@@ -592,26 +633,41 @@ public static class CrossVenueFlowScorer
         // false therefore did nothing at all, silently — the config knob was inert and
         // said so nowhere. Same class of defect as reading a stale prediction: a
         // switch that reports success and changes no behaviour.
-        var isDip  = movePct <= -options.ReversalDropPct;
-        var isRise = movePct >=  options.ReversalRisePct;
+        var isDip  = dipMovePct  <= -options.ReversalDropPct;
+        var isRise = riseMovePct >=  options.ReversalRisePct;
+
+        // Both can now be true at once, which was impossible while one window served
+        // both sides. A 30-minute fall of 0.60% whose most recent 15-minute bar rose
+        // 1.00% satisfies each rule on its own evidence — the dip happened, and then
+        // it was bought back.
+        //
+        // The shorter window wins, and not arbitrarily: the entire reason the short
+        // side moved to one bar is that recency is what distinguishes a spike worth
+        // fading from a trend worth leaving alone. A dip whose last bar has already
+        // been reclaimed is a dip that has finished; entering long on it buys the top
+        // of the bounce. Logged by the caller through the reason string rather than
+        // resolved in silence, because a tie-break nobody can see is how a rule ends
+        // up doing something its author never chose.
+        var contested = isDip && isRise;
+        if (contested) isDip = false;
 
         if (isRise && options.ReversalLongOnly)
             return FlowVerdict.Abstain(
                 "SHORT_DISABLED",
-                $"Price rose {movePct:F2}% over the last {bars} closed bar(s) " +
-                $"({then:F4} to {now:F4}), past the {options.ReversalRisePct:F2}% short " +
-                "threshold, but ReversalLongOnly is on. This is a configured refusal, not " +
-                "an absent signal — the distinction matters because the two are the same " +
-                "silence from outside.");
+                $"Price rose {riseMovePct:F2}% over the last {riseBars} closed bar(s), past the " +
+                $"{options.ReversalRisePct:F2}% short threshold, but ReversalLongOnly is on. This " +
+                "is a configured refusal, not an absent signal — the distinction matters because " +
+                "the two are the same silence from outside.");
 
         if (!isDip && !isRise)
             return FlowVerdict.Abstain(
                 "NO_SETUP",
-                $"Price moved {movePct:+0.00;-0.00}% over the last {bars} closed bar(s) " +
-                $"({then:F4} to {now:F4}). A fall of at least {options.ReversalDropPct:F2}% " +
+                $"Over {dipBars} closed bar(s) price moved {dipMovePct:+0.00;-0.00}% against a " +
+                $"-{options.ReversalDropPct:F2}% long threshold" +
                 (options.ReversalLongOnly
-                    ? "is required."
-                    : $"or a rise of at least {options.ReversalRisePct:F2}% is required.") +
+                    ? "."
+                    : $", and over {riseBars} bar(s) {riseMovePct:+0.00;-0.00}% against a " +
+                      $"+{options.ReversalRisePct:F2}% short threshold.") +
                 " Entering inside this band measured negative at every horizon in both " +
                 "sample halves.");
 
@@ -627,12 +683,15 @@ public static class CrossVenueFlowScorer
             DispersionBps:       0.0,
             AbstainCode:         "",
             Reason:              isDip
-                ? $"Price fell {movePct:F2}% over {bars} closed 15m bar(s) " +
-                  $"({then:F4} to {now:F4}), past the {options.ReversalDropPct:F2}% " +
-                  "threshold. Buying the dip; no order flow consulted."
-                : $"Price rose {movePct:F2}% over {bars} closed 15m bar(s) " +
-                  $"({then:F4} to {now:F4}), past the {options.ReversalRisePct:F2}% " +
-                  "threshold. Fading the rally; no order flow consulted.",
+                ? $"Price fell {dipMovePct:F2}% over {dipBars} closed 15m bar(s), past the " +
+                  $"{options.ReversalDropPct:F2}% threshold. Buying the dip; no order flow consulted."
+                : $"Price rose {riseMovePct:F2}% over {riseBars} closed 15m bar(s), past the " +
+                  $"{options.ReversalRisePct:F2}% threshold. Fading the spike; no order flow " +
+                  "consulted." +
+                  (contested
+                     ? $" The {dipBars}-bar window also showed a {dipMovePct:F2}% fall, which the " +
+                       "shorter window overrides: the dip has already been bought back."
+                     : ""),
             Votes:               []);
     }
 
