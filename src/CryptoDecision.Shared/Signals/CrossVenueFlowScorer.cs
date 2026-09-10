@@ -264,6 +264,26 @@ public enum FlowEntryMode
     /// the pattern working, and none of this has been seen in a falling market.
     /// </summary>
     CandleReversal = 2,
+
+    /// <summary>
+    /// Enter WITH the side that dominated the last closed bucket: buy volume at least
+    /// <see cref="FlowSignalOptions.RatioMinimum"/> times sell volume (or the reverse
+    /// for a short), on at least <see cref="FlowSignalOptions.RatioMinVolumeUsd"/> of
+    /// notional. Price is not consulted at all.
+    ///
+    /// The opposite sign to every rule above it, and the first to enter with the tape
+    /// rather than against it. See <see cref="CrossVenueFlowScorer.ScoreFlowRatio"/>
+    /// for the measurement, including why it does not contradict the finding that
+    /// aggregate OFI carries no direction: that figure averages the whole
+    /// distribution, and this rule only reads its extreme tail.
+    ///
+    /// Wants the ATR geometry, not the range geometry: entering with the dominant side
+    /// puts price at the edge of its own range, so a range-boundary target sits almost
+    /// on top of the entry and fails MinRewardRisk. Set UseRangeGeometry false, which
+    /// with a 2.00% stop floor and TargetRiskMultiple 2.0 gives the 2%/4% pair this
+    /// was measured on.
+    /// </summary>
+    FlowRatio = 3,
 }
 
 public sealed record FlowSignalOptions(
@@ -413,7 +433,42 @@ public sealed record FlowSignalOptions(
     /// Now false: the same market gives the short side +0.348% over two hours once the
     /// rise threshold is raised to 1.00%. Turning it back on is a config edit.
     /// </summary>
-    bool    ReversalLongOnly              = false)
+    bool    ReversalLongOnly              = false,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: how far the dominant side must
+    /// outweigh the other, as a plain volume ratio. 2.1 means buy volume at least 2.1x
+    /// sell volume for a long.
+    ///
+    /// Chosen by the operator from the middle of a three-cell plateau — 1.8, 2.1 and
+    /// 2.5 are all positive overall, after discarding the largest winner, and in both
+    /// sample halves — rather than at its argmax. 3.0 fails the outlier check on 12
+    /// observations.
+    /// </summary>
+    decimal RatioMinimum                  = 2.1m,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: minimum notional in the qualifying
+    /// bucket, in USD.
+    ///
+    /// A separate condition from the ratio, not a refinement of it. Below $3M a 2:1
+    /// imbalance measured -0.012 mean R once the largest winner was removed and -0.082
+    /// in the first sample half; above it, +0.332 and +0.521. A 2:1 lean on two million
+    /// dollars is what a quiet hour looks like, and it predicts nothing.
+    /// </summary>
+    decimal RatioMinVolumeUsd             = 3_000_000m,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: minutes to wait after a bucket closes
+    /// before trusting its numbers.
+    ///
+    /// Closed is not settled. Trades arrive late and the aggregation worker folds them
+    /// in on a two-minute cycle, so a just-closed bucket is still moving. Measured cost
+    /// of the wait, as entry price given up: 0.001R at one minute, 0.016R at three,
+    /// 0.020R at five — against a measured edge of 0.379R. Three minutes buys a settled
+    /// number for 4% of the edge.
+    /// </summary>
+    int     RatioSettleMinutes            = 3)
 {
     /// <summary>Buckets the scorer needs before it can produce anything at all.</summary>
     public int MinimumBars => SignalBars + BaselineBars;
@@ -752,6 +807,147 @@ public static class CrossVenueFlowScorer
             .ToList();
     }
 
+
+    /// <summary>
+    /// The rule for <see cref="FlowEntryMode.FlowRatio"/>: enter WITH the side that
+    /// dominated the last closed bucket, when it dominated by enough and on enough
+    /// volume.
+    ///
+    /// This is the opposite sign to every entry rule that came before it. CandleReversal
+    /// buys a fall and sells a spike, which means buying while the tape is selling: 138
+    /// of its 155 signals entered against the last closed bucket's flow. This one enters
+    /// with it.
+    ///
+    /// Why that is not a contradiction of "flow has no direction"
+    /// ---------------------------------------------------------
+    /// Aggregate OFI correlates -0.015 with the next hour's signed return over 1,496
+    /// buckets, which is why entries moved to price alone. That figure is an average
+    /// over the whole distribution. This rule only ever looks at the extreme tail —
+    /// a 2.1:1 imbalance occurs in about 5% of buckets, and with the volume floor in
+    /// about 3%. An average of zero says nothing about a tail, and nobody had measured
+    /// the tail separately.
+    ///
+    /// Measured over 1,562 production buckets, entering at the close of the qualifying
+    /// bucket, stop 2.00%, target 4.00%, 12-hour cap, timeouts priced at the exit rather
+    /// than at zero:
+    ///
+    ///     ratio    n     mean R   less top 1   1st half   2nd half
+    ///      1.8    200    +0.043     +0.034      +0.045     +0.042
+    ///      2.1     92    +0.185     +0.166      +0.457     +0.083
+    ///      2.5     31    +0.278     +0.225      +0.380     +0.258
+    ///      3.0     12    +0.027     -0.140      +0.011     +0.034
+    ///
+    /// Three adjacent ratios positive on every column. 2.1 is the operator's choice and
+    /// sits in the middle of that plateau rather than at its argmax.
+    ///
+    /// The volume floor is a separate finding, not a refinement of the ratio. At a fixed
+    /// 2.1 ratio, split by the bucket's total notional:
+    ///
+    ///     total      n    mean R   less top 1   1st half   2nd half
+    ///     under $3M  50   +0.025     -0.012      -0.082     +0.048
+    ///     $3-6M      30   +0.383     +0.332      +0.521     +0.303
+    ///     $6-12M     10   +0.212     +0.030      +1.143     -0.408
+    ///     over $12M   2   +1.065        —           —          —
+    ///
+    /// Below $3M a 2:1 imbalance is what thin trading looks like, and it carries
+    /// nothing. The floor is doing real work: it removes 50 of 93 signals and every one
+    /// of the failing columns.
+    ///
+    /// Hold time, at ratio 2.1 with the volume floor, is a plateau rather than a peak:
+    /// +0.032 / +0.082 / +0.273 / +0.346 / +0.379 / +0.330 at 1, 2, 4, 6, 12 and 24
+    /// hours, all positive in both halves and after discarding the largest winner. The
+    /// shipped MaxHoldMinutes of 720 is the peak, and the rule is not sensitive to it.
+    ///
+    /// NOT PROVEN. 43 signals over the whole sample once the volume floor applies, the
+    /// second half is much weaker than the first (+0.137 against +0.751), and it is the
+    /// same 19-day window that roughly eighty configurations have now been measured
+    /// against. H9 in HYPOTHESES.md carries the decision rule.
+    /// </summary>
+    public static FlowVerdict ScoreFlowRatio(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        DateTime nowUtc,
+        FlowSignalOptions options)
+    {
+        // One bucket, and it must be closed. OfiByClosedBucket owns that guard for the
+        // same reason the exit path uses it: the aggregation worker rewrites the
+        // current bucket every two minutes, so its reading is a partial slice that
+        // will change.
+        var recent = OfiByClosedBucket(barsByVenue, nowUtc, 1);
+
+        if (recent.Count == 0)
+            return FlowVerdict.Abstain(
+                "NO_CLOSED_BUCKET",
+                "flow_bars_15m has no closed bucket for this symbol yet.");
+
+        var bucket = recent[0];
+
+        // Closed is not the same as settled. Late trades keep arriving after a bucket
+        // ends and the worker folds them in on its next pass, so the reading is still
+        // moving for the first couple of minutes. Waiting costs a measured 0.016R at
+        // three minutes -- 4% of the edge -- which is the cheaper side of the trade
+        // against acting on a number that has not stopped changing.
+        var closedAt = bucket.Bucket.AddMinutes(15);
+        var settled  = nowUtc - closedAt;
+
+        if (settled < TimeSpan.FromMinutes(options.RatioSettleMinutes))
+            return FlowVerdict.Abstain(
+                "BUCKET_NOT_SETTLED",
+                $"The {bucket.Bucket:HH:mm} bucket closed {settled.TotalMinutes:F1} min ago and " +
+                $"the aggregation worker is still folding late trades into it. Waiting for " +
+                $"{options.RatioSettleMinutes} min.");
+
+        if (bucket.VolumeUsd < options.RatioMinVolumeUsd)
+            return FlowVerdict.Abstain(
+                "VOLUME_TOO_THIN",
+                $"The {bucket.Bucket:HH:mm} bucket traded " +
+                $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
+                $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floor. A 2:1 imbalance on thin " +
+                "volume is what thin volume looks like: below the floor those signals measured " +
+                "-0.012 mean R once the largest winner is removed, against +0.332 above it.");
+
+        // ratio = buy/sell, recovered from the imbalance:
+        //   ofi = (b-s)/(b+s)  =>  b/s = (1+ofi)/(1-ofi)
+        // Expressed this way so the rule reads in the operator's terms -- "one side
+        // must be 2.1 times the other" -- while reusing the aggregation that already
+        // drops the live bucket.
+        var ofi = bucket.Ofi;
+
+        if (Math.Abs(ofi) >= 1.0)
+            return FlowVerdict.Abstain(
+                "ONE_SIDED_BUCKET",
+                $"The {bucket.Bucket:HH:mm} bucket has no volume on one side at all, which is a " +
+                "data fault rather than a market state.");
+
+        var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
+
+        if (ratio < (double)options.RatioMinimum)
+            return FlowVerdict.Abstain(
+                "RATIO_TOO_LOW",
+                $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
+                $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
+                $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
+                $"{options.RatioMinimum:F2}:1 minimum.",
+                [], ofi, 0.0, 0, 0, 0.0);
+
+        var side = ofi > 0 ? "LONG" : "SHORT";
+
+        return new FlowVerdict(
+            Actionable:          true,
+            Side:                side,
+            AggregateOfi:        ofi,
+            AggregateZ:          0.0,
+            AgreeingVenues:      0,
+            ParticipatingVenues: barsByVenue.Count,
+            DispersionBps:       0.0,
+            AbstainCode:         "",
+            Reason:              $"The {bucket.Bucket:HH:mm} bucket closed {ratio:F2}:1 " +
+                                 $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
+                                 $"${bucket.VolumeUsd / 1_000_000m:F2}M (OFI {ofi:+0.000;-0.000}), " +
+                                 $"past the {options.RatioMinimum:F2}:1 and " +
+                                 $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floors. Entering " +
+                                 "WITH the dominant side; price is not consulted.",
+            Votes:               []);
+    }
 
     // ── Mode: OfiMagnitude ────────────────────────────────────────────────────
 

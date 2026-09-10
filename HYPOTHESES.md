@@ -674,3 +674,96 @@ other three were at least measured under the geometry they shipped with.
 ### Result
 
 _Open._
+
+---
+
+## H9 — Enter with the tape, not against it
+
+**Changed 2026-09-10.** `EntryMode: CandleReversal -> FlowRatio`. The entry rule is
+replaced, not filtered. Price is no longer consulted at all; the bot enters WITH the
+side that dominated the last closed 15-minute bucket, when it dominated by at least
+`RatioMinimum` (2.1:1) on at least `RatioMinVolumeUsd` ($3M) of notional, after waiting
+`RatioSettleMinutes` (3) for the bucket to settle.
+
+`UseRangeGeometry` goes to false with it. Entering with the dominant side puts price at
+the edge of its own range, so a range-boundary target lands on top of the entry and
+fails MinRewardRisk — only 3 of 92 signals survived it. The ATR path with the 2.00%
+noise floor and TargetRiskMultiple 2.0 gives the 2%/4% pair this was measured on.
+
+### Where it came from
+
+The operator read the raw per-bucket tape across five windows they chose themselves and
+observed that the bot enters against the dominant side. That is measurably true: 138 of
+155 CandleReversal signals entered against the last closed bucket's flow, because buying
+a fall means buying while the tape sells.
+
+### Measured, 1,562 production buckets, timeouts priced at the exit
+
+    ratio    n     mean R   less top 1   1st half   2nd half
+     1.8    200    +0.043     +0.034      +0.045     +0.042
+     2.1     92    +0.185     +0.166      +0.457     +0.083
+     2.5     31    +0.278     +0.225      +0.380     +0.258
+     3.0     12    +0.027     -0.140      +0.011     +0.034
+
+Three adjacent ratios positive on every column. 2.1 is the operator's choice and sits in
+the middle of the plateau, not at its argmax.
+
+The volume floor is a separate condition, measured at a fixed 2.1 ratio:
+
+    total       n    mean R   less top 1   1st half   2nd half
+    under $3M   50   +0.025     -0.012      -0.082     +0.048
+    $3-6M       30   +0.383     +0.332      +0.521     +0.303
+    $6-12M      10   +0.212     +0.030      +1.143     -0.408
+    over $12M    2   +1.065        —           —          —
+
+Hold time is a plateau, not a peak: +0.032 / +0.082 / +0.273 / +0.346 / +0.379 / +0.330
+at 1, 2, 4, 6, 12 and 24 hours, every one positive in both halves and after discarding
+the largest winner. The shipped 720 minutes is the peak and the rule is insensitive to
+it — which is the opposite of what a curve-fit looks like.
+
+Long/short balance: 19 long and 21 short over the sample, against CandleReversal's 104
+and 13. The old rule was structurally biased toward buying; this one is not.
+
+### Why this does not contradict "flow has no direction"
+
+[[flow-has-no-direction-price-does]] measured aggregate OFI at -0.015 against the next
+hour's signed return over 1,496 buckets. That is an average across the whole
+distribution. This rule reads only the extreme tail: a 2.1:1 imbalance occurs in about
+5% of buckets and, with the volume floor, in about 3%. An average of zero constrains a
+tail very little, and the tail had never been measured on its own.
+
+### The one earlier defect this design avoids
+
+CandleReversal entered against the flow, which made the H6 flow-reversal exit fire
+immediately — the exit condition was already satisfied at entry. FlowRatio enters WITH
+the flow, so the exit only fires when the tape genuinely turns. The two rules are now
+coherent rather than near-negatives of each other.
+
+### Decision rule, fixed in advance
+
+Evaluate when **30 trades have closed** or after **21 days**, whichever comes first.
+
+- **Keep** if mean R is positive after discarding the single largest winner AND at
+  least 12 trades have been taken. The discard is mandatory: this project has twice
+  produced a "finding" that was one flash crash.
+- **Revert to `CandleReversal`** if mean R after that discard is negative, or if fewer
+  than 12 trades occur in 21 days. Expected rate is 2.6/day before the volume floor and
+  about 0.7/day after it; materially less means the floors are wrong for live
+  conditions.
+- **Do not sweep the ratio or the volume floor.** Both were chosen from plateaus. A new
+  value needs its own entry.
+
+### Cost of being wrong
+
+None in money — `paper_mode` is true. The real cost is that H5, H6 and H7 die here: they
+are hypotheses about CandleReversal's entry, and CandleReversal is no longer running.
+Their windows are void. H8's stop floor survives and is now load-bearing for a different
+rule than it was measured on.
+
+That is the operator's explicit choice, made against a recommendation to run both
+strategies in parallel so the market could arbitrate. Recorded because a future session
+will otherwise read the abandoned H5/H7 windows as failures rather than as cancelled.
+
+### Result
+
+_Open._

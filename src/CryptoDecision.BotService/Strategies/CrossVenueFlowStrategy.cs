@@ -97,9 +97,19 @@ public sealed class CrossVenueFlowStrategy(
                 opts.Symbol, tuning.AtrLookbackMinutes, ct);
 
             // ── The signal ────────────────────────────────────────────────────
-            var verdict = tuning.Signal.EntryMode == FlowEntryMode.CandleReversal
-                ? CrossVenueFlowScorer.ScoreReversal(candles, DateTime.UtcNow, tuning.Signal)
-                : CrossVenueFlowScorer.Score(set.ByVenue, tuning.Signal);
+            var verdict = tuning.Signal.EntryMode switch
+            {
+                FlowEntryMode.CandleReversal =>
+                    CrossVenueFlowScorer.ScoreReversal(candles, DateTime.UtcNow, tuning.Signal),
+
+                // Reads flow, not price, and enters with the dominant side. The candles
+                // fetched above are still used for the volatility reading the geometry
+                // needs; this mode simply does not score on them.
+                FlowEntryMode.FlowRatio =>
+                    CrossVenueFlowScorer.ScoreFlowRatio(set.ByVenue, DateTime.UtcNow, tuning.Signal),
+
+                _ => CrossVenueFlowScorer.Score(set.ByVenue, tuning.Signal),
+            };
 
             if (!verdict.Actionable)
             {
