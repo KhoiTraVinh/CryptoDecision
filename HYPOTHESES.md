@@ -767,3 +767,39 @@ will otherwise read the abandoned H5/H7 windows as failures rather than as cance
 ### Result
 
 _Open._
+
+---
+
+## H6 — RETIRED 2026-09-10, removed from the code
+
+The flow-reversal exit is gone, on the operator's instruction, along with
+`UseFlowReversalExit`, `FlowExitBars` and `FlowExitMinProfitPct`.
+
+It never got a fair test. It shipped on 2026-09-09 with a defect that let it read the
+buckets which had caused its own entry, closed two live trades thirty seconds after
+opening them, and was fixed the next day. In the twenty hours it then ran under the fix
+it fired exactly once, at minute 705 of a 720-minute hold, for +0.39% against the
++0.34% that simply timing out would have produced. One firing, worth 0.05%.
+
+The +26.1R and the -49.4R to -15.2R improvement quoted for it were simulated, never
+observed. They described the rule WITH the freshness guard, which only existed in SQL
+until the last day of its life.
+
+What it leaves behind, and what is worth keeping:
+
+  - Flow measured AFTER entry does grade outcomes, monotonically and on decent counts:
+    with the trade +0.165 (n 53), mildly against -0.190 (n 24), moderately against
+    -0.403 (n 21). That is the strongest relationship found in two days of searching
+    and it came from the operator, not from a sweep.
+  - The rule as built could never act on the -0.403 group, because it was profit-only
+    and those trades are never in profit. It cured the patients who were going to live.
+  - Cutting losers on one-sided flow was therefore always the interesting half, and it
+    was never built or measured.
+
+If an exit rule on flow is revisited, start from the loser half, and note that under
+FlowRatio the entry is WITH the tape — so a reversal exit is coherent there in a way it
+never was under CandleReversal, where entry and exit were near-negatives of each other.
+
+### Result
+
+_Retired untested._

@@ -401,7 +401,7 @@ public sealed class CrossVenueFlowStrategy(
     /// their favour. A stop that wide relative to the target is a coin flip with a fee
     /// attached.
     /// </summary>
-    public async Task<ExitDecision> EvaluateExitAsync(
+    public Task<ExitDecision> EvaluateExitAsync(
         BotTrade trade, decimal currentPrice, BotOptions opts, CancellationToken ct)
     {
         var rawChange = (currentPrice - trade.EntryPrice) / trade.EntryPrice;
@@ -419,196 +419,89 @@ public sealed class CrossVenueFlowStrategy(
                 "{Sl:P2}/{Tp:P2}. That is not the geometry this entry was sized against.",
                 trade.Id, opts.StopLossPct, opts.TakeProfitPct);
 
-            if (changePct >= opts.TakeProfitPct) return Exit("TP", currentPrice, changePct);
-            if (changePct <= -opts.StopLossPct)  return Exit("SL", currentPrice, changePct);
-            return new ExitDecision(false, null, currentPrice, changePct);
+            if (changePct >= opts.TakeProfitPct) return Done(Exit("TP", currentPrice, changePct));
+            if (changePct <= -opts.StopLossPct)  return Done(Exit("SL", currentPrice, changePct));
+            return Done(new ExitDecision(false, null, currentPrice, changePct));
         }
 
-        var isLong = trade.Side != "SHORT";
+        var isLong    = trade.Side != "SHORT";
+        var stopPrice = trade.StopPrice!.Value;
+        var tgtPrice  = trade.TargetPrice!.Value;
+
+        // ── Dynamic widening, off by default ──────────────────────────────────
+        //
+        // Scales both barriers outward as the trade's own favourable excursion grows,
+        // on the argument that a position that has already travelled is in a market
+        // moving further than the entry assumed. Recomputed from the STORED levels
+        // every cycle rather than written back, so it is stateless: nothing to recover
+        // after a restart, and switching it off restores the original levels exactly.
+        //
+        // WIDENING THE STOP COSTS MORE THAN IT LOOKS, and the number is not a matter of
+        // taste. Position size is set at entry by notional = capital x risk% / stopPct,
+        // so the dollars at risk are fixed by the stop that existed then. Doubling the
+        // stop afterwards doubles the loss the position can take while the size stays
+        // put: at risk_pct_per_trade 0.005 a full stop-out stops costing 0.5% of
+        // capital and starts costing up to 1.0%. The cap below bounds it at 2x, which
+        // is a bound on the overrun, not a removal of it.
+        //
+        // The target half carries no such cost — holding out for more is free apart
+        // from time — which is why the two halves are not equally defensible even
+        // though one switch controls both.
+        //
+        // Left OFF in bot_config. It was inert before this: it scaled TakeProfitPct
+        // and StopLossPct, which only the no-geometry fallback above ever reads, and
+        // all eight trades on this deployment carry geometry. A switch that reports
+        // success and changes nothing is the third of its kind found in this project.
+        if (opts.UseDynamicTpSl && trade.PeakPrice.HasValue)
+        {
+            var excursion = isLong
+                ? (trade.PeakPrice.Value - trade.EntryPrice) / trade.EntryPrice
+                : (trade.EntryPrice - trade.PeakPrice.Value) / trade.EntryPrice;
+
+            // Only favourable travel widens anything. PeakPrice tracks the high for a
+            // long and the low for a short, so an adverse reading here means the peak
+            // has not moved past entry and there is nothing to scale on.
+            if (excursion > 0m)
+            {
+                var scale = Math.Clamp(1m + excursion * 10m, 1m, 2m);
+
+                var stopDist = Math.Abs(trade.EntryPrice - stopPrice) * scale;
+                var tgtDist  = Math.Abs(tgtPrice - trade.EntryPrice) * scale;
+
+                stopPrice = isLong ? trade.EntryPrice - stopDist : trade.EntryPrice + stopDist;
+                tgtPrice  = isLong ? trade.EntryPrice + tgtDist  : trade.EntryPrice - tgtDist;
+
+                if (scale > 1.01m)
+                    log.LogDebug(
+                        "[XFlow] Trade {Id} dynamic scale {Scale:F2}x on {Exc:P2} excursion: " +
+                        "stop {Stop:F4}, target {Target:F4}. Risk now up to {Risk:F2}x what this " +
+                        "position was sized for.",
+                        trade.Id, scale, excursion, stopPrice, tgtPrice, scale);
+            }
+        }
 
         // Stop before target, matching how the backtester resolves a bar containing
         // both. Same ordering in both places or the live results cannot be compared
         // with the simulated ones they were validated on.
-        var hitStop = isLong
-            ? currentPrice <= trade.StopPrice!.Value
-            : currentPrice >= trade.StopPrice!.Value;
+        var hitStop = isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice;
+        if (hitStop) return Done(Exit("SL", currentPrice, changePct));
 
-        if (hitStop) return Exit("SL", currentPrice, changePct);
+        var hitTarget = isLong ? currentPrice >= tgtPrice : currentPrice <= tgtPrice;
+        if (hitTarget) return Done(Exit("TP", currentPrice, changePct));
 
-        var hitTarget = isLong
-            ? currentPrice >= trade.TargetPrice!.Value
-            : currentPrice <= trade.TargetPrice!.Value;
-
-        if (hitTarget) return Exit("TP", currentPrice, changePct);
-
-        // ── Flow-reversal exit: take the profit when the push behind it stops ──
-        //
-        // Checked LAST, after both stored levels, so it can only ever fire on a bar
-        // that hit neither. That ordering is the definition of this exit rather than
-        // an implementation detail: it closes a position "without touching TP or SL",
-        // and if a level was hit, that level is the honest reason to record.
-        //
-        // Why it exists
-        // -------------
-        // The measured defect in this strategy is not the entry, it is the hold. The
-        // entry rule is genuinely positive on raw forward returns — over 19 days of
-        // production candles a 0.60% dip returns +0.237% at one hour, and a 1.00%
-        // rally returns +0.348% to the short side over two — but packaging either into
-        // a trade with a fee-floor stop and a range-boundary target turns both
-        // negative, because the far target is reached far less often than the near
-        // stop is. Simulated over the same 1,562 buckets, closing on this rule instead
-        // of waiting:
-        //
-        //     side    n    exits by flow   mean R with rule   mean R holding to TP/SL
-        //     LONG   115        23              -0.154                -0.184
-        //     SHORT   46        12              +0.055                -0.345
-        //
-        // The short side crosses zero. That is the only positive figure this strategy
-        // has produced, and it comes from cutting the hold short rather than from any
-        // change to what gets entered.
-        //
-        // Those figures describe the rule WITH the freshness guard in
-        // FlowTurnedAgainstAsync. The first version shipped without it, read the flow
-        // that had caused its own entry, and closed two live trades thirty seconds
-        // after opening them. See the comment on that guard; the numbers above never
-        // described what ran between 2026-09-09 13:34 and 16:20.
-        //
-        // NOT PROVEN. 12 short exits is not a sample, the window is one regime, and the
-        // long side stays negative. Registered as H6 in HYPOTHESES.md, to be judged on
-        // trades closed AFTER it shipped. UseFlowReversalExit = false disables it.
-        //
-        // Profit-only, deliberately
-        // -------------------------
-        // A losing position is left to the stop. Cutting a loser early on flow is a
-        // different rule with a different failure mode — it turns the stop into
-        // something the market can trigger early and cheaply — and it has not been
-        // measured here. The simulation above only ever exited positions in profit, so
-        // applying this to losers would be shipping a rule with no evidence behind it
-        // under the cover of one that has some.
-        if (tuning.UseFlowReversalExit && changePct > tuning.FlowExitMinProfitPct)
-        {
-            var reversal = await FlowTurnedAgainstAsync(trade, trade.Symbol, ct);
-
-            if (reversal is not null)
-            {
-                log.LogInformation(
-                    "[XFlow] Trade {Id} {Side} closing on flow reversal at {Change:P2}: {Why}",
-                    trade.Id, trade.Side, changePct, reversal);
-
-                return Exit("FLOW_REVERSAL", currentPrice, changePct);
-            }
-        }
-
-        return new ExitDecision(false, null, currentPrice, changePct);
+        return Done(new ExitDecision(false, null, currentPrice, changePct));
     }
 
     /// <summary>
-    /// Has aggressive flow leaned against this position for every one of the last
-    /// <see cref="FlowStrategyOptions.FlowExitBars"/> closed buckets?
+    /// Wraps a decision in a completed Task.
     ///
-    /// Returns a sentence describing the reversal, or null for "no" — including every
-    /// case where the question cannot be answered. Not knowing and disagreeing are
-    /// collapsed here on purpose, and in one direction only: an unanswerable question
-    /// is never a reason to close a position that its stop is already protecting.
-    ///
-    /// Requires ALL of the buckets to lean the same way, not a majority. Three
-    /// consecutive is 45 minutes of one-sided pressure; a majority rule would fire on
-    /// two of three, which on this data is ordinary noise between venues rather than a
-    /// market that has turned.
+    /// The signature stays asynchronous although nothing here awaits any more: the
+    /// flow-reversal exit was the only I/O in this method and it has been removed. The
+    /// interface is left alone because the next exit rule that consults live data
+    /// should not have to change it back, and because an interface churned twice in
+    /// two days is harder to read than one Task.FromResult.
     /// </summary>
-    private async Task<string?> FlowTurnedAgainstAsync(
-        BotTrade trade, string symbol, CancellationToken ct)
-    {
-        var bars = Math.Max(1, tuning.FlowExitBars);
-
-        try
-        {
-            // One extra bucket, because the newest row is the one still filling — the
-            // aggregation worker rewrites it every two minutes by design.
-            // OfiByClosedBucket drops it, so without the +1 the window would come back
-            // one bucket short and the rule would silently never fire.
-            var set = await flowRepo.GetRecentAsync(symbol, bars + 1, ct);
-
-            if (set.VenueCount == 0) return null;
-
-            // Same staleness bound as the entry path. Flow that stopped updating an
-            // hour ago describes a market that no longer exists, and closing a live
-            // position on it is worse than holding: the stop is still in place and is
-            // still reacting to real prices.
-            var age = set.Age(DateTime.UtcNow);
-            if (age > tuning.MaxBarAge)
-            {
-                log.LogWarning(
-                    "[XFlow] Flow-reversal exit skipped for trade {Id}: newest bucket is " +
-                    "{Age:F0} min old, past the {Limit:F0} min limit. Holding; the stop still applies.",
-                    trade.Id, age.TotalMinutes, tuning.MaxBarAge.TotalMinutes);
-                return null;
-            }
-
-            var recent = CrossVenueFlowScorer.OfiByClosedBucket(set.ByVenue, DateTime.UtcNow, bars);
-
-            // Short history is "I do not know", never "they agree". Checked explicitly
-            // because All() over an empty list is true, which would have made this rule
-            // close every open position the moment flow_bars_15m came back empty.
-            if (recent.Count < bars) return null;
-
-            // The newest bucket has to have closed AFTER the position opened.
-            //
-            // Without this the rule read the very flow that caused the entry. "Buy the
-            // dip" means "buy after price fell", and price falls on selling, so at the
-            // moment a long opens the last three closed buckets are almost guaranteed
-            // to lean sell — the exit condition is already satisfied before the trade
-            // has existed for a second. The two rules are near-negatives of each other
-            // by construction, and only this check separates them.
-            //
-            // Observed live on 2026-09-09, twice within twenty minutes. Trade 62 opened
-            // 15:15:34 and closed 15:16:04 on buckets 14:30, 14:45 and 15:00; trade 63
-            // opened 15:31:08 and closed 15:31:38 on 14:45, 15:00 and 15:15. Every one
-            // of those buckets had closed before its trade opened. Both exits banked
-            // +0.14%, which is what one 30-second evaluation cycle of drift looks like,
-            // while a loser would still have paid the full 2.00% stop: small wins and
-            // whole losses, which is worse than having no exit rule at all.
-            //
-            // The simulation that justified this rule did carry the constraint --
-            // `r.bs > ok.b` in the SQL, the run of buckets had to END after the signal
-            // bucket -- and the constraint was simply not carried into the code. So the
-            // measured +26.1R described a rule that was never shipped. This is the same
-            // failure this repository keeps paying for: not a crash, not a wrong number
-            // in a log, but a live rule quietly doing something its measurement never
-            // tested.
-            //
-            // Earliest possible fire is therefore the first bucket close after entry,
-            // about fifteen minutes, rather than the next thirty-second cycle.
-            if (recent[^1].Bucket.AddMinutes(15) <= trade.OpenedAt)
-                return null;
-
-            var isLong = trade.Side != "SHORT";
-
-            // Against a long is selling pressure, against a short is buying pressure.
-            // Strictly signed: a bucket that came out at exactly zero is not evidence
-            // of a turn, and on a thin bucket it is what an empty one looks like.
-            var against = isLong
-                ? recent.All(b => b.Ofi < 0.0)
-                : recent.All(b => b.Ofi > 0.0);
-
-            if (!against) return null;
-
-            var readings = string.Join(", ",
-                recent.Select(b => $"{b.Bucket:HH:mm} {b.Ofi:+0.000;-0.000}"));
-
-            return $"{bars} consecutive closed bucket(s) leaning " +
-                   $"{(isLong ? "sell" : "buy")} against this {trade.Side} — {readings}, " +
-                   $"${recent.Sum(b => b.VolumeUsd) / 1_000_000m:F2}M traded";
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Never let a failed read close a position. The stop is the protection that
-            // does not depend on this query succeeding.
-            log.LogError(ex,
-                "[XFlow] Flow-reversal check failed for trade {Id}; holding.", trade.Id);
-            return null;
-        }
-    }
+    private static Task<ExitDecision> Done(ExitDecision d) => Task.FromResult(d);
 
     private static ExitDecision Exit(string reason, decimal price, decimal changePct) =>
         new(true, reason, price, changePct);
@@ -761,44 +654,4 @@ public sealed class FlowStrategyOptions
     /// rather than at a point. H8 in HYPOTHESES.md carries the decision rule.
     /// </summary>
     public decimal? MinStopPct { get; set; } = 0.020m;
-
-    /// <summary>
-    /// Close a position when aggressive flow has leaned against it for
-    /// <see cref="FlowExitBars"/> consecutive closed buckets and the position is in
-    /// profit — without waiting for the stop or the target.
-    ///
-    /// This is the one lever measured to move this strategy across zero. See the block
-    /// in CrossVenueFlowStrategy where it is applied for the table and the caveats;
-    /// H6 in HYPOTHESES.md carries the decision rule.
-    ///
-    /// Note this is flow used for EXIT, which is a different claim from the one this
-    /// repository already measured and rejected. Flow carries no usable DIRECTION —
-    /// aggregate OFI correlates -0.015 with the next hour's signed return, which is
-    /// why entries moved to price alone. It is being asked a narrower question here:
-    /// not "which way next" but "is the pressure that was pushing this position still
-    /// there". Those are not the same question and the first one's failure is not
-    /// evidence about the second.
-    /// </summary>
-    public bool UseFlowReversalExit { get; set; } = true;
-
-    /// <summary>
-    /// Consecutive closed 15-minute buckets that must lean against the position before
-    /// <see cref="UseFlowReversalExit"/> fires. 3 = 45 minutes.
-    ///
-    /// Chosen by the operator over the 2 that was simulated first, on the reasoning
-    /// that two buckets is a common enough coincidence to fire on noise. Not swept:
-    /// the sample cannot support choosing between 2, 3 and 4, and pretending otherwise
-    /// is how this file's trial budget gets spent invisibly.
-    /// </summary>
-    public int FlowExitBars { get; set; } = 3;
-
-    /// <summary>
-    /// Minimum unrealised profit, as a fraction of entry, before the flow-reversal
-    /// exit may fire. 0 means "any profit at all".
-    ///
-    /// Above zero it is not a safety margin but a different rule: it leaves the small
-    /// winners to run into the stop, which is the outcome this exit exists to prevent.
-    /// Raise it only with a measurement that says the small ones are worth keeping.
-    /// </summary>
-    public decimal FlowExitMinProfitPct { get; set; } = 0m;
 }
