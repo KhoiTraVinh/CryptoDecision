@@ -803,3 +803,83 @@ never was under CandleReversal, where entry and exit were near-negatives of each
 ### Result
 
 _Retired untested._
+
+---
+
+## H10 — Exit on a 10-bucket imbalance reversal (shipped against the evidence)
+
+**Changed 2026-09-10.** New `UseFlowOfiExit = true`, `FlowOfiBars = 10`. Sum buy and
+sell notional over the last ten closed buckets, take the imbalance of those sums, and
+close the position when it points against the trade — provided it favoured the trade
+at some earlier point in the hold.
+
+**This is the first change in this file shipped on evidence that points the other way.**
+Recorded plainly so the 21-day window is read for what it is.
+
+### What was measured, and how many ways
+
+Against no exit rule at all, on 42 FlowRatio signals:
+
+    window    mean R with rule       no rule: +0.379
+     8 bars        +0.391
+    10 bars        +0.410   <- shipped
+    12 bars        +0.340
+    15 bars        +0.318
+    20 bars        +0.346
+    30 bars        +0.338
+
+The shipped cell is the best of six and beats the baseline by 0.031R. The six values
+scatter from 0.318 to 0.410 with the baseline sitting in the middle of that range, and
+10 and 12 bars — thirty minutes apart — differ by 0.070R, more than the claimed effect.
+Adjacent settings that disagree by more than the effect are measuring noise.
+
+Without the "must have favoured the trade first" guard, at 20 bars, it was +0.303. The
+guard exists because 8 of 42 signals had the imbalance already against them at entry,
+and those would be closed fifteen minutes in on evidence predating the trade — the same
+defect that closed two live positions thirty seconds after opening them on 2026-09-09.
+
+### The operator's argument, and what happened when it was measured
+
+Slot turnover: a 150-minute hold frees the single per-side slot sooner than a 12-hour
+one, so more signals get taken. That mechanism is real and had been missing from every
+earlier measurement in this file. Measured with the position limit applied:
+
+    with rule      27 trades taken, 15 blocked, total +9.29R
+    without        24 trades taken, 18 blocked, total +10.22R
+
+Three extra trades worth about +1.0R, against 0.082R lost on each of the other
+twenty-four. Net -0.93R — itself inside the noise of a 27-trade sample. The honest
+statement is not that the rule hurts but that it has not shown a sign of helping on any
+of three independent measures: mean R per trade, total R with the slot limit, and the
+shape of the window curve.
+
+### The mechanism that argues against it
+
+The hold-time curve for FlowRatio: +0.032 at one hour, +0.082 at two, +0.273 at four,
++0.379 at twelve, +0.330 at twenty-four. This strategy earns by holding. A rule that
+ends the hold early works against its own source of return, which is the simplest
+explanation for why six window lengths all failed to beat doing nothing.
+
+### Decision rule, fixed in advance
+
+Evaluate when **30 trades have closed** or after **21 days**, whichever comes first.
+
+- **Keep** only if total R over the window is positive AND at least 8 trades closed with
+  reason `OFI_REVERSAL` AND those trades' mean R is above the mean R of the `TIMEOUT`
+  trades in the same window. All three, because the rule's whole claim is that ending
+  the hold early beats letting it run.
+- **Revert to `UseFlowOfiExit: false`** otherwise. This is the default expectation given
+  the evidence above, and reverting is one config value.
+- **Do not sweep FlowOfiBars again.** Six values were measured across a flat, scattered
+  curve. A seventh will eventually look good and will not be real.
+
+### Cost of being wrong
+
+None in money — `paper_mode` is true. The cost is the window: 21 days of FlowRatio
+evidence collected under an exit rule that the pre-shipping measurement says subtracts
+about 0.9R per 16 days. If H9 comes out marginal, this rule is the first thing to
+remove before concluding anything about the entry.
+
+### Result
+
+_Open._

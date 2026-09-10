@@ -401,7 +401,7 @@ public sealed class CrossVenueFlowStrategy(
     /// their favour. A stop that wide relative to the target is a coin flip with a fee
     /// attached.
     /// </summary>
-    public Task<ExitDecision> EvaluateExitAsync(
+    public async Task<ExitDecision> EvaluateExitAsync(
         BotTrade trade, decimal currentPrice, BotOptions opts, CancellationToken ct)
     {
         var rawChange = (currentPrice - trade.EntryPrice) / trade.EntryPrice;
@@ -419,9 +419,9 @@ public sealed class CrossVenueFlowStrategy(
                 "{Sl:P2}/{Tp:P2}. That is not the geometry this entry was sized against.",
                 trade.Id, opts.StopLossPct, opts.TakeProfitPct);
 
-            if (changePct >= opts.TakeProfitPct) return Done(Exit("TP", currentPrice, changePct));
-            if (changePct <= -opts.StopLossPct)  return Done(Exit("SL", currentPrice, changePct));
-            return Done(new ExitDecision(false, null, currentPrice, changePct));
+            if (changePct >= opts.TakeProfitPct) return Exit("TP", currentPrice, changePct);
+            if (changePct <= -opts.StopLossPct)  return Exit("SL", currentPrice, changePct);
+            return new ExitDecision(false, null, currentPrice, changePct);
         }
 
         var isLong    = trade.Side != "SHORT";
@@ -484,24 +484,177 @@ public sealed class CrossVenueFlowStrategy(
         // both. Same ordering in both places or the live results cannot be compared
         // with the simulated ones they were validated on.
         var hitStop = isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice;
-        if (hitStop) return Done(Exit("SL", currentPrice, changePct));
+        if (hitStop) return Exit("SL", currentPrice, changePct);
 
         var hitTarget = isLong ? currentPrice >= tgtPrice : currentPrice <= tgtPrice;
-        if (hitTarget) return Done(Exit("TP", currentPrice, changePct));
+        if (hitTarget) return Exit("TP", currentPrice, changePct);
 
-        return Done(new ExitDecision(false, null, currentPrice, changePct));
+        // ── Exit when the aggregate imbalance turns against the position ───────
+        //
+        // Sum buy and sell notional over the last FlowOfiBars closed buckets, take the
+        // imbalance of those sums, and close when it points against the trade. Ten
+        // buckets is 150 minutes.
+        //
+        // SHIPPED WITH NEGATIVE EVIDENCE, on the operator's decision after the numbers
+        // below were put in front of them twice. Recorded here rather than in a commit
+        // message alone, because the next person to read this file should not have to
+        // reconstruct whether it was ever tested.
+        //
+        // Measured on 42 FlowRatio signals over the production window, this rule
+        // against no rule at all:
+        //
+        //     window    mean R with rule      (no rule: +0.379)
+        //      8 bars        +0.391
+        //     10 bars        +0.410   <- shipped
+        //     12 bars        +0.340
+        //     15 bars        +0.318
+        //     20 bars        +0.346
+        //     30 bars        +0.338
+        //
+        // The chosen cell is the best of six and beats the baseline by 0.031R. It is
+        // not a plateau: 10 and 12 bars are thirty minutes apart and differ by 0.070R,
+        // which is more than the gap to the baseline. A parameter whose neighbours
+        // disagree by more than its claimed effect is measuring noise.
+        //
+        // The operator's argument for it was slot turnover, which is a real mechanism
+        // this file's earlier measurements had missed: a shorter hold frees the single
+        // per-side slot sooner and lets more signals through. Measured with the slot
+        // limit applied, it does exactly that and still loses:
+        //
+        //     with rule      27 trades taken, 15 blocked, total +9.29R
+        //     without        24 trades taken, 18 blocked, total +10.22R
+        //
+        // Three extra trades worth about +1.0R against 0.082R lost on each of the
+        // other twenty-four. Net -0.93R, which is itself inside the noise of a
+        // 27-trade sample — the honest summary is not that this rule hurts but that it
+        // has never shown a sign of helping, on three independent measures.
+        //
+        // The mechanism that argues against it is the hold-time curve: +0.032 at one
+        // hour, +0.082 at two, +0.273 at four, +0.379 at twelve. This strategy earns by
+        // holding. Any rule that ends the hold early is working against its own source
+        // of return.
+        //
+        // Set UseFlowOfiExit false to remove it.
+        if (tuning.UseFlowOfiExit)
+        {
+            var reversal = await OfiTurnedAgainstAsync(trade, ct);
+
+            if (reversal is not null)
+            {
+                log.LogInformation(
+                    "[XFlow] Trade {Id} {Side} closing on OFI reversal at {Change:P2}: {Why}",
+                    trade.Id, trade.Side, changePct, reversal);
+
+                return Exit("OFI_REVERSAL", currentPrice, changePct);
+            }
+        }
+
+        return new ExitDecision(false, null, currentPrice, changePct);
     }
 
     /// <summary>
-    /// Wraps a decision in a completed Task.
+    /// Has the aggregate imbalance over the last <see cref="FlowStrategyOptions.FlowOfiBars"/>
+    /// closed buckets turned against this position, after having been with it?
     ///
-    /// The signature stays asynchronous although nothing here awaits any more: the
-    /// flow-reversal exit was the only I/O in this method and it has been removed. The
-    /// interface is left alone because the next exit rule that consults live data
-    /// should not have to change it back, and because an interface churned twice in
-    /// two days is harder to read than one Task.FromResult.
+    /// The "after having been with it" half is not decoration. Without it the rule
+    /// reads a window that mostly predates the entry: at ten buckets, 8 of 42 signals
+    /// had the imbalance already against them at the moment they opened, and those
+    /// trades would be closed on the first bucket after entry — fifteen minutes in,
+    /// on evidence that has nothing to do with the trade. That is the same defect that
+    /// closed two live positions thirty seconds after opening them on 2026-09-09, and
+    /// the guard is the same shape as the fix. The measured +0.410 is the guarded
+    /// version; the unguarded one was never measured at this window.
+    ///
+    /// Stateless by construction. Every cycle it re-reads the buckets from entry
+    /// onward and asks the question again, so there is no "have I seen a favourable
+    /// reading yet" flag to persist, recover after a restart, or get wrong.
+    ///
+    /// Returns a sentence, or null for no — including every case where the question
+    /// cannot be answered. Not knowing never closes a position that its stop is
+    /// already protecting.
     /// </summary>
-    private static Task<ExitDecision> Done(ExitDecision d) => Task.FromResult(d);
+    private async Task<string?> OfiTurnedAgainstAsync(BotTrade trade, CancellationToken ct)
+    {
+        var bars = Math.Max(1, tuning.FlowOfiBars);
+
+        try
+        {
+            // Enough history to compute the rolling window at every bucket since the
+            // trade opened: one per elapsed quarter hour, plus the window itself, plus
+            // slack for the bucket still filling. Capped so a stuck position cannot ask
+            // for an unbounded read.
+            var elapsed = DateTime.UtcNow - trade.OpenedAt;
+            var since   = (int)Math.Ceiling(Math.Max(0, elapsed.TotalMinutes) / 15.0);
+            var needed  = Math.Min(since + bars + 2, 96);
+
+            var set = await flowRepo.GetRecentAsync(trade.Symbol, needed, ct);
+            if (set.VenueCount == 0) return null;
+
+            var age = set.Age(DateTime.UtcNow);
+            if (age > tuning.MaxBarAge)
+            {
+                log.LogWarning(
+                    "[XFlow] OFI exit skipped for trade {Id}: newest bucket is {Age:F0} min old, " +
+                    "past the {Limit:F0} min limit. Holding; the stop still applies.",
+                    trade.Id, age.TotalMinutes, tuning.MaxBarAge.TotalMinutes);
+                return null;
+            }
+
+            var closed = CrossVenueFlowScorer.OfiByClosedBucket(set.ByVenue, DateTime.UtcNow, needed);
+            if (closed.Count < bars) return null;
+
+            // Buy and sell notional recovered exactly from the imbalance and the total:
+            //   ofi = (b-s)/(b+s)  =>  b = v(1+ofi)/2,  s = v(1-ofi)/2
+            // Done here rather than by adding a second aggregation to the scorer, so
+            // the live bucket keeps being dropped in exactly one place.
+            var buy  = closed.Select(x => x.VolumeUsd * (1m + (decimal)x.Ofi) / 2m).ToArray();
+            var sell = closed.Select(x => x.VolumeUsd * (1m - (decimal)x.Ofi) / 2m).ToArray();
+
+            var isLong = trade.Side != "SHORT";
+            bool wasFavourable = false;
+            double latestOfi = 0.0;
+            DateTime latestBucket = default;
+            decimal windowVol = 0m;
+
+            for (var i = bars - 1; i < closed.Count; i++)
+            {
+                // Only readings whose bucket closed after the position opened count.
+                if (closed[i].Bucket.AddMinutes(15) <= trade.OpenedAt) continue;
+
+                decimal b = 0m, s = 0m;
+                for (var j = i - bars + 1; j <= i; j++) { b += buy[j]; s += sell[j]; }
+
+                var total = b + s;
+                if (total <= 0m) continue;
+
+                var ofi = (double)((b - s) / total);
+                var withTrade = isLong ? ofi > 0.0 : ofi < 0.0;
+
+                if (withTrade) wasFavourable = true;
+                else if (wasFavourable)
+                {
+                    latestOfi    = ofi;
+                    latestBucket = closed[i].Bucket;
+                    windowVol    = total;
+
+                    return $"{bars}-bucket imbalance turned {(isLong ? "sell" : "buy")}-side at " +
+                           $"{latestBucket:HH:mm} — OFI {latestOfi:+0.000;-0.000} on " +
+                           $"${windowVol / 1_000_000m:F1}M over {bars * 15} minutes, after having " +
+                           $"favoured this {trade.Side} earlier in the hold.";
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A failed read never closes a position. The stop does not depend on this
+            // query succeeding.
+            log.LogError(ex, "[XFlow] OFI exit check failed for trade {Id}; holding.", trade.Id);
+            return null;
+        }
+    }
+
 
     private static ExitDecision Exit(string reason, decimal price, decimal changePct) =>
         new(true, reason, price, changePct);
@@ -654,4 +807,26 @@ public sealed class FlowStrategyOptions
     /// rather than at a point. H8 in HYPOTHESES.md carries the decision rule.
     /// </summary>
     public decimal? MinStopPct { get; set; } = 0.020m;
+
+    /// <summary>
+    /// Close a position when the aggregate imbalance over the last
+    /// <see cref="FlowOfiBars"/> closed buckets turns against it, after having
+    /// favoured it earlier in the hold.
+    ///
+    /// Shipped with negative evidence on the operator's decision — the full table is in
+    /// CrossVenueFlowStrategy where the rule is applied, and H10 in HYPOTHESES.md
+    /// carries the decision rule. Summary: best of six windows, beats no-rule by 0.031R,
+    /// neighbouring windows disagree by more than that, and with the position limit
+    /// applied it takes three more trades and finishes 0.93R behind.
+    /// </summary>
+    public bool UseFlowOfiExit { get; set; } = true;
+
+    /// <summary>
+    /// Closed 15-minute buckets summed for that imbalance. 10 = 150 minutes.
+    ///
+    /// The operator's choice, argued from slot turnover: a shorter hold frees the one
+    /// per-side slot sooner. The mechanism is real and was missing from earlier
+    /// measurements here; the magnitude was then measured and does not pay.
+    /// </summary>
+    public int FlowOfiBars { get; set; } = 10;
 }
