@@ -100,10 +100,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         const string sql = """
             INSERT INTO bot_trades
               (symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at,
-               mode, exchange, entry_order_id, fee_usd, exit_algo_id, leverage, margin_mode)
+               mode, exchange, entry_order_id, fee_usd, exit_algo_id, leverage, margin_mode,
+               entry_path)
             VALUES
               (@symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt,
-               @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId, @leverage, @marginMode)
+               @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId, @leverage, @marginMode,
+               @entryPath)
             RETURNING id
             """;
 
@@ -126,6 +128,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("leverage",   NpgsqlDbType.Numeric,
             t.Leverage.HasValue ? t.Leverage.Value : (object)DBNull.Value);
         cmd.Parameters.AddWithValue("marginMode", t.MarginMode ?? (object)DBNull.Value);
+
+        // Written on the INSERT rather than by a follow-up UPDATE. A second statement
+        // would leave a window where the row exists with entry_path NULL, and NULL is
+        // read as "not high-volume" by the concurrency limit — so a crash in that window
+        // would quietly free the slot the limit exists to hold.
+        cmd.Parameters.AddWithValue("entryPath", t.EntryPath ?? (object)DBNull.Value);
 
         return (long)(await cmd.ExecuteScalarAsync(ct))!;
     }
@@ -231,7 +239,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
                    leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason
+                   gate_verdict, gate_reason, entry_path
             FROM bot_trades
             WHERE status = 'OPEN'
             ORDER BY opened_at ASC
@@ -269,7 +277,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
                    leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason
+                   gate_verdict, gate_reason, entry_path
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -354,5 +362,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         AtrPctAtEntry = r.IsDBNull(25) ? null : r.GetDecimal(25),
         GateVerdict   = r.IsDBNull(26) ? null : r.GetString(26),
         GateReason    = r.IsDBNull(27) ? null : r.GetString(27),
+        EntryPath     = r.IsDBNull(28) ? null : r.GetString(28),
     };
 }

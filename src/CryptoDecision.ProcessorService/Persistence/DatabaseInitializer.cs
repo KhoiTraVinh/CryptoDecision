@@ -191,7 +191,16 @@ public sealed class DatabaseInitializer(
                         ADD COLUMN IF NOT EXISTS max_open_per_side   INTEGER NOT NULL DEFAULT 0,
                         -- Was hardcoded at 5. The right value depends on the win
                         -- rate the geometry implies, and that is now a setting.
-                        ADD COLUMN IF NOT EXISTS max_consecutive_losses INTEGER NOT NULL DEFAULT 5;
+                        ADD COLUMN IF NOT EXISTS max_consecutive_losses INTEGER NOT NULL DEFAULT 5,
+                        -- Concurrent positions from the FlowRatio high-volume waiver.
+                        -- Mirrored from sql/032 for the reason in this method's
+                        -- summary, and it is not a formality here: BotConfigRepository
+                        -- wraps this column in COALESCE, which defends against a NULL
+                        -- value and not at all against a missing column. Without this
+                        -- line, a preserved volume that has not had sql/032 applied
+                        -- fails the entire config read, and the bot polls every five
+                        -- seconds forever without ever starting.
+                        ADD COLUMN IF NOT EXISTS max_open_high_volume INTEGER NOT NULL DEFAULT 1;
                 END IF;
             END
             $$;
@@ -258,7 +267,15 @@ public sealed class DatabaseInitializer(
                 -- threshold?" is a SQL question rather than a text search.
                 ADD COLUMN IF NOT EXISTS entry_composite  NUMERIC(8, 3),
                 ADD COLUMN IF NOT EXISTS entry_confidence NUMERIC(6, 4),
-                ADD COLUMN IF NOT EXISTS entry_rationale  TEXT;
+                ADD COLUMN IF NOT EXISTS entry_rationale  TEXT,
+                -- Which entry rule opened the position: RATIO or HIGH_VOLUME. A
+                -- column and not a substring of entry_rationale, because the code
+                -- branches on it — the per-rule position limit counts it — and this
+                -- repository has already paid once for recovering a branch condition
+                -- from prose. Mirrored from sql/032; unlike the bot_config columns
+                -- above, a missing one here does not fail the config read, it fails
+                -- every trade INSERT instead.
+                ADD COLUMN IF NOT EXISTS entry_path       TEXT;
             """, ct);
 
         await Exec(conn, """

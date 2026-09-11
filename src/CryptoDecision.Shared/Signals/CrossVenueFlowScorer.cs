@@ -550,6 +550,25 @@ public sealed record FlowSignalOptions(
 /// </param>
 public readonly record struct BucketOfi(DateTime Bucket, double Ofi, decimal VolumeUsd);
 
+/// <summary>
+/// The entry rules FlowRatio can fire on, as constants rather than loose strings.
+///
+/// These values are written to bot_trades.entry_path and are read back by the position
+/// limit, so a typo here is a limit that silently never binds. Naming them once is the
+/// difference between a constraint and a string comparison that happens to work.
+/// </summary>
+public static class EntryPaths
+{
+    /// <summary>The imbalance cleared RatioMinimum on at least RatioMinVolumeUsd.</summary>
+    public const string Ratio = "RATIO";
+
+    /// <summary>
+    /// The bucket cleared RatioHighVolumeUsd, so the ratio test was waived and the entry
+    /// took whichever side was heavier. See H11 — measured, and shipped knowing it.
+    /// </summary>
+    public const string HighVolume = "HIGH_VOLUME";
+}
+
 /// <summary>One venue's contribution to a verdict, and whether it counted.</summary>
 public sealed record VenueVote(
     string  Exchange,
@@ -582,7 +601,21 @@ public sealed record FlowVerdict(
     double   DispersionBps,
     string   AbstainCode,
     string   Reason,
-    IReadOnlyList<VenueVote> Votes)
+    IReadOnlyList<VenueVote> Votes,
+
+    /// <summary>
+    /// Which rule produced an actionable verdict: <see cref="EntryPaths.Ratio"/>,
+    /// <see cref="EntryPaths.HighVolume"/>, or empty when the mode has only one way in.
+    ///
+    /// A field rather than something a caller recovers from <see cref="Reason"/>. The
+    /// last time a branch in this codebase was driven by matching prose — the gate's
+    /// "unavailable" state, recognised by the first two words of its reason string — it
+    /// silently missed four of six paths and blocked a live entry by a rule the operator
+    /// had switched off. Callers branch on this, and it is persisted to
+    /// bot_trades.entry_path so a position can still be attributed to its rule hours
+    /// later, after the sentence that produced it is gone.
+    /// </summary>
+    string   EntryPath = "")
 {
     public static FlowVerdict Abstain(
         string code,
@@ -1085,9 +1118,10 @@ public static class CrossVenueFlowScorer
                                      $"threshold, so the {options.RatioMinimum:F2}:1 ratio test is " +
                                      $"skipped. Entering WITH the heavier side at {ratio:F2}:1 " +
                                      $"{(ofi > 0 ? "buy" : "sell")} (OFI {ofi:+0.000;-0.000}) — a " +
-                                     $"lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
+                                     "lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
                                      "Volume is the whole signal here; price is not consulted.",
-                Votes:               []);
+                Votes:               [],
+                EntryPath:           EntryPaths.HighVolume);
         }
 
         if (ratio < (double)options.RatioMinimum)
@@ -1120,7 +1154,8 @@ public static class CrossVenueFlowScorer
                                  $"past the {options.RatioMinimum:F2}:1 and " +
                                  $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floors. Entering " +
                                  "WITH the dominant side; price is not consulted.",
-            Votes:               []);
+            Votes:               [],
+            EntryPath:           EntryPaths.Ratio);
     }
 
     // ── Mode: OfiMagnitude ────────────────────────────────────────────────────

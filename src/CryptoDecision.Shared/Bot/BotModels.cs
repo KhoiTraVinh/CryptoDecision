@@ -20,6 +20,16 @@ public sealed record BotTrade
     public string?   CloseReason { get; set;  }             // TP | SL | BREAKEVEN | TIMEOUT | MANUAL
 
     /// <summary>
+    /// Which entry rule opened this position -- EntryPaths.Ratio or EntryPaths.HighVolume.
+    /// Null on rows written before 2026-09-11 and on strategies that do not set it.
+    ///
+    /// Read by the per-rule concurrency limit, which counts only rows that positively
+    /// say HIGH_VOLUME. Null is therefore "unknown", never "some particular path", so an
+    /// unmarked row can never silently consume the single slot.
+    /// </summary>
+    public string?   EntryPath   { get; set;  }
+
+    /// <summary>
     /// High-water mark since trade opened. Updated every eval cycle.
     /// LONG: tracks the highest price seen. SHORT: tracks the lowest.
     ///
@@ -194,6 +204,18 @@ public sealed record BotOptions
     /// on 2026-09-08 before the rule was written.
     /// </summary>
     public int          MaxOpenPerSide           { get; set; } = 1;
+
+    /// <summary>
+    /// Concurrent positions opened through the FlowRatio high-volume waiver. 0 disables.
+    ///
+    /// 1, and separate from MaxOpenPerSide because the two constrain different things.
+    /// The waiver fires on the largest buckets in the sample and those cluster: of the
+    /// nine buckets above $40M, two pairs were fifteen minutes apart and five of the nine
+    /// fell on three days. Both sides of one macro event qualify, so "2 positions, 1 per
+    /// side" still admits a LONG and a SHORT from the same fifteen minutes -- which puts
+    /// the whole day's risk on one print, the thing a news-print rule is most likely to do.
+    /// </summary>
+    public int          MaxOpenHighVolume        { get; set; } = 1;
 
     /// <remarks>
     /// Still 0.10, and still what production runs — but it no longer sizes anything.

@@ -1090,6 +1090,31 @@ decision rule ("if H9 comes out marginal, remove H10 first"), which was written 
 ratio rule was its only consumer. Recorded here rather than edited there, because the
 rules at the top of this file forbid editing a decision rule after the fact.
 
+### Concurrency: one high-volume position at a time
+
+Added 2026-09-12 on the operator's instruction, before H11 opened.
+`bot_config.max_open_high_volume = 1`; 0 disables the cap.
+
+The existing limits do not cover this. `max_open_trades_per_strategy` is 2 and
+`max_open_per_side` is 1, which reads as "two positions, never two the same way" — and
+both sides of a single macro print qualify for the waiver, so that pair happily admits a
+LONG and a SHORT fifteen minutes apart on one event. The qualifying buckets cluster hard:
+of the nine above $40M in the sample, two pairs were fifteen minutes apart and five of
+the nine fell on three days. Without a per-rule cap the waiver can put a whole day's risk
+on one print, which is the single most likely failure mode of a rule built to trade news.
+
+The rule is enforced on a column, `bot_trades.entry_path`, set on the INSERT rather than
+by a follow-up UPDATE and read back by `GetOpenTradesAsync`. Not parsed out of
+`entry_rationale`: the last branch in this codebase driven by matching prose was the
+gate's "unavailable" state, recognised by the first two words of its reason string, which
+silently missed four of six paths and blocked a live entry by a rule the operator had
+switched off. NULL means "not recorded" and the count matches only rows that positively
+say HIGH_VOLUME, so an unmarked position can never quietly consume the slot.
+
+It also makes H9 and H11 separable. The two rules share a strategy name, a position book
+and a trade stream; without the column, H11's 20-trade bar cannot be counted and H9's
+30-trade bar would be reached by a mixed population.
+
 ### The guard is load-bearing
 
 The deployed rule closes only when the imbalance turns against a position it had

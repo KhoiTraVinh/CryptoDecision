@@ -24,7 +24,7 @@ public interface IOrderEngine
     /// out of step, it is the strategy being silently overridden by whatever
     /// bot_config happens to say.
     /// </param>
-    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null);
+    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null, string? entryPath = null);
     Task<BotTrade> CloseTradeAsync(BotTrade trade, decimal exitPrice, string reason, CancellationToken ct);
 
     /// <summary>
@@ -123,7 +123,10 @@ public sealed class PaperOrderEngine(
         => Task.FromResult<BotTrade?>(null);
 
     public async Task<BotTrade> OpenPositionAsync(
-        string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null)
+        string symbol, string strategy, string side, decimal price, decimal capitalUsd,
+        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        StopGeometry? geometry = null,
+        string? entryPath = null)
     {
         // Paper mode has no exchange-side OCO to place, so the geometry is carried
         // onto the row for the exit evaluation to read — the same field the live
@@ -179,6 +182,7 @@ public sealed class PaperOrderEngine(
             Status      = "OPEN",
             OpenedAt    = DateTime.UtcNow,
             Mode        = "PAPER",
+            EntryPath   = entryPath,
             // The venue whose prices drove this simulated fill, so a paper row can
             // still be compared against the live rows it was meant to predict.
             Exchange    = state.Options.Exchange,

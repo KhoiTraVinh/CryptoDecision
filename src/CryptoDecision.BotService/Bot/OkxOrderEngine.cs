@@ -100,7 +100,8 @@ public sealed class OkxOrderEngine(
     public async Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
         decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
-        StopGeometry? geometry = null)
+        StopGeometry? geometry = null,
+        string? entryPath = null)
     {
         var refusal = DescribeRefusal(state.Options);
         if (refusal is not null)
@@ -281,6 +282,7 @@ public sealed class OkxOrderEngine(
             Status       = "OPEN",
             OpenedAt     = DateTime.UtcNow,
             Mode         = "LIVE",
+            EntryPath    = entryPath,
             Exchange     = ExchangeName,
             EntryOrderId = orderId,
             FeeUsd       = Math.Round(entryFeeUsd, 8),

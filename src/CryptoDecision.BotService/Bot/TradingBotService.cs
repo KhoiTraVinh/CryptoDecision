@@ -865,6 +865,56 @@ public sealed class TradingBotService(
                             continue;
                         }
 
+                        // ── One position at a time from the high-volume waiver ──
+                        //
+                        // FlowRatio has two ways in and they are different trades, so
+                        // they get different position limits. This one caps the waiver
+                        // — the path that skips the ratio test on a large enough bucket
+                        // — at MaxOpenHighVolume concurrent positions.
+                        //
+                        // The two limits above do not cover it. Those bound the strategy
+                        // and each side, and the qualifying buckets CLUSTER: of the nine
+                        // above $40M in the sample, two pairs were fifteen minutes apart
+                        // and five of the nine fell on three days. Both sides of one
+                        // macro print can qualify, so "2 positions, 1 per side" happily
+                        // admits a LONG and a SHORT fifteen minutes apart on the same
+                        // event — the whole day's risk on one print, which is precisely
+                        // what a news-print rule is most likely to do.
+                        //
+                        // Counts rows that POSITIVELY say HIGH_VOLUME. entry_path is null
+                        // on every row written before 2026-09-11 and on any strategy that
+                        // does not set it, and null is read as unknown rather than as
+                        // this path, so an unmarked position can never silently consume
+                        // the slot. Checked before the gate for the same reason the
+                        // per-side limit is: a gate call costs 25-42 seconds and there is
+                        // no point spending it on an entry that cannot be placed.
+                        if (opts.MaxOpenHighVolume > 0
+                            && decision.Flow?.EntryPath == EntryPaths.HighVolume)
+                        {
+                            var openHighVolume = stratTrades.Count(t =>
+                                t.EntryPath == EntryPaths.HighVolume);
+
+                            if (openHighVolume >= opts.MaxOpenHighVolume)
+                            {
+                                log.LogInformation(
+                                    "[TradingBot] {Strat} signalled {Side} through the high-volume " +
+                                    "waiver but {Count} such position(s) are already open, at the " +
+                                    "{Max} limit. Holding. The ratio path is unaffected.",
+                                    strat, decision.Side, openHighVolume, opts.MaxOpenHighVolume);
+
+                                await SafeRecordAsync(
+                                    configRepo.RecordEntryRefusalAsync(
+                                        $"{strat} {decision.Side} blocked: {openHighVolume} " +
+                                        $"high-volume position(s) already open " +
+                                        $"(max {opts.MaxOpenHighVolume})", ct),
+                                    "high-volume concurrency refusal");
+
+                                // No cooldown stamp: nothing was opened, and this limit is
+                                // about concentration in one event rather than about pace.
+                                continue;
+                            }
+                        }
+
                         // ── The gate has the only veto on entry ────────────────
                         //
                         // Everything about the trade is already fixed: direction from
@@ -923,7 +973,12 @@ public sealed class TradingBotService(
                                 // Passed into the engine, not attached afterwards: the
                                 // exchange-side OCO is armed inside OpenPositionAsync
                                 // and it is the stop that survives this process dying.
-                                decision.Geometry);
+                                decision.Geometry,
+                                // Same reasoning, for the same reason: the engine writes
+                                // it on the INSERT, so there is no window where the row
+                                // exists without it. A follow-up UPDATE would leave a gap
+                                // in which a crash frees the slot the limit above holds.
+                                decision.Flow?.EntryPath);
 
                             state.AddOpenTrade(trade);
                             state.SetLastEntryAt(strat, DateTime.UtcNow);
