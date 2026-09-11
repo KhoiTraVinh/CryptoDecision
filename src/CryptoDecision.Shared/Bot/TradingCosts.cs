@@ -58,13 +58,17 @@ public static class TradingCosts
     public const decimal TakerRoundTrip = OkxTakerFeeRate * 2m;
 
     /// <summary>
-    /// 21 bps, the backtester's default. Deliberately far above what the venue charges.
+    /// 21 bps: a stress level, not a fee estimate, and nothing reads it.
     ///
-    /// Not a fee estimate — a stress level. Published audits of this class of strategy
-    /// found policies that looked viable at an optimistic 10 bps and were solidly negative
-    /// at a realistic 21+, once slippage and adverse selection on the resting order are
-    /// counted rather than assumed away. A policy that only survives at
-    /// <see cref="PostOnlyRoundTrip"/> has not survived.
+    /// It was the backtester's default cost, and the backtester was deleted on
+    /// 2026-09-11. Kept as a documented number rather than removed, because the reasoning
+    /// outlives the tool and any replacement measurement should use it: published audits
+    /// of this class of strategy found policies that looked viable at an optimistic 10 bps
+    /// and were solidly negative at a realistic 21+, once slippage and adverse selection
+    /// on the resting order are counted rather than assumed away.
+    ///
+    /// The rule it encodes: a policy that only survives at <see cref="PostOnlyRoundTrip"/>
+    /// has not survived. Measure at 21 before believing anything.
     /// </summary>
     public const decimal BacktestStressRoundTrip = 0.0021m;
 }

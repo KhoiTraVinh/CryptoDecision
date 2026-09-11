@@ -253,22 +253,35 @@ Nine sections, exits non-zero on FAIL. Service expectations are derived from
 `scripts/flow-vs-passive.sql` measures what the entry threshold costs: forward return in
 the direction flow pointed, banded by |z|.
 
-## Backtesting
+## Measuring a rule
 
-```bash
-dotnet run --project src/CryptoDecision.Backtest -- \
-  --conn "Host=postgres;Port=5432;Database=crypto;Username=crypto;Password=crypto" \
-  --symbol SOLUSDT --cost-bps 7 --sweep
-```
+There is no backtester in this repository. `CryptoDecision.Backtest` was deleted on
+2026-09-11; recover it from git history if it is ever wanted back.
 
-With no flags it uses the deployed parameters, so a plain run validates what is running.
-It reports **break-even round-trip cost in bps** rather than leading with Sharpe: that is
-the number that decides whether a signal survives execution. Three rules are enforced — no
-lookahead, entry at the next open, and the stop assumed first when one minute's range
-contains both barriers. Trades whose holding window contains a gap in the candle series are
-marked `GAP_UNRESOLVED`, because the stop may have been hit inside the gap with nothing to
-record it; walking through one turned a 12-hour limit into a 30-hour hold at +4.31R and
-carried 90% of a since-retracted result.
+It was removed because it had stopped being the thing it claimed to be. Two defects found
+on the day it went: `CrossVenueFlowScorer.Score()` had no `FlowRatio` branch and sent
+every mode except `OfiMagnitude` to the z-score rule, so the tool measured a retired rule
+while reporting the deployed one; and it never passed a `minStopPct`, so it simulated a
+~1.6% stop against a deployed 2.00% floor. Both were invisible — nothing errored, and
+every number it printed looked plausible. That is the third time a validation tool in this
+repository has certified a configuration nobody was running.
+
+Rules are now measured directly against `flow_bars_15m` and `klines_1m`: take the buckets
+a rule would have fired on, walk the 1-minute candles forward from the entry instant, and
+report the result. The three rules that mattered in the old engine still apply and have to
+be applied by hand each time:
+
+- **No lookahead.** Only buckets that had closed at the decision instant.
+- **Entry at the price the bot could actually have got** — the bucket close plus the
+  settle wait, not the price that produced the signal.
+- **The stop is taken first** when one minute's range spans both barriers. 1-minute OHLC
+  does not say which came first, and assuming the favourable one is how a losing policy
+  reports a win rate.
+
+Judge a result on three checks before believing it, all in `HYPOTHESES.md`: it holds
+across a plateau of neighbouring parameter values, it holds in both halves of the sample,
+and it survives discarding the single best trade. Almost nothing measured here has passed
+all three.
 
 ## Status, honestly
 
@@ -349,8 +362,21 @@ at the trades first.
 
 Everything else worth reading is in `bot_trades` (what was traded and why),
 `signal_outcomes` (every signal including the refused ones, and what the market did next),
-and `flow_bars_15m` (the evidence the scorer runs on). `scripts/gate-report.sql` and
-`scripts/z.sh` are the two queries used most.
+and `flow_bars_15m` (the evidence the scorer runs on).
+
+`scripts/flow.sh` is the one to reach for: it shows every closed bucket with its volume,
+buy/sell split, imbalance and OFI, and scores each against the deployed thresholds — read
+from the running container, not from this checkout, because `src/` is not deployed. It
+replaced `z.sh` on 2026-09-11. `z.sh` reconstructed the ZScore statistic, which no rule
+has read since the entry moved to FlowRatio, and it was flagging entry conditions on
+buckets the bot was correctly ignoring. A monitor that reports signals the strategy does
+not act on makes an idle bot look broken and would make a broken one look busy.
+
+`scripts/gate-report.sql` prices what the gate's refusals were worth. It still runs, but
+its premise is currently empty: the gate has refused nothing, so there is nothing to
+price. `scripts/flow-vs-passive.sql` measures forward return banded by |z| — a real
+measurement of a statistic nothing trades on, and its band labels still say the bot
+enters at |z| >= 1.5, which has not been true since 2026-08-27.
 
 ## Known constraints
 

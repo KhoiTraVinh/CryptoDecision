@@ -221,7 +221,14 @@ if [ -z "$v" ] || [ "${v%%|*}" = "-" ]; then
     warn "no verdict recorded yet -- needs sql/026 applied and the bot restarted"
 else
     IFS='|' read -r vcode vz vagree vvenues vage vdetail <<<"$v"
-    ok "$vcode  z=$vz  ${vagree}/${vvenues} venues agree  (${vage}s ago)"
+    # z and the venue tally are NOT printed any more. They are the ZScore rule's
+    # statistics, and FlowRatio does not compute either -- it reads one closed bucket
+    # and never calls Prepare, so the scorer writes 0.0000 and 0/0 every time. Showing
+    # them put three dead zeroes on the line an operator reads first, next to a verdict
+    # code that is live. The detail string below carries what actually decided it: the
+    # bucket, its imbalance and its notional. They stay in the SELECT so that switching
+    # EntryMode back to ZScore is a one-line change here.
+    ok "$vcode  (${vage}s ago)"
     printf '        %s\n' "$vdetail"
     # A stale verdict is only a fault when the strategy SHOULD be evaluating.
     # With a position open and max_open_trades_per_strategy reached, the loop

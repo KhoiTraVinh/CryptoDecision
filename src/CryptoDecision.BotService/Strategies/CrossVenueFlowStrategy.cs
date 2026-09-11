@@ -805,8 +805,12 @@ public sealed class FlowStrategyOptions
     /// forty-nine is that the mechanism was written down in this repository before it
     /// was measured — see the stop-geometry note — and that it holds across a plateau
     /// rather than at a point. H8 in HYPOTHESES.md carries the decision rule.
+    ///
+    /// The literal moved to <see cref="FlowGeometryDefaults.MinStopPct"/> so the
+    /// backtester can reach it. It could not before, and did not apply any floor at
+    /// all — see that constant.
     /// </summary>
-    public decimal? MinStopPct { get; set; } = 0.020m;
+    public decimal? MinStopPct { get; set; } = FlowGeometryDefaults.MinStopPct;
 
     /// <summary>
     /// Close a position when the aggregate imbalance over the last

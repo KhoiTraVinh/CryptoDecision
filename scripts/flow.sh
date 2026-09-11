@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# What FlowRatio actually reads: volume, OFI and the buy/sell imbalance, per closed
+# 15-minute bucket.
+#
+#     bash ~/cryptodecision/scripts/flow.sh          once
+#     bash ~/cryptodecision/scripts/flow.sh -w       every 30s until Ctrl-C
+#
+# Replaces z.sh, which reconstructed the ZScore statistic -- a 4-bucket rolling OFI
+# standardised against a 44-bucket MAD baseline, with per-venue agreement flags. None of
+# that decides anything any more. On 2026-09-11 it was flagging "<<< past +/-1.00" on
+# three consecutive buckets and "AGREES" on Bybit while the bot sat at RATIO_TOO_LOW and
+# would not have entered on any of them. A monitor that reports signals the strategy
+# ignores is worse than no monitor: it makes a correctly idle bot look broken, and it
+# would make a genuinely broken one look busy.
+#
+# Two numbers are printed and they are NOT the same thing:
+#
+#   1. The bot's own verdict, from bot_config. Authoritative -- it is the scorer that
+#      actually ran. It can be stale: the loop stops forming verdicts while at the
+#      position limit and while the bot is disabled.
+#
+#   2. A reconstruction from flow_bars_15m, applying the SAME rule in SQL. This exists so
+#      there is a live reading when the bot is not scoring. Unlike z.sh's reconstruction,
+#      it is the deployed rule rather than a retired one, so "would fire" here is a claim
+#      worth checking rather than noise.
+#
+# Thresholds are READ FROM appsettings.json, never hardcoded. Config drift across tools
+# has already cost this repository three parameters; a monitor carrying its own copy of a
+# threshold is the fourth waiting to happen.
+set -euo pipefail
+
+SYMBOL="${SYMBOL:-SOLUSDT}"
+REPO="${REPO:-$HOME/cryptodecision}"
+BOT="${BOT_CONTAINER:-bot}"
+CFG_REPO="$REPO/src/CryptoDecision.BotService/appsettings.json"
+
+PSQL="docker exec -i postgres psql -U ${POSTGRES_USER:-crypto} -d ${POSTGRES_DB:-crypto} -qtA -P pager=off"
+PSQLT="docker exec -i postgres psql -U ${POSTGRES_USER:-crypto} -d ${POSTGRES_DB:-crypto} -P pager=off -P border=0 -P footer=off"
+
+bold() { printf '\033[1m%s\033[0m\n' "$1"; }
+dim()  { printf '  \033[2m%s\033[0m\n' "$1"; }
+m()    { awk "BEGIN{printf \"%.1f\", $1/1000000}"; }
+
+# Read the config ONCE, from the running container, because that is the copy in force.
+#
+# The first version of this script read $REPO/src/.../appsettings.json and silently fell
+# back to built-in defaults, because the host checkout holds only docker-compose, scripts
+# and sql -- src/ is never deployed, the images come from ghcr. So a script written
+# specifically to avoid carrying its own copy of a threshold was carrying its own copy of
+# every threshold, and saying "appsettings.json" while doing it. The repo path is kept as
+# a fallback for running this from a dev machine, and it is labelled differently, because
+# a checkout can be any commit whereas the container is what is running.
+RAW=""
+if RAW=$(docker exec "$BOT" cat /app/appsettings.json 2>/dev/null) && [ -n "$RAW" ]; then
+    SRC="$BOT:/app/appsettings.json -- deployed"
+elif [ -f "$CFG_REPO" ]; then
+    RAW=$(cat "$CFG_REPO")
+    SRC="repo checkout -- NOT necessarily what is deployed"
+else
+    SRC="BUILT-IN FALLBACK -- no config found, these numbers may be wrong"
+fi
+
+# One numeric key out of the Signal block. Empty when absent, which the caller reads as
+# "not deployed" rather than substituting a guess.
+cfg() {
+    [ -n "$RAW" ] || return 0
+    printf '%s' "$RAW" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p" | head -1
+}
+
+RATIO=$(cfg RatioMinimum);        RATIO=${RATIO:-2.1}
+MINVOL=$(cfg RatioMinVolumeUsd);  MINVOL=${MINVOL:-3000000}
+SETTLE=$(cfg RatioSettleMinutes); SETTLE=${SETTLE:-3}
+HIVOL=$(cfg RatioHighVolumeUsd);  HIVOL=${HIVOL:-0}
+
+render() {
+clear 2>/dev/null || true
+bold "flow -- $SYMBOL -- $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+echo
+
+# -- 1. The scorer's own answer -----------------------------------------------
+bold "1. THE BOT'S VERDICT (the scorer that actually ran -- authoritative)"
+row=$($PSQL <<SQL
+SELECT enabled, coalesce(last_verdict_code,'(none)'),
+       coalesce(date_trunc('second', now()-last_verdict_at)::text,'never'),
+       coalesce(left(last_verdict_detail,170),''),
+       (SELECT count(*) FROM bot_trades WHERE status='OPEN')
+FROM bot_config WHERE id=1;
+SQL
+)
+IFS="|" read -r en code age detail open <<< "$row"
+printf '  %-22s %s old   %s open position(s)\n' "$code" "$age" "$open"
+[ -n "$detail" ] && dim "$detail"
+if [ "$en" = "f" ]; then
+    printf '  \033[31mFROZEN\033[0m  bot_config.enabled = false -- this will not update.\n'
+fi
+echo
+
+# -- 2. Closed buckets, scored by the deployed rule ---------------------------
+bold "2. CLOSED BUCKETS -- every input the rule has"
+if [ "${HIVOL%%.*}" != "0" ]; then
+    dim "ratio >= ${RATIO}:1 on >= \$$(m "$MINVOL")M, OR any ratio on >= \$$(m "$HIVOL")M  ·  settle ${SETTLE} min  [$SRC]"
+else
+    dim "ratio >= ${RATIO}:1 on >= \$$(m "$MINVOL")M  ·  settle ${SETTLE} min  [$SRC]"
+fi
+$PSQLT <<SQL
+WITH b AS (
+  SELECT bucket_start,
+         sum(buy_volume_usd)  AS buy,
+         sum(sell_volume_usd) AS sell,
+         sum(buy_volume_usd + sell_volume_usd) AS vol
+  FROM flow_bars_15m WHERE symbol='$SYMBOL' GROUP BY bucket_start),
+g AS (SELECT to_timestamp(floor(extract(epoch from now())/900)*900) AS open_bar)
+SELECT to_char(bucket_start,'HH24:MI') AS bucket,
+       '\$' || to_char(vol/1e6,'FM990.00')  || 'M' AS volume,
+       '\$' || to_char(buy/1e6,'FM990.00')  || 'M' AS buy,
+       '\$' || to_char(sell/1e6,'FM990.00') || 'M' AS sell,
+       to_char(greatest(buy,sell)/nullif(least(buy,sell),0),'FM990.00') || ':1 ' ||
+         CASE WHEN buy >= sell THEN 'B' ELSE 'S' END AS imbalance,
+       to_char((buy-sell)/nullif(vol,0),'S0.000') AS ofi,
+       CASE
+         WHEN $HIVOL > 0 AND vol >= $HIVOL
+           THEN '>>> ' || CASE WHEN buy >= sell THEN 'LONG' ELSE 'SHORT' END || '  (high volume)'
+         WHEN vol < $MINVOL
+           THEN 'VOLUME_TOO_THIN  (short \$' || to_char(($MINVOL-vol)/1e6,'FM990.00') || 'M)'
+         WHEN greatest(buy,sell)/nullif(least(buy,sell),0) < $RATIO
+           THEN 'RATIO_TOO_LOW  (needs \$' ||
+                to_char((least(buy,sell) - greatest(buy,sell)/$RATIO)/1e6,'FM990.00') ||
+                'M off the quiet side)'
+         ELSE '>>> ' || CASE WHEN buy >= sell THEN 'LONG' ELSE 'SHORT' END
+       END AS would_fire
+FROM b, g
+WHERE bucket_start < g.open_bar AND bucket_start > now() - interval '3 hours'
+ORDER BY bucket_start DESC;
+SQL
+echo
+
+# -- 3. The live bucket, shown apart because the scorer must not read it ------
+bold "3. THE BUCKET STILL FORMING (the scorer does not read this)"
+$PSQLT <<SQL
+WITH b AS (
+  SELECT bucket_start,
+         sum(buy_volume_usd)  AS buy,
+         sum(sell_volume_usd) AS sell,
+         sum(buy_volume_usd + sell_volume_usd) AS vol
+  FROM flow_bars_15m WHERE symbol='$SYMBOL' GROUP BY bucket_start),
+g AS (SELECT to_timestamp(floor(extract(epoch from now())/900)*900) AS open_bar)
+SELECT to_char(bucket_start,'HH24:MI') AS bucket,
+       '\$' || to_char(vol/1e6,'FM990.00') || 'M' AS so_far,
+       to_char(greatest(buy,sell)/nullif(least(buy,sell),0),'FM990.00') || ':1 ' ||
+         CASE WHEN buy >= sell THEN 'B' ELSE 'S' END AS imbalance,
+       to_char((buy-sell)/nullif(vol,0),'S0.000') AS ofi,
+       to_char(bucket_start + interval '15 min','HH24:MI') AS closes,
+       to_char(bucket_start + interval '15 min' + interval '$SETTLE min','HH24:MI') AS tradeable
+FROM b, g WHERE bucket_start >= g.open_bar;
+SQL
+dim "partial and still moving -- a live bucket turned +0.17 OFI into -0.081 an hour later"
+echo
+
+# -- 4. Per venue ------------------------------------------------------------
+bold "4. PER VENUE, newest closed bucket"
+$PSQLT <<SQL
+WITH g AS (SELECT to_timestamp(floor(extract(epoch from now())/900)*900) AS open_bar),
+l AS (SELECT max(bucket_start) AS bs FROM flow_bars_15m, g
+      WHERE symbol='$SYMBOL' AND bucket_start < g.open_bar)
+SELECT f.exchange AS venue,
+       '\$' || to_char((f.buy_volume_usd+f.sell_volume_usd)/1e6,'FM990.00') || 'M' AS volume,
+       to_char(greatest(f.buy_volume_usd,f.sell_volume_usd)
+               / nullif(least(f.buy_volume_usd,f.sell_volume_usd),0),'FM990.00') || ':1 ' ||
+         CASE WHEN f.buy_volume_usd >= f.sell_volume_usd THEN 'B' ELSE 'S' END AS imbalance,
+       to_char((f.buy_volume_usd-f.sell_volume_usd)
+               / nullif(f.buy_volume_usd+f.sell_volume_usd,0),'S0.000') AS ofi,
+       f.buy_count + f.sell_count AS prints,
+       '\$' || to_char(greatest(f.max_buy_usd,f.max_sell_usd),'FM999,999,999') AS largest_print
+FROM flow_bars_15m f, l
+WHERE f.symbol='$SYMBOL' AND f.bucket_start = l.bs
+ORDER BY f.exchange;
+SQL
+dim "the rule reads the AGGREGATE. These are here to spot one venue, or one print,"
+dim "carrying the whole imbalance -- which the FlowRatio path does not check for itself,"
+dim "because it never calls Prepare and so never applies MaxConcentration."
+}
+
+if [ "${1:-}" = "-w" ]; then
+    while true; do render; sleep 30; done
+else
+    render
+fi

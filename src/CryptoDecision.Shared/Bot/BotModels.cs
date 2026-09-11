@@ -143,15 +143,31 @@ public sealed record BotTrade
 /// </remarks>
 public sealed record BotOptions
 {
+    // Every default below is the value in the production bot_config row as of
+    // 2026-09-11, not a plausible starting point. The distinction is load-bearing:
+    // these are read from the database on every poll, so a default only surfaces when
+    // a row is missing a column or a caller builds BotOptions directly — which is
+    // exactly when nobody is watching. A default of BTCUSDT on a SOL deployment, or a
+    // 1440-minute hold against a 720-minute one, is a wrong number waiting for the one
+    // path that does not go through the database. See the note on MaxHoldMinutes for
+    // the case where that already happened.
+
+    /// <remarks>
+    /// Stays false. This is the arming switch an operator writes by hand, and the
+    /// only default here that deliberately does NOT match production — where it is
+    /// true, because the bot is running. A default of true would mean any code path
+    /// that constructs BotOptions without reading the database is holding a started
+    /// bot.
+    /// </remarks>
     public bool         Enabled                  { get; set; } = false;
     public bool         PaperMode                { get; set; } = true;
-    public string       Symbol                   { get; set; } = "BTCUSDT";
-    public string       Exchange                 { get; set; } = "BINANCE";
+    public string       Symbol                   { get; set; } = "SOLUSDT";
+    public string       Exchange                 { get; set; } = "OKX";
     public List<string> ActiveStrategies         { get; set; } = ["XVENUE_FLOW"];
-    public decimal      CapitalUsd               { get; set; } = 100m;
-    
+    public decimal      CapitalUsd               { get; set; } = 30m;
+
     /// <summary>Number of concurrent positions per strategy.</summary>
-    public int          MaxOpenTradesPerStrategy { get; set; } = 5;
+    public int          MaxOpenTradesPerStrategy { get; set; } = 2;
 
     /// <summary>
     /// Concurrent positions allowed on the SAME side. 0 disables the constraint.
@@ -177,8 +193,17 @@ public sealed record BotOptions
     /// instead of opening a second position. Verified long_short_mode on this account
     /// on 2026-09-08 before the rule was written.
     /// </summary>
-    public int          MaxOpenPerSide           { get; set; } = 0;
-    
+    public int          MaxOpenPerSide           { get; set; } = 1;
+
+    /// <remarks>
+    /// Still 0.10, and still what production runs — but it no longer sizes anything.
+    /// Whenever the strategy supplies a stop distance, <see cref="RiskPctPerTrade"/>
+    /// decides the notional and this is not read. It survives for the fallback path
+    /// and for RiskEngine's exposure arithmetic, which is the one place it can still
+    /// mislead: that check multiplies this by the position count and reports 20% of
+    /// capital committed, where risk-based sizing at a 2.00% stop actually commits 25%
+    /// per position. See the note in RiskEngine.Validate.
+    /// </remarks>
     public decimal PositionPctOfCapital{ get; set; } = 0.10m;   // 10% per trade (1/10th)
 
     /// <summary>
@@ -195,7 +220,7 @@ public sealed record BotOptions
     /// account will bind first — which lowers the realised risk below this number,
     /// never raises it.
     /// </summary>
-    public decimal RiskPctPerTrade    { get; set; } = 0.01m;    // 1% of capital at risk
+    public decimal RiskPctPerTrade    { get; set; } = 0.005m;   // 0.5% of capital at risk
 
     // ── Take profit / stop loss ──
     //
@@ -212,10 +237,33 @@ public sealed record BotOptions
     public decimal TakeProfitPct  { get; set; } = 0.02m;   // +2.0%
     /// <summary>Stop loss. Kept below take profit so the reward:risk ratio is not inverted.</summary>
     public decimal StopLossPct    { get; set; } = 0.015m;  // -1.5%
-    public int     MaxHoldMinutes { get; set; } = 1440;    // 24 hours max
+    /// <summary>
+    /// Hours a position may be held before the timeout closes it, in minutes.
+    ///
+    /// 720 = 12 hours, matching <see cref="Signals.FlowGeometryDefaults.MaxHoldHours"/>,
+    /// which is the same fact expressed for the backtester. The two disagreed — 1440
+    /// here against 12.0 there — so the tool capped holds at half what the live
+    /// default allowed, and the hold-time curve the strategy is built on
+    /// (+0.273 at 4h, +0.379 at 12h, +0.330 at 24h) was being measured on one horizon
+    /// and configured on another. Production has run 720 throughout; only the
+    /// fallback default was wrong.
+    ///
+    /// This is the default that already caused a real fault. StrategyEvaluator's
+    /// dynamic TP/SL branch used to rebuild BotOptions by hand and reset every field
+    /// it did not copy, which put a 1440-minute hold on a SOL position — see the
+    /// remarks on this record.
+    /// </summary>
+    public int     MaxHoldMinutes { get; set; } =
+        (int)(Signals.FlowGeometryDefaults.MaxHoldHours * 60);   // 720 — 12 hours
 
-    /// <summary>Cooldown between entries in seconds (DCA pacing).</summary>
-    public int     CooldownSeconds{ get; set; } = 120;     // 2 minutes
+    /// <summary>
+    /// Cooldown between entries in seconds.
+    ///
+    /// 900 = 15 minutes, one bucket. The signal cannot change until the next bucket
+    /// closes, so a shorter pace can only re-enter on evidence already traded; the
+    /// 120 this defaulted to was inherited from a strategy that re-evaluated on price.
+    /// </summary>
+    public int     CooldownSeconds{ get; set; } = 900;     // 15 minutes — one bucket
 
     public decimal DailyLossLimitPct   { get; set; } = 0.15m;  // -15% of capital/day
 
@@ -231,18 +279,51 @@ public sealed record BotOptions
     ///
     /// Raise it only alongside a measured reason. It is the last thing standing
     /// between a signal that has stopped working and an account that finds out slowly.
+    ///
+    /// 15 IS WHAT PRODUCTION RUNS, and it is three times the number the paragraph
+    /// above argues for. The default is set here to stop the code claiming otherwise,
+    /// not because 15 has been justified — no measurement in this repository supports
+    /// it, and the reasoning for a low value is unchanged. At the shipped geometry's
+    /// implied win rate, fifteen losses in a row is an event this breaker will
+    /// effectively never see, which makes it decoration rather than a control.
+    ///
+    /// It was almost certainly raised to stop the halt described above — a streak that
+    /// spanned a strategy rewrite took the bot down for fifteen hours — and that cause
+    /// has since been fixed properly: RiskEngine now scopes the streak to one strategy
+    /// and to a derived window, so a rewrite cannot stitch two strategies' losses
+    /// together any more. The reason for the workaround is gone; the workaround is
+    /// still in the database. Lowering it back toward 5 is a bot_config edit and
+    /// wants to be a deliberate one, which is why this comment says so rather than
+    /// quietly restoring it.
     /// </summary>
-    public int MaxConsecutiveLosses { get; set; } = 5;
+    public int MaxConsecutiveLosses { get; set; } = 15;
 
     /// <summary>Seconds between evaluation cycles — the granularity of every bot-side exit.</summary>
     public int     EvalIntervalSeconds { get; set; } = 30;
 
     // ── Breakeven stop ──
 
-    /// <summary>Enable breakeven stop. After trade gains BreakevenTriggerPct, stop loss moves to entry price (risk-free).</summary>
-    public bool    UseBreakevenStop    { get; set; } = true;
+    /// <summary>
+    /// Enable breakeven stop. After a trade gains BreakevenTriggerPct, the entry price
+    /// becomes a floor and a retrace back to it closes the position.
+    ///
+    /// FALSE, which is both what production runs and what CrossVenueFlowStrategy's exit
+    /// documentation has said for some time: "there is no trailing stop and no breakeven
+    /// stop here, deliberately... between them they truncated nearly every winner".
+    /// That was only ever true of the strategy's own exit path — the rule itself lives
+    /// in StrategyEvaluator and applies to every strategy before the strategy is
+    /// consulted, so it was one `true` away from coming back regardless of what the
+    /// strategy said. The default said `true`.
+    ///
+    /// That matters beyond tidiness because the bot_config column defaults to true as
+    /// well: a row recreated from the schema re-arms a stop the strategy believes it
+    /// removed, closing any trade that reaches +0.5% and comes back to entry, which
+    /// after fees is a small loss. Nothing announces it.
+    /// </summary>
+    public bool    UseBreakevenStop    { get; set; } = false;
+
     /// <summary>Profit threshold that activates breakeven. Must sit below TakeProfitPct or it never engages.</summary>
-    public decimal BreakevenTriggerPct { get; set; } = 0.008m;
+    public decimal BreakevenTriggerPct { get; set; } = 0.005m;
 
     // ── Dynamic TP/SL ──
 
@@ -280,13 +361,28 @@ public sealed record BotOptions
     /// <summary>
     /// Whether an unreachable gate falls back to the deterministic signal alone.
     ///
-    /// False by default: a gate that cannot be reached stops entries rather than
-    /// silently reverting to ungated trading. The alternative failure mode is a
-    /// deployment where the gate has been dead for a week and nothing looks any
-    /// different, which is the exact shape of every expensive bug in this codebase so
-    /// far.
+    /// TRUE, because that is what production runs — and it is the one default in this
+    /// record that is worse than the value it replaces. The argument for false is
+    /// unchanged and still correct: a gate that cannot be reached should stop entries
+    /// rather than silently revert to ungated trading, because a deployment where the
+    /// gate has been dead for a week and nothing looks different is the exact shape of
+    /// every expensive bug in this codebase so far.
+    ///
+    /// What it costs, stated plainly: with this on, an unreachable, timed-out, empty or
+    /// unparseable gate no longer blocks the entry. The trade is placed and the row
+    /// records APPROVED_DEGRADED, so the fact is queryable rather than invisible —
+    /// that is the whole reason GateDecision.Unavailable exists as a field. A refusal
+    /// ON THE MERITS is still never overridable.
+    ///
+    /// The reading that makes this defensible is that the gate has approved 10 of 10
+    /// entries under the deployed rule and has never once refused on the merits, so
+    /// what this flag actually overrides is a veto that has never been exercised.
+    /// The reading that does not is that this was switched on while the gate was
+    /// failing, and the failure is what wanted investigating. Set it false in
+    /// bot_config to restore the conservative behaviour; nothing in code needs to
+    /// change.
     /// </summary>
-    public bool    AllowEntryWithoutGate  { get; set; } = false;
+    public bool    AllowEntryWithoutGate  { get; set; } = true;
 
     /// <summary>
     /// Hard ceiling on entries opened per UTC day, for this symbol and execution mode.
@@ -299,11 +395,18 @@ public sealed record BotOptions
     /// hours, four of them riding a single 6% move — for a signal whose horizon is
     /// hours, that is not ten decisions, it is a handful of decisions billed ten times.
     ///
-    /// Six is deliberately generous against an expected two or three, so it only binds
-    /// when something is wrong: a signal firing every bucket, a stop far too tight, or
-    /// a cooldown that is not doing its job.
+    /// Six was deliberately generous against an expected two or three, so it would only
+    /// bind when something was wrong: a signal firing every bucket, a stop far too
+    /// tight, or a cooldown not doing its job.
+    ///
+    /// 20 is what production runs, and at the deployed rule's measured cadence it
+    /// cannot bind at all — FlowRatio has produced 1, 6, 1 and 2 entries on the four
+    /// days since the reset, against a 15-minute cooldown and a 2.1:1 ratio that
+    /// clears in roughly 3% of buckets. The cap is doing nothing, which is the
+    /// intended state for a guard of this kind; it is recorded here so that a future
+    /// rule firing twenty times a day reads as the cap binding rather than as normal.
     /// </summary>
-    public int     MaxEntriesPerDay       { get; set; } = 6;
+    public int     MaxEntriesPerDay       { get; set; } = 20;
 }
 
 // ── Runtime status ────────────────────────────────────────────────────────────

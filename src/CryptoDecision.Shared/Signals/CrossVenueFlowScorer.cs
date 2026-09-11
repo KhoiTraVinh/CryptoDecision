@@ -307,11 +307,17 @@ public sealed record FlowSignalOptions(
     /// <summary>
     /// Which rule decides an entry. See <see cref="FlowEntryMode"/>.
     ///
-    /// Defaults to ZScore so nothing changes unless it is configured, and so the two
-    /// modes can be compared on the same history rather than one replacing the other
-    /// in a way that cannot be undone with a config edit.
+    /// FlowRatio, because that is what production runs. It defaulted to ZScore on the
+    /// argument that "nothing changes unless it is configured" — which was right while
+    /// ZScore was the deployed rule and became the drift it was written to prevent the
+    /// moment appsettings moved to FlowRatio: a backtest taken without an explicit mode
+    /// measured the retired rule and reported it as the strategy.
+    ///
+    /// The other three modes stay implemented and one config edit away. Keeping them
+    /// costs nothing and is what lets the rules be compared on the same history
+    /// rather than one silently replacing another.
     /// </summary>
-    FlowEntryMode EntryMode               = FlowEntryMode.ZScore,
+    FlowEntryMode EntryMode               = FlowEntryMode.FlowRatio,
 
     /// <summary>
     /// Minimum absolute aggregate OFI for <see cref="FlowEntryMode.OfiMagnitude"/>,
@@ -459,6 +465,55 @@ public sealed record FlowSignalOptions(
     decimal RatioMinVolumeUsd             = 3_000_000m,
 
     /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: bucket notional at or above which the
+    /// ratio test is SKIPPED and the entry is taken with whichever side traded more,
+    /// however narrow its lead. 0 disables the exception and leaves the ratio in charge.
+    ///
+    /// The idea is to catch a news print — a bucket so large that the event itself is
+    /// the signal — and ride it rather than waiting for a 2.1:1 lean that a stampede
+    /// never produces. The mechanism is real and visible in the data: ratio FALLS as
+    /// volume rises (mean 1.40 under $5M against 1.19-1.31 over $30M), so the two rules
+    /// are nearly disjoint and this one does reach buckets the ratio never will —
+    /// only 1 of the 42 buckets over $20M also cleared 2.1:1.
+    ///
+    /// IT FAILED ITS PRE-TEST. Measured on 1,770 buckets, 2026-08-21 to 2026-09-11,
+    /// entering 18 minutes after the bucket opens (close plus the settle wait) and
+    /// holding 12 hours, signed to the dominant side:
+    ///
+    ///     threshold    n     +1h      +12h    1st half   2nd half   less top 1
+    ///       12M      112   -0.162   -0.035    +0.013     -0.182      -0.104
+    ///       15M       76   +0.062   -0.032    +0.076     -0.330      -0.137
+    ///       20M       41   +0.160   +0.141    +0.276     -0.341      -0.054
+    ///       25M       25   +0.004   -0.174    -0.166     -0.197      -0.527
+    ///       30M       18   -0.048   -0.239    -0.252     -0.201      -0.823
+    ///
+    /// 20M is a single positive cell between negative neighbours, which is the shape
+    /// this repository has taught itself to distrust — 15M and 25M are both negative and
+    /// each is further from 20M than 20M is from zero. The last column is the decisive
+    /// one: at EVERY threshold, including the chosen one, removing the single best trade
+    /// turns the mean negative. And the second half is negative everywhere.
+    ///
+    /// For comparison, on the same rows and the same arithmetic, the ratio rule that is
+    /// already running: n 45, +0.838% at 12h, 56.8% hit, +1.631 / +0.385 across halves,
+    /// +0.712 after removing its best trade. It passes all three checks; this passes one.
+    ///
+    /// A weaker ratio filter on top does not rescue it. Within the 20M buckets, by ratio
+    /// band: &lt;1.2 gives +0.202, 1.2-1.4 +0.200, 1.4-1.6 +0.866, and 1.6+ gives
+    /// **-1.004** — the wrong way round, on 6 to 17 observations a band, with every band
+    /// flipping sign between halves.
+    ///
+    /// The one number that is not bad is +0.160% at ONE hour, which is better than the
+    /// ratio rule's +0.139% at the same horizon. If this rule has anything in it, it is
+    /// a fast trade, and the machinery around it is built for a 12-hour hold that costs
+    /// roughly 63 bps in funding — which is most of what a 12-hour edge of 14 bps would
+    /// ever earn. Judging it on the shipped exits is judging it on the wrong exits.
+    ///
+    /// Shipped on the operator's decision with all of the above stated, in paper mode,
+    /// as H11 in HYPOTHESES.md. Set to 0 to remove it.
+    /// </summary>
+    decimal RatioHighVolumeUsd            = 20_000_000m,
+
+    /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: minutes to wait after a bucket closes
     /// before trusting its numbers.
     ///
@@ -598,13 +653,54 @@ public static class CrossVenueFlowScorer
     /// silently treated as balanced.
     /// </param>
     /// <param name="options">Thresholds to apply.</param>
+    /// <param name="nowUtc">
+    /// The moment the decision is being made, which <see cref="FlowEntryMode.FlowRatio"/>
+    /// needs in order to tell a closed bucket from a settled one. Null derives it from
+    /// the newest visible bucket — its close plus the settle wait — which is the instant
+    /// the live bot would act on that bucket. Supply it explicitly from a live caller;
+    /// the derivation exists for the backtester, whose clock is the data.
+    /// </param>
     public static FlowVerdict Score(
         IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
-        FlowSignalOptions options)
+        FlowSignalOptions options,
+        DateTime? nowUtc = null)
     {
         // Dispatched here rather than at the call sites, so the live strategy and the
         // backtester cannot end up on different rules. There is exactly one place that
         // decides what an entry is, and both read it.
+        //
+        // THAT CLAIM WAS FALSE FOR TWO OF THE FOUR MODES until 2026-09-11. The switch
+        // below handled OfiMagnitude and sent everything else to ScoreZ, so a caller
+        // configured for FlowRatio or CandleReversal was silently scored on the z-rule.
+        // It went unnoticed because the only caller reaching this method was the
+        // backtester and the default mode was ZScore, so the wrong branch and the
+        // intended one were the same branch — the defect could not show itself until the
+        // default moved. It was one of the two findings that got the backtester deleted.
+        //
+        // The live strategy dispatches FlowRatio and CandleReversal itself and only
+        // reaches this method for ZScore and OfiMagnitude, so the branches below are
+        // defensive rather than load-bearing today. They stay because the failure they
+        // prevent is silent: the next caller to arrive gets the rule it asked for, or an
+        // explicit refusal, and never a different rule scored without comment.
+        //
+        // FlowRatio is dispatched BEFORE Prepare, matching the live strategy: it reads
+        // one aggregate bucket and does not use the per-venue quality gates, so running
+        // them here would abstain on conditions the deployed rule never applies.
+        if (options.EntryMode == FlowEntryMode.FlowRatio)
+            return ScoreFlowRatio(barsByVenue, nowUtc ?? DecisionInstant(barsByVenue, options), options);
+
+        // CandleReversal scores on price and this method has no candles — a FlowBar
+        // carries VWAP, which is the bucket's average rather than its close, and
+        // substituting one for the other would not be the rule that was measured. Said
+        // out loud rather than falling through to ScoreZ, because a tool that quietly
+        // measures a different rule than the one it was asked for is the failure this
+        // whole comment is about. Call ScoreReversal directly, with candles.
+        if (options.EntryMode == FlowEntryMode.CandleReversal)
+            return FlowVerdict.Abstain(
+                "MODE_NEEDS_CANDLES",
+                "CandleReversal reads price, not flow, so it cannot be scored from flow " +
+                "buckets. Call ScoreReversal with 1-minute candles instead.");
+
         var prepared = Prepare(barsByVenue, options);
         if (prepared.Abstained is { } early) return early;
 
@@ -613,6 +709,32 @@ public static class CrossVenueFlowScorer
             FlowEntryMode.OfiMagnitude => ScoreMagnitude(barsByVenue, options, prepared),
             _                          => ScoreZ(barsByVenue, options, prepared),
         };
+    }
+
+    /// <summary>
+    /// The instant a caller with no clock would be deciding: the newest visible bucket's
+    /// close, plus the settle wait FlowRatio requires before it trusts the numbers.
+    ///
+    /// This reproduces the live timing rather than bypassing it. ScoreFlowRatio drops
+    /// any bucket at or after the quarter-hour containing <c>nowUtc</c> and then refuses
+    /// one that closed less than RatioSettleMinutes ago; feeding it the newest bucket's
+    /// own start would fail both tests and abstain on every bar, while feeding it
+    /// something far in the future would let a bucket through that the bot would still
+    /// have been waiting on.
+    /// </summary>
+    private static DateTime DecisionInstant(
+        IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,
+        FlowSignalOptions options)
+    {
+        var newest = DateTime.MinValue;
+
+        foreach (var bars in barsByVenue.Values)
+            if (bars.Count > 0 && bars[^1].BucketStart > newest)
+                newest = bars[^1].BucketStart;
+
+        return newest == DateTime.MinValue
+            ? DateTime.UtcNow
+            : newest.AddMinutes(15 + Math.Max(0, options.RatioSettleMinutes));
     }
 
     // ── Mode: CandleReversal ──────────────────────────────────────────────────
@@ -920,13 +1042,65 @@ public static class CrossVenueFlowScorer
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
 
+        // ── The news-print exception ──────────────────────────────────────────
+        //
+        // Above RatioHighVolumeUsd the ratio test is skipped and the side is simply
+        // whichever traded more. See that option for the measurement, which did not
+        // support it: 20M is an isolated positive cell between negative neighbours and
+        // its mean goes negative once the best single trade is removed.
+        //
+        // Placed AFTER the one-sided guard so it inherits that protection, and after
+        // `ratio` is computed so the reason can state how narrow the lead actually was
+        // — which is the number an operator will want when this loses. At these volumes
+        // the lead is usually narrow by construction: ratio falls as volume rises, so a
+        // typical qualifying bucket leans about 1.2:1 and the side is being chosen by
+        // roughly a tenth of the notional.
+        //
+        // An exactly balanced bucket has no dominant side and is refused rather than
+        // defaulted. Without this, `ofi > 0 ? LONG : SHORT` silently resolves a zero to
+        // SHORT — impossible at 2.1:1, and reachable here, which is exactly the kind of
+        // edge a bypass rule opens up.
+        if (options.RatioHighVolumeUsd > 0m && bucket.VolumeUsd >= options.RatioHighVolumeUsd)
+        {
+            if (ofi == 0.0)
+                return FlowVerdict.Abstain(
+                    "BUCKET_PERFECTLY_BALANCED",
+                    $"The {bucket.Bucket:HH:mm} bucket traded " +
+                    $"${bucket.VolumeUsd / 1_000_000m:F2}M with buy and sell exactly equal, so " +
+                    "there is no dominant side to enter with.",
+                    [], ofi, 0.0, 0, 0, 0.0);
+
+            return new FlowVerdict(
+                Actionable:          true,
+                Side:                ofi > 0 ? "LONG" : "SHORT",
+                AggregateOfi:        ofi,
+                AggregateZ:          0.0,
+                AgreeingVenues:      0,
+                ParticipatingVenues: barsByVenue.Count,
+                DispersionBps:       0.0,
+                AbstainCode:         "",
+                Reason:              $"The {bucket.Bucket:HH:mm} bucket traded " +
+                                     $"${bucket.VolumeUsd / 1_000_000m:F2}M, at or above the " +
+                                     $"${options.RatioHighVolumeUsd / 1_000_000m:F1}M news-print " +
+                                     $"threshold, so the {options.RatioMinimum:F2}:1 ratio test is " +
+                                     $"skipped. Entering WITH the heavier side at {ratio:F2}:1 " +
+                                     $"{(ofi > 0 ? "buy" : "sell")} (OFI {ofi:+0.000;-0.000}) — a " +
+                                     $"lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
+                                     "Volume is the whole signal here; price is not consulted.",
+                Votes:               []);
+        }
+
         if (ratio < (double)options.RatioMinimum)
             return FlowVerdict.Abstain(
                 "RATIO_TOO_LOW",
                 $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
                 $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
                 $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
-                $"{options.RatioMinimum:F2}:1 minimum.",
+                $"{options.RatioMinimum:F2}:1 minimum" +
+                (options.RatioHighVolumeUsd > 0m
+                    ? $", and under the ${options.RatioHighVolumeUsd / 1_000_000m:F1}M that " +
+                      "would have waived it."
+                    : "."),
                 [], ofi, 0.0, 0, 0, 0.0);
 
         var side = ofi > 0 ? "LONG" : "SHORT";
@@ -1525,6 +1699,16 @@ public static class CrossVenueFlowScorer
 ///   AtrLookbackMinutes  both code defaults said 1440, appsettings ran 240, so
 ///                       every sweep sized stops from a 24-hour ATR while
 ///                       production sized them from a 4-hour one
+///   EntryPullbackAtr    this file said 0.75, appsettings ran 0.0 — the backtester
+///                       waited for a pullback the bot never waits for
+///   MinRewardRisk       this file said 1.2, appsettings ran 0.5, so the tool
+///                       rejected candidates production would have traded
+///
+/// The last two were found on 2026-09-11 by diffing this class against the deployed
+/// appsettings, which is the check the paragraph below had been asserting rather
+/// than performing. Writing "these values ARE what production runs" does not make
+/// them so; the audit is what does, and it is worth repeating whenever either side
+/// of the pair is edited.
 ///
 /// These values ARE what production runs. appsettings may still override them, but
 /// an override that changes behaviour should now also change this file, and a
@@ -1544,15 +1728,45 @@ public static class FlowGeometryDefaults
     /// <summary>Target distance as a multiple of the stop distance.</summary>
     public const double TargetRiskMultiple = 2.0;
 
-    /// <summary>Hours a position may be held before it is closed regardless.</summary>
+    /// <summary>
+    /// Hours a position may be held before it is closed regardless.
+    ///
+    /// The live cap is <c>bot_config.max_hold_minutes</c>, read by StrategyEvaluator;
+    /// this is the same fact as a constant, and <see cref="BotOptions.MaxHoldMinutes"/>
+    /// derives its default from it so the two cannot drift. They did drift — 1440 there
+    /// against 12.0 here — for as long as the backtester was the only thing reading this.
+    /// </summary>
     public const double MaxHoldHours = 12.0;
+
+    /// <summary>
+    /// Floor under the stop distance, as a fraction of entry — the market's noise, not
+    /// the exchange's fees. This is H8, and the full measurement is on
+    /// FlowStrategyOptions.MinStopPct, which now reads it from here.
+    ///
+    /// It lives in this class for the reason the class exists: the backtester cannot
+    /// see BotService, so a geometry value defined only on FlowStrategyOptions is one
+    /// the validation tool structurally cannot apply. It did not apply this one — the
+    /// engine simply never passed a minStopPct — so every stop-width result the tool
+    /// has produced since H8 shipped was measured on a ~1.6% stop against a deployed
+    /// 2.00% one. Of the four drifts this class has now recorded, this is the only one
+    /// that was invisible rather than merely inconsistent: there was no second value
+    /// to disagree with, just an absent argument.
+    /// </summary>
+    public const decimal MinStopPct = 0.020m;
 
     /// <summary>
     /// ATR multiples price must give back before an actionable signal is taken.
     /// 0 enters at market. See CrossVenueFlowStrategy, where it is applied, and H4 in
     /// HYPOTHESES.md — it was read off 28 paper trades and is not proven.
+    ///
+    /// 0 because that is what production runs, and it has since this file started
+    /// claiming to be what production runs. The value was 0.75 here while
+    /// appsettings ran 0.0, so every backtest taken without an explicit flag measured
+    /// a pullback rule the bot does not apply — and H4 is registered against trades the
+    /// live path never waited for. The rule stays implemented and one config edit away;
+    /// what is corrected is the claim about which version is deployed.
     /// </summary>
-    public const double EntryPullbackAtr = 0.75;
+    public const double EntryPullbackAtr = 0.0;
 
     /// <summary>
     /// Minimum post-fee reward:risk for a signal to become a trade.
@@ -1561,6 +1775,15 @@ public static class FlowGeometryDefaults
     /// same number and cannot see BotService. Every other parameter in this class is in
     /// it for that reason: a literal duplicated into the backtester is how a
     /// configuration gets certified that nobody was running.
+    ///
+    /// 0.5 because that is the deployed value. It read 1.2 here against 0.5 in
+    /// appsettings, which made the backtester STRICTER than the bot: a cell the tool
+    /// rejected for thin reward:risk is one production would have traded. Neither
+    /// number binds under the shipped geometry — a 2.00% stop with TargetRiskMultiple
+    /// 2.0 clears both at 1.86:1 after fees — so this corrects the record rather than
+    /// any measurement taken so far. It would bind again the moment UseRangeGeometry
+    /// goes back on, where reward:risk falls out of where the entry sits in the range
+    /// and MinRewardRisk becomes a positional filter; see VolatilityStops.ResolveFromRange.
     /// </summary>
-    public const decimal MinRewardRisk = 1.2m;
+    public const decimal MinRewardRisk = 0.5m;
 }

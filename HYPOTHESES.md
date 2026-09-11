@@ -883,3 +883,354 @@ remove before concluding anything about the entry.
 ### Result
 
 _Open._
+
+---
+
+## H11 — A bucket large enough is its own signal (shipped against the evidence)
+
+**Shipped 2026-09-11.** `FlowSignalOptions.RatioHighVolumeUsd = 20_000_000`. Set it to
+`0` to remove the rule; nothing else changes.
+
+### The claim
+
+A news print produces a bucket so large that the event itself is the signal. Waiting for
+a 2.1:1 lean misses it, because a stampede has size on both sides. So above $20M of
+notional in one closed 15-minute bucket, skip the ratio test and enter with whichever
+side traded more.
+
+### The mechanism is real
+
+Ratio falls as volume rises — mean 1.40 below $5M against 1.19–1.31 above $30M — so the
+two rules are very nearly disjoint. Of the 42 buckets over $20M in the sample, exactly
+**one** also cleared 2.1:1. This rule reaches trades the ratio rule structurally cannot,
+which is the strongest thing that can be said for it.
+
+### The measurement, which does not support it
+
+1,770 buckets, 2026-08-21 to 2026-09-11. Entry 18 minutes after the bucket opens (its
+close plus the 3-minute settle wait), signed to the heavier side, held 12 hours.
+
+    threshold    n     +1h      +12h    1st half   2nd half   less top 1
+      12M      112   -0.162   -0.035    +0.013     -0.182      -0.104
+      15M       76   +0.062   -0.032    +0.076     -0.330      -0.137
+      20M       41   +0.160   +0.141    +0.276     -0.341      -0.054
+      25M       25   +0.004   -0.174    -0.166     -0.197      -0.527
+      30M       18   -0.048   -0.239    -0.252     -0.201      -0.823
+
+Against the three checks this repository applies to everything:
+
+- **Plateau — fails.** 20M is one positive cell between two negative ones. Its
+  neighbours are each further from it than it is from zero.
+- **Both halves — fails.** The second half is negative at every threshold.
+- **Minus the best trade — fails.** Negative at every threshold, 20M included. The
+  positive mean is one trade.
+
+The rule that already runs, measured identically on the same rows: n 45, **+0.838%** at
+12h, 56.8% hit, +1.631 / +0.385 across halves, **+0.712** after removing its best trade.
+It passes all three.
+
+A weaker ratio filter on top does not rescue it. Within the $20M buckets, by ratio band:
+<1.2 → +0.202, 1.2–1.4 → +0.200, 1.4–1.6 → +0.866, **≥1.6 → −1.004**. The gradient runs
+the wrong way and every band flips sign between halves, on 6–17 observations each.
+
+### The one thing worth watching
+
+**+0.160% at one hour** is the only good number, and it beats the ratio rule's +0.139% at
+the same horizon. If there is anything here it is a fast trade. The machinery around it
+holds for 12 hours and pays roughly 63 bps of funding to do so — which is more than a
+14 bps twelve-hour edge earns. This rule may be being judged on the wrong exits.
+
+### Decision rule, fixed in advance
+
+Evaluate when **20 trades have entered through this path** or after **21 days**,
+whichever comes first. Trades are identifiable by an entry rationale containing
+`news-print threshold`.
+
+- **Keep** only if those trades' total R is positive AND remains positive after
+  discarding the single best one. The second condition is not optional: it is the exact
+  check the pre-shipping measurement failed, so keeping the rule on a result that fails
+  it again would be ignoring the same evidence twice.
+- **Remove** (`RatioHighVolumeUsd: 0`) otherwise. This is the expected outcome.
+- **Do not sweep the threshold.** Five values were measured across a scattered curve with
+  one positive cell. A sixth will eventually look good and will not be real. If the rule
+  is to be revisited, revisit the **exit** — the 1-hour figure — not the entry threshold.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is contamination of H9. This path adds
+roughly two entries a day against FlowRatio's current 2.5, so within days most closed
+trades will have come through a rule measured to be negative, and H9's 30-trade bar will
+be reached by a mixed population. **Judge H9 only on trades whose rationale does not
+mention the news-print threshold**, or remove this rule first and let H9 finish clean.
+
+### Addendum, 2026-09-11 — measured again on a 10-bar hold, and it changes the verdict
+
+The first measurement judged this rule on the shipped 12-hour hold and it failed two of
+three checks. Re-simulated properly — entry 18 min after the bucket opens, stop and
+target walked against 1-minute OHLC with the stop taken when a minute spans both, costs
+7 bps round trip plus measured funding per hour, R against the 2.00% stop:
+
+    hold 2.5h (10 bars), fixed 2%/4%
+    rule            n    meanR    win%    1st half  2nd half  less top 1
+    vol >= 10M    154   +0.057   45.5%    +0.048    +0.083      +0.045
+    vol >= 20M     41   +0.206   53.7%    +0.179    +0.280      +0.162
+    vol >= 30M     18   +0.125   50.0%    +0.084    +0.206      +0.017
+    vol >= 40M      9   +0.320   55.6%    +0.336    +0.300      +0.115
+
+All four thresholds are now positive on all three checks, where at 12 hours every one of
+them failed the outlier check. The hold was the defect, not the entry.
+
+And 10 bars is a plateau rather than an argmax:
+
+    bars   hold    meanR    1st half  2nd half  less top 1
+      4    1.0h   +0.072    +0.087    +0.031      +0.025
+      6    1.5h   +0.085    +0.044    +0.196      +0.038
+      8    2.0h   +0.167    +0.131    +0.265      +0.122
+     10    2.5h   +0.206    +0.179    +0.280      +0.162
+     12    3.0h   +0.203    +0.176    +0.278      +0.159
+     16    4.0h   +0.095    +0.036    +0.255      +0.048
+     24    6.0h   +0.198    +0.156    +0.313      +0.154
+     48   12.0h   +0.137    +0.144    +0.120      +0.092
+
+8, 10 and 12 bars agree within 0.04R with both halves positive throughout. Note what the
+exits actually are at 2.5h: 30 of 41 close on TIMEOUT against 7 stops and 4 targets, so
+the barriers barely participate. This rule is "hold 2.5 hours and take what is there",
+not a stop-and-target trade.
+
+### Why the hold was NOT changed
+
+The two rules want opposite holds, and the same sweep run on the rule already deployed
+makes that unmistakable — it rises monotonically with hold length:
+
+    bars    vol >= 20M    3M & 2.1x
+      10      +0.206        +0.120   (2nd half -0.003)
+      48      +0.137        +0.382   (2nd half +0.149)
+
+`max_hold_minutes` is one global value read by StrategyEvaluator before any strategy is
+consulted, so setting it to 150 would cut the deployed rule from +0.382R to +0.120R and
+push its second half negative. Honouring both needs a per-trade hold, which is a real
+change and was deliberately not made on the strength of one 21-day window. **Operator
+decision 2026-09-11: record the numbers, leave the hold at 720 minutes.** The news-print
+entries therefore run on a 12-hour cap that this measurement says is the wrong one for
+them, and H11 will be judged accordingly — see the decision rule above, which is
+unchanged.
+
+### Dynamic R:R, measured and then enabled anyway
+
+    config                    fixed  ->  dynamic
+    2.5h  vol >= 10M         +0.057  ->  +0.007
+    2.5h  vol >= 20M         +0.206  ->  +0.098
+    2.5h  vol >= 30M         +0.125  ->  +0.155
+    2.5h  vol >= 40M         +0.320  ->  +0.292
+    12h   vol >= 10M         +0.133  ->  +0.024
+    12h   vol >= 20M         +0.137  ->  -0.057
+    12h   vol >= 30M         -0.044  ->  -0.098
+    12h   3M & 2.1x          +0.382  ->  +0.353
+
+Worse in seven of eight cells, and the mechanism is visible in the exit mix rather than
+inferred: at 12h/20M it takes TP closes from 12 down to 2 and pushes TIMEOUT from 12 to
+24. Scaling the target by 1 + 10x excursion makes the target RETREAT as price advances
+toward it, so winners are converted into timeouts. The stop half meanwhile widens against
+a position sized at entry for a 2.00% stop, so a full stop-out can cost up to twice
+risk_pct_per_trade.
+
+**Decision taken 2026-09-11 to enable it globally, with all of the above shown; the
+switch still has to be flipped in `bot_config`.**
+H12 below carries its decision rule.
+
+### Correction, same day — the hold measurement above answered the wrong question
+
+"Close after 10 candles" was read as a 150-minute time cap. It was not: it meant the exit
+that already exists — H10's rule, which sums buy and sell notional over the last
+`FlowOfiBars` (10) closed buckets and closes when the imbalance of those sums turns
+against the position. That rule is implemented, deployed (`UseFlowOfiExit: true`) and has
+fired three times live as `OFI_REVERSAL`. **Nothing needed building; the hold sweep above
+measured a cap nobody asked for.**
+
+Re-measured with the real exit — stop 2%, target 4%, the 10-bucket OFI reversal, 12-hour
+cap, a 2-minute action lag for the aggregation worker, and the live `wasFavourable` guard:
+
+    rule                  n    meanR   win%   1st half  2nd half  less top   SL/ TP/OFI/ TO
+    -- 12h cap only, no OFI exit
+    news-print >= 10M   154   +0.133  46.8%   +0.151    +0.083    +0.121     56/ 36/  0/ 62
+    news-print >= 20M    41   +0.137  41.5%   +0.144    +0.120    +0.092     17/ 12/  0/ 12
+    3M & 2.1x            45   +0.382  53.3%   +0.767    +0.149    +0.346      9/ 11/  0/ 25
+    -- with the 10-bucket OFI exit
+    news-print >= 10M   154   +0.223  51.3%   +0.240    +0.177    +0.212     22/ 23/102/  7
+    news-print >= 20M    41   +0.312  58.5%   +0.304    +0.336    +0.271      8/  8/ 24/  1
+    news-print >= 30M    18   +0.097  44.4%   +0.027    +0.238    -0.013      5/  3/  9/  1
+    news-print >= 40M     9   +0.242  55.6%   +0.169    +0.333    +0.027      2/  2/  4/  1
+    3M & 2.1x            45   +0.385  53.3%   +0.679    +0.207    +0.349      0/  8/ 35/  2
+
+**This is the best-supported result measured in this repository.** At $20M the rule
+returns +0.312R with the halves within 0.03R of each other (+0.304 / +0.336) and 87% of
+the mean surviving removal of the best single trade. It passes all three checks with room,
+which neither the 12-hour version (+0.137, fails the outlier check) nor the 150-minute cap
+(+0.206) did. The one blemish is that $30M dips to +0.097 between two strong neighbours,
+on 18 observations — so this is not the clean plateau the 8/10/12-bar hold sweep was.
+
+### And a finding about H10 itself
+
+The OFI exit is worth almost nothing to the rule it was measured on, and a great deal to
+the rule it was not:
+
+    3M & 2.1x        +0.382  ->  +0.385     (+0.003)
+    news-print 20M   +0.137  ->  +0.312     (+0.175)
+
+H10 shipped against its own evidence because, on the ratio rule, six window lengths all
+failed to beat doing nothing — and that reading was correct. One mechanism explains both
+halves: the ratio rule enters on an extreme imbalance, so by the time flow reverses the
+information is largely spent; the news-print rule enters on near-balanced flow at high
+volume, where a later 10-bucket reversal is genuinely new information. Note also what it
+does to stop-outs — 17 down to 8 at 20M, and 9 down to 0 on the ratio rule. It is getting
+out before the stop, not instead of the target.
+
+**H10 must not be removed while H11 is open.** That reverses the instruction in H10's own
+decision rule ("if H9 comes out marginal, remove H10 first"), which was written when the
+ratio rule was its only consumer. Recorded here rather than edited there, because the
+rules at the top of this file forbid editing a decision rule after the fact.
+
+### The guard is load-bearing
+
+The deployed rule closes only when the imbalance turns against a position it had
+previously favoured. Dropping that guard — closing on the sign of the sum alone, which is
+the simpler rule as usually described — is worse everywhere:
+
+    rule               guarded   sign only
+    news-print >= 10M  +0.223    +0.189
+    news-print >= 20M  +0.312    +0.240
+    news-print >= 40M  +0.242    +0.209
+    3M & 2.1x          +0.385    +0.329
+
+The implemented version is already the better variant. Do not "simplify" it to the sign
+test.
+
+### Result
+
+_Open._
+
+---
+
+## H12 — Dynamic TP/SL, enabled WITH the measurement (the first version of this entry had it backwards)
+
+### Correction, 2026-09-11, before this was ever evaluated
+
+Everything below the next heading was written on a measurement that omitted the OFI exit,
+and it is wrong. Dynamic TP/SL was scored against a 12-hour cap and a 150-minute cap, and
+came out worse in seven of eight cells. Neither of those is the deployed configuration:
+`UseFlowOfiExit` is true, and the OFI reversal closes 35 of 45 trades on the live rule.
+Judging a barrier rule on a configuration where the barriers do most of the closing, when
+in production they do not, measures the wrong thing.
+
+Re-measured with the exit that actually runs, R against the ORIGINAL 2% stop so that
+widening is charged for the risk it adds:
+
+    rule / barriers              n    meanR   win%   1st half  2nd half  less top  SL/ TP/OFI/ TO
+    -- with the OFI exit, which is production
+    3M & 2.1x    fixed          45   +0.385  53.3%   +0.679    +0.207    +0.349    0/  8/ 35/  2
+    3M & 2.1x    DYNAMIC        45   +0.419  53.3%   +0.765    +0.208    +0.354    0/  1/ 41/  3
+    news 20M     fixed          41   +0.312  58.5%   +0.304    +0.336    +0.271    8/  8/ 24/  1
+    news 20M     DYNAMIC        41   +0.198  56.1%   +0.220    +0.136    +0.124    9/  2/ 29/  1
+    -- without it, which is what the first version measured
+    3M & 2.1x    fixed          45   +0.382  53.3%   +0.767    +0.149    +0.346    9/ 11/  0/ 25
+    3M & 2.1x    DYNAMIC        45   +0.353  53.3%   +0.756    +0.109    +0.288    6/  1/  0/ 38
+
+**On the deployed rule, dynamic is better on every column** — overall, both halves, and
+after discarding the best trade. It passes all three checks.
+
+This independently reproduces the 2x2x2 grid the operator relied on when they chose to
+keep the feature on 2026-09-10: that grid gave dynamic+OFI +0.448 against fixed+OFI
++0.410, a gap of +0.038; this gives +0.419 against +0.385, a gap of +0.034. Same
+direction, same magnitude, measured a day later by a different route. The operator's
+decision was sound and the "against the measurement" framing below was my error.
+
+The mechanism, now that both halves of the table exist: widening the target makes it
+RETREAT as price advances, which strands winners — TP closes fall from 11 to 1 without
+the OFI exit. With the OFI exit those trades are not stranded, they close on flow instead
+(35 to 41), so the cost disappears and the wider stop's benefit remains.
+
+**It does NOT transfer to the news-print rule**, which loses +0.114R to it: that rule
+was not stopping out much, so widening the stop buys nothing, while losing targets
+costs (TP 8 to 2). `use_dynamic_tp_sl` is one global switch, so if H11 ships the two
+rules will want opposite settings. Same shape as the finding about the OFI exit itself:
+a feature that pays for one entry rule and not the other.
+
+**The gap is +0.034R on n=45 and is inside the noise of that sample.** What the
+measurement supports is "not harmful, probably mildly positive on the deployed rule",
+not a demonstrated edge.
+
+---
+
+## What the first version of this entry said, kept for the record
+
+**Decided 2026-09-11. NOT YET IN FORCE at the time of writing** — `use_dynamic_tp_sl` was
+still `false` in `bot_config`. This hypothesis opens when the UPDATE below is run, not
+when this section was committed. Check the column before reading any result here.
+
+```sql
+UPDATE bot_config SET use_dynamic_tp_sl = true, updated_at = now() WHERE id = 1;
+```
+
+The bot polls `bot_config` every 30 seconds, so it takes effect without a restart, and
+setting it back to `false` is the whole of the revert.
+
+Worth writing down because it was misremembered as already on: the CODE for dynamic TP/SL
+was made real on 2026-09-10 in `a9cc21a` — before that it scaled two percentages only the
+no-geometry fallback reads, so it had never done anything — and after the 2x2x2 grid the
+operator decided to KEEP it. "Keep" meant keep the implementation. The switch was never
+turned on. The feature has been present, correct and dormant since, which from outside
+looks exactly like a feature that is running.
+
+### The claim being tested
+
+That scaling both barriers outward by `1 + 10x favourable excursion`, capped at 2x, earns
+more than leaving them fixed — because a position that has already travelled is in a
+market moving further than the entry assumed.
+
+### The evidence as it was first (mis)measured
+
+The eight-cell table in H11 above: worse in seven, and the one improvement (2.5h/30M) is
+on 18 observations. The measured mechanism is that the target retreats faster than price
+advances, so it converts winners into timeouts.
+
+### Decision rule — REPLACED 2026-09-11, before this hypothesis opened
+
+The rule first written here was: keep only if total R is positive AND the share of `TP`
+closes does not fall below 24%. **That second condition is backwards.** The corrected
+measurement shows TP closes dropping from 8 to 1 in the configuration where dynamic is
+BETTER — the trades are not lost, they close on the OFI reversal instead, and they close
+further ahead. A condition designed to catch a failure mode would have failed the feature
+for doing the thing that makes it work.
+
+Replaced rather than kept because this entry has not opened: `use_dynamic_tp_sl` is still
+false, so no data has been collected under it and nothing is being edited after a result.
+The rule at the top of this file forbids editing a decision rule after the fact, which is
+not this. If the switch has been flipped by the time you read this, the rule below is
+frozen.
+
+Evaluate when **30 trades have closed** with it on, or after **21 days**.
+
+- **Judge it by replaying the window, not by its total R.** The feature is stateless and
+  recomputed from stored levels every cycle, so the counterfactual is exactly computable:
+  take the signals from the new window and simulate them with the scaling on and off.
+  Keep it if the on-version is ahead on mean R, in both halves of the new window, and
+  after discarding the best single trade.
+- **Revert to false** if the off-version wins on any of those three.
+- **Do not judge it on live total R alone.** The measured effect is +0.034R on n=45,
+  comfortably inside the noise of that sample; at roughly 2.5 trades a day a live window
+  cannot resolve it either, so a positive total R would be evidence about the entry rule
+  and not about this switch.
+- **Re-open it if H11 ships.** The news-print rule loses +0.114R to this setting, and one
+  global switch cannot serve both. Whichever rule is producing most of the trades decides.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. In evidence, it is expensive: it lands on top of H9
+and H11 and changes the exit for every trade both of them are judged on. Three open
+hypotheses now share one trade stream, and the 21-day windows overlap. If all three come
+out marginal, nothing here will be separable — remove H12 first, then H11, and let H9
+finish on its own terms.
+
+### Result
+
+_Open._
