@@ -1,36 +1,36 @@
 # CryptoDecision
 
-A cross-venue order-flow strategy on SOL perpetuals. It collects every taker trade from
-three exchanges, aggregates them into disjoint 15-minute flow buckets in PostgreSQL, and
-enters only when the aggressive-flow imbalance is statistically unusual **and** at least
-two venues independently agree. Exits are volatility-scaled, fixed at entry, and enforced
-by an exchange-side OCO rather than by this process.
+An order-flow strategy on SOL perpetuals. It collects every taker trade from three
+exchanges, aggregates them into disjoint 15-minute flow buckets in PostgreSQL, and enters
+**with** the side that dominated the last closed bucket — when it dominated by enough, on
+enough volume. Exits are a fixed-percentage stop and target plus a flow-reversal rule.
 
-**It places real orders on OKX.** See [Arming](#arming) — three separate switches have to
-be open, and they currently are.
+**It is in paper mode and must stay there.** See [Arming](#arming) and
+[Status, honestly](#status-honestly). Two of the three switches that reach real funds are
+already open; `bot_config.paper_mode` is the only one still closed, and the strategy has
+never been shown to survive a trending market.
 
 ```
 Binance ┐
 Bybit   ├─WebSocket─▶ Ingestion ─Kafka─▶ Processor ─▶ PostgreSQL
 OKX     ┘                                              │  trades → flow_bars_15m
-                                                        │
-                                                        ▼
-                                                 Bot (XVENUE_FLOW)
-                                                  │ scorer → geometry → sizing
-                                                  │ optional LLM veto gate
-                                                  ▼
-                                              OKX  ─ post-only entry + OCO exit
+                                                       │
+                                                       ▼
+                                                Bot (XVENUE_FLOW)
+                                                 │ scorer → geometry → sizing
+                                                 │ optional LLM veto gate
+                                                 ▼
+                                             OKX  ─ post-only entry + OCO exit
 ```
 
 `api` and `dashboard` have been deleted. They sat behind a `ui` profile and were never
-deployed; the API's only client was the dashboard, and of the six endpoints it served
-the dashboard called one. The Python prediction service that used to sit behind an
-`ensemble` profile is gone for the same reason — nothing in the entry path read its
-output.
+deployed; the API's only client was the dashboard, and of the six endpoints it served the
+dashboard called one. The Python prediction service that used to sit behind an `ensemble`
+profile is gone for the same reason — nothing in the entry path read its output.
 
-There is no UI. The bot is started, stopped and configured with SQL against
-`bot_config`, and everything it wants to tell you is in that row or in `bot_trades`,
-`signal_outcomes` and `flow_bars_15m`. See **Operating the bot** below.
+There is no UI. The bot is started, stopped and configured with SQL against `bot_config`,
+and everything it wants to tell you is in that row or in `bot_trades`, `signal_outcomes`
+and `flow_bars_15m`. See **Operating the bot** below.
 
 ## Services
 
@@ -50,35 +50,72 @@ is not in.
 
 ## The strategy: XVENUE_FLOW
 
-`CrossVenueFlowScorer` is a pure function, which is what lets the live bot and the
-backtester run the identical arithmetic. It measures volume-weighted taker order-flow
-imbalance per venue on **disjoint** clock-aligned 15-minute buckets, standardises each
-venue against **its own** trailing median (MAD × 1.4826 — not against 50%, because venues
-have structural biases), and then requires agreement.
+One class, `CrossVenueFlowStrategy`, with the entry rule selected by
+`FlowStrategy:Signal:EntryMode`. Scoring lives in `CrossVenueFlowScorer`, a pure function,
+which is what lets the live bot and the backtester run identical arithmetic.
 
-Conditions are **conjunctive** — every one can veto, and each refusal has a named code:
+**`FlowRatio` is what runs.** Take the last closed 15-minute bucket, wait three minutes for
+the aggregation worker to fold in late trades, and enter **with** the dominant side when:
+
+    total notional  >= RatioMinVolumeUsd   ($3M)
+    dominant side   >= RatioMinimum x the other   (2.1x)
+
+Price is not consulted at all. Refusals carry named codes:
 
 | code | meaning |
 |---|---|
-| `AGGREGATE_BELOW_THRESHOLD` | volume-weighted z inside ±`EnterZ` |
-| `NO_CROSS_VENUE_CONSENSUS` | fewer than `MinAgreeingVenues` venues independently at that z |
-| `NO_VENUE_QUALIFIED` | no venue cleared its volume / print-count / concentration floor |
-| `VENUE_DISPERSION_TOO_WIDE` | cross-venue VWAP spread says the move is already gone |
-| `REWARD_RISK_TOO_LOW` | ATR geometry gives less than `MinRewardRisk` after fees |
-| `FLOW_BARS_STALE` | newest closed bucket older than `MaxBarAge` — ingestion has stopped |
+| `BUCKET_NOT_SETTLED` | bucket closed under `RatioSettleMinutes` ago; the worker is still writing it |
+| `VOLUME_TOO_THIN` | under the notional floor — a 2:1 lean on $2M is what a quiet hour looks like |
+| `RATIO_TOO_LOW` | neither side dominates by enough |
+| `NO_CLOSED_BUCKET` | nothing to score yet |
+| `FLOW_BARS_STALE` | newest bucket older than `MaxBarAge` — ingestion has stopped |
 
-Current parameters live in **one** place each (`FlowSignalOptions` and
-`FlowGeometryDefaults` in `CryptoDecision.Shared`), and `appsettings.json` agrees with
-them. That is deliberate: three different parameters have drifted between a code default,
-an appsettings override and a backtester literal, and each time the backtester certified a
-configuration nobody was running.
+Three earlier modes remain in the enum and are dead unless configured. `ZScore` required a
+statistically unusual imbalance with independent cross-venue agreement; `OfiMagnitude`
+entered on raw |OFI| in a single bucket; `CandleReversal` bought a 0.60% fall and shorted a
+1.00% rise on price alone. They are kept because switching back is a config edit and
+because the backtester can still run them, not because they are recommended — see
+`HYPOTHESES.md` for why each was replaced.
 
-Exits are `1.5 × ATR` for the stop and `2 × stop` for the target, where ATR is the
-**median** true range over 15-minute bars from the last 4 hours. Median, not mean: at 15
-minutes the mean sits 51% above the median because one bar in the sample ranged 13%.
+### Why the sign is what it is
 
-`bot_config.last_verdict_*` holds the current verdict, written every cycle — the
-abstention log is throttled and once left the state 33 minutes stale during a 2.7% move.
+CandleReversal entered **against** the tape by construction: buying a fall means buying
+while sellers are lifting, and 138 of its 155 signals had the last closed bucket leaning
+the other way. FlowRatio enters with it.
+
+That is not a contradiction of the finding that aggregate OFI carries no direction — that
+figure, -0.015 against the next hour's signed return over 1,496 buckets, is an average over
+the whole distribution. This rule reads only its extreme tail: a 2.1x imbalance occurs in
+about 5% of buckets, 3% with the volume floor. An average of zero constrains a tail very
+little, and nobody had measured the tail on its own.
+
+### Exits
+
+    SL   2.00%   floor, from MinStopPct — the noise floor, not the fee floor
+    TP   4.00%   = 2 x stop (TargetRiskMultiple), from the ATR path
+    cap  12 hours
+    OR   the 10-bucket (150 min) aggregate imbalance turns against the position,
+         having favoured it earlier in the hold -> close_reason OFI_REVERSAL
+
+`UseRangeGeometry` is **false** for this mode. Entering with the dominant side puts price at
+the edge of its own range, so a range-boundary target lands almost on the entry and fails
+`MinRewardRisk`: 3 of 92 signals survived it.
+
+Two floors sit under the stop and they are separate claims. The **fee** floor
+(`roundTripFeeRate x MinStopAsFeeMultiple`, 0.40%) says a stop must clear the cost of the
+round trip. The **noise** floor (`MinStopPct`, 2.00%) says it must clear SOL's ordinary
+movement — median 15-minute true range is 1.07%, so the 0.40% that bound every trade for
+weeks was not a barrier that fired when the trade was wrong, it fired when nothing had
+happened. Collapsing the two into one multiple named for fees is what hid that for so long.
+
+The exit rule is stateless: every cycle re-reads the buckets since entry and re-asks the
+question, and it requires the imbalance to have favoured the trade at some point after
+entry before a turn counts. Without that guard it reads a window that mostly predates the
+trade — the defect that closed two live positions thirty seconds after opening them on
+2026-09-09.
+
+`bot_config.last_verdict_*` holds the current verdict, written every cycle — the abstention
+log is throttled and once left the state 33 minutes stale during a 2.7% move.
 
 ## The LLM gate
 
@@ -174,7 +211,7 @@ unhealthy".
 | `bot_trades` | Trade history with realised P&L, per-trade stop/target/ATR/gate verdict |
 | `bot_trades_archive` | Trades from retired strategies, kept out of the active series |
 | `daily_feature_table` | return_24h, volatility, volume_change, whale_count, vwap |
-| `prediction_table` | Empty. Its writer is deleted; the API still selects from it |
+| `prediction_table` | Empty. Its writer is deleted and so is the API that read it |
 
 `is_whale` is a generated column, `quote_qty > 100000`. On SOL that fires rarely — 116 of
 2.41 M trades in a recent 24 hours, largest single trade $488,913 — so treat it as an
@@ -235,23 +272,54 @@ carried 90% of a since-retracted result.
 
 ## Status, honestly
 
-The machinery is proven; the signal's edge is not. Those are different claims.
+The machinery is proven; the signal's edge is not. Those are different claims, and the gap
+between them has not narrowed.
 
-**Verified with real money:** post-only maker entries fill, and filled 9.2 bps better than
-the signal price. Exchange-side OCO arms and fires — every closed trade so far was closed
-by OKX, not by this process. Per-trade geometry, gate verdict and effective risk persist on
-the row. Three venues have ingested without a gap in `flow_bars_15m` over 48 h.
+**Verified with real money**, before the account went back to paper: post-only maker
+entries fill, and filled 9.2 bps better than the signal price. Exchange-side OCO arms and
+fires. Per-trade geometry, gate verdict and effective risk persist on the row. Three venues
+have ingested without a gap in `flow_bars_15m`.
 
-**Not established:** whether the signal covers its execution cost. On 5.9 days at the
-deployed configuration, break-even cost came out at 1.8 bps against the ~7 bps actually
-paid, and across a 36-cell parameter sweep **no** configuration was positive in both halves
-of the sample. Live: 3 trades, −$0.45, −0.23R. Entries are also late by construction —
-high |z| coincides with roughly +0.6% already moved in the preceding hour, because order
-flow *is* what moves price, so by the time it is measurable the price has moved.
+**Not established: whether any entry rule here covers its execution cost.** Ten paper
+trades since the 2026-09-08 reset total +$0.21 on $30 of capital, five wins and five
+losses. That is noise at that count, in both directions.
 
-Six days settles nothing either way. `HYPOTHESES.md` records every parameter changed
-without proof, with its decision rule fixed in advance, because at four observations a day
-an untracked search will find whatever it is looking for.
+### The one thing that must be read before any live-money discussion
+
+The predecessor rule, CandleReversal, was measured across the two trending stretches in a
+19-day sample:
+
+    regime                       side    n   win %   total R
+    UPTREND   +13.1% / 2 days   SHORT   19    0.0%   -19.00
+                                LONG    13   38.5%    +7.08
+    DOWNTREND -11.1% / 5 days   LONG    44    9.1%   -27.76
+                                SHORT    7    0.0%    -6.00
+    SIDEWAYS  (everything else)                       +6.44
+
+Zero wins in 26 trades on the fading side of both trends. Chop earned +6.44R; trends lost
+45.68R. FlowRatio replaced it and enters on the opposite sign, which should help, but it
+has three closed trades — it has not been observed in a trend at all.
+
+Six detector families were then tried to tell trend from chop and five failed, for a reason
+that is arithmetic rather than bad luck: a 13% move over two days is 0.068% of drift per
+15-minute bucket against a typical 0.639% true range, a signal-to-noise ratio of 1:10. The
+regime lives at a multi-day scale and the bot lives at a 15-minute one. (RSI(14) on 4h bars
+did pass all three robustness checks as a long-side filter and was declined for reasons
+recorded in `HYPOTHESES.md`.)
+
+### How to read any number in this repository
+
+Roughly **eighty configurations** were measured against a single 19-day window over two
+days. At that density something will always look good. Nothing here is treated as a finding
+unless it holds across a **plateau** of adjacent settings, in **both halves** of the sample,
+and **after discarding its single best trade** — the last because two separate "findings"
+turned out to be one flash crash each.
+
+Two things have ever cleared all three: the 2.00% stop floor, and the declined RSI filter.
+
+`HYPOTHESES.md` records every parameter changed without proof, with its decision rule fixed
+in advance, including one — H10, the flow exit — that was **shipped against its own
+evidence** on an explicit decision. Read the decision rule before reading the result.
 
 ## Operating the bot
 
