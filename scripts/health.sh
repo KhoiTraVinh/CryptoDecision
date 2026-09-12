@@ -326,7 +326,17 @@ title "6. Why it is not entering (abstain codes logged in 24h)"
 # refusal does not fill the log. So "1" here can mean one cycle or a thousand
 # consecutive cycles with the same verdict -- read it as which reasons are in
 # play, never as how many decisions were made.
+# Narrowed to lines the STRATEGY emitted. `"Code"` is not unique to abstentions -- the
+# startup risk report logs [Risk] findings under the same field name, and the circuit
+# breaker logs its code there too. Counting all of them put ACCOUNT_LIMIT_INERT in this
+# list on 2026-09-12, under a heading that says "why it is not entering", for a finding
+# that blocks nothing and is emitted once at startup. It was read as a reason no trade
+# was being opened, which it is not.
+#
+# Matched on SourceContext rather than on the "[XFlow]" prefix so a second strategy class
+# in the same namespace is counted without anyone remembering to add it here.
 counted=$(docker logs bot --since 24h 2>/dev/null \
+    | grep '"SourceContext":"CryptoDecision.BotService.Strategies' \
     | grep -o '"Code":"[A-Z_]*"' | sed 's/.*://; s/"//g' \
     | sort | uniq -c | sort -rn | head -8 \
     | awk '{ printf "        %-34s %s\n", $2, $1 }')

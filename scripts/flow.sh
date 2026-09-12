@@ -233,6 +233,47 @@ SELECT lim AS limit_on, cur AS open, COALESCE(cap::text,'--') AS cap,
             ELSE 'room' END AS status
 FROM r ORDER BY ord;
 SQL
+
+# The four rows above are NESTED, and the table cannot say so on its own.
+#
+# Read as a table they look like four independent budgets that add up, and that reading
+# is wrong in a way that matters: they are four gates in series, each one able only to
+# refuse, none able to grant a slot. The high-volume waiver in particular is a SUBSET of
+# the per-strategy count -- a waiver entry occupies one of the strategy's own positions,
+# never a fifth one.
+#
+# This is not hypothetical. On 2026-09-12 the table was read as "2x2 plus one free
+# high-volume slot = 6" -- exactly the arithmetic ACCOUNT_LIMIT_INERT exists to
+# contradict, and read that way by someone who knew the code. A monitor whose layout
+# leads a reader to the wrong model of the system is the failure this script was written
+# to remove, one level up.
+#
+# So the reachable maximum is computed and printed. It is the only number on this screen
+# that answers "how many positions can actually exist at once".
+POS=$($PSQL <<SQL
+WITH c AS (SELECT row_to_json(b) j FROM bot_config b WHERE b.id=1),
+l AS (SELECT (j->>'max_open_total')::int t, (j->>'max_open_trades_per_strategy')::int ps,
+             (j->>'max_open_per_side')::int pd,
+             COALESCE(json_array_length(j->'active_strategies'), 1) n FROM c),
+-- Per side is the tighter bound whenever it is set, because there are only two sides.
+e AS (SELECT n, t, ps, pd,
+             LEAST(ps, CASE WHEN pd > 0 THEN pd * 2 ELSE ps END) per_strat FROM l),
+f AS (SELECT n, t, ps, pd, per_strat, n * per_strat reachable FROM e)
+SELECT concat_ws(' ', n, ps, pd, COALESCE(t,0), reachable,
+                 CASE WHEN t > 0 THEN LEAST(t, reachable) ELSE reachable END)
+FROM f WHERE per_strat IS NOT NULL;
+SQL
+) || POS=""
+
+if [ -n "$POS" ]; then
+    read -r fNS fPS fPD fTOT fREACH fCAP <<<"$POS"
+    dim "reachable maximum $fCAP  --  $fNS strateg(ies) x min(per-strategy $fPS, per-side $fPD x 2 sides)"
+    if [ "${fTOT:-0}" -gt 0 ] && [ "${fTOT:-0}" -gt "${fREACH:-0}" ]; then
+        dim "all-strategies cap $fTOT can never bind -- this is what [Risk] ACCOUNT_LIMIT_INERT reports"
+    fi
+    dim "the high-volume waiver is a SUBSET of those $fCAP, never an extra slot"
+fi
+
 $PSQLT <<SQL
 SELECT COALESCE(strategy,'?') AS strategy, COALESCE(entry_path,'(unmarked)') AS via,
        side, to_char(opened_at,'MM-DD HH24:MI') AS opened,
