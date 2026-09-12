@@ -178,6 +178,55 @@ SQL
 dim "the rule reads the AGGREGATE. These are here to spot one venue, or one print,"
 dim "carrying the whole imbalance -- which the FlowRatio path does not check for itself,"
 dim "because it never calls Prepare and so never applies MaxConcentration."
+echo
+
+# -- 5. Whether a signal could become a trade even if one fired ---------------
+#
+# A signal is only half the question. Four nested position caps sit between an
+# actionable verdict and an order, all checked before the gate, and from the outside a
+# bot blocked by one of them looks identical to a bot with nothing to trade -- which is
+# the confusion this whole script exists to remove.
+#
+# Caps are read via row_to_json so this section still prints against a database that has
+# not had sql/032 and sql/033 applied. Naming a missing column aborts the statement;
+# a missing json key is NULL, which prints as "not migrated" and is the more useful
+# answer during a half-finished deploy.
+bold "5. POSITION BOOK -- can a signal even become a trade?"
+$PSQLT <<SQL
+WITH o AS (SELECT COALESCE(strategy,'?') s, COALESCE(entry_path,'(unmarked)') p, side
+           FROM bot_trades WHERE status='OPEN'),
+c AS (SELECT row_to_json(b) j FROM bot_config b WHERE b.id=1),
+l AS (SELECT (j->>'max_open_total')::int t, (j->>'max_open_trades_per_strategy')::int ps,
+             (j->>'max_open_per_side')::int pd, (j->>'max_open_high_volume')::int hv FROM c),
+r AS (
+  SELECT 1 ord, 'all strategies' lim, (SELECT count(*) FROM o)::int cur, t cap FROM l
+  UNION ALL SELECT 2, 'per strategy',
+    COALESCE((SELECT max(n) FROM (SELECT count(*) n FROM o GROUP BY s) x),0)::int, ps FROM l
+  UNION ALL SELECT 3, 'per strategy per side',
+    COALESCE((SELECT max(n) FROM (SELECT count(*) n FROM o GROUP BY s,side) x),0)::int, pd FROM l
+  UNION ALL SELECT 4, 'high-volume waiver',
+    (SELECT count(*) FROM o WHERE p='HIGH_VOLUME')::int, hv FROM l)
+SELECT lim AS limit_on, cur AS open, COALESCE(cap::text,'--') AS cap,
+       CASE WHEN cap IS NULL THEN 'not migrated'
+            WHEN cap = 0 THEN 'disabled'
+            WHEN cur >= cap THEN 'BLOCKING'
+            ELSE 'room' END AS status
+FROM r ORDER BY ord;
+SQL
+$PSQLT <<SQL
+SELECT COALESCE(strategy,'?') AS strategy, COALESCE(entry_path,'(unmarked)') AS via,
+       side, to_char(opened_at,'MM-DD HH24:MI') AS opened,
+       round(entry_price,3) AS entry, round(stop_price,3) AS stop, round(target_price,3) AS target
+FROM bot_trades WHERE status='OPEN' ORDER BY opened_at;
+SQL
+$PSQLT <<SQL
+SELECT active_strategies::text AS trading, enabled, paper_mode,
+       use_dynamic_tp_sl AS dyn_tpsl, max_entries_per_day AS cap_per_day,
+       cooldown_seconds AS cooldown_s
+FROM bot_config WHERE id=1;
+SQL
+dim "slots are first come, first served and NOT reserved per strategy -- a rule that"
+dim "signals often will hold them against one that signals rarely"
 }
 
 if [ "${1:-}" = "-w" ]; then

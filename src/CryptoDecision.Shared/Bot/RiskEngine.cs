@@ -124,8 +124,18 @@ public static class RiskEngine
         // ── Aggregate exposure ──
         // Every strategy can hold MaxOpenTradesPerStrategy positions at once, so
         // worst-case exposure multiplies across the whole active set.
-        var strategyCount  = Math.Max(1, opts.ActiveStrategies?.Count ?? 1);
-        var maxConcurrent  = strategyCount * Math.Max(1, opts.MaxOpenTradesPerStrategy);
+        var strategyCount = Math.Max(1, opts.ActiveStrategies?.Count ?? 1);
+        var perStrategy   = strategyCount * Math.Max(1, opts.MaxOpenTradesPerStrategy);
+
+        // The account-wide ceiling is the real bound whenever it is lower. Without this
+        // the report multiplied strategies by their individual caps and announced a
+        // worst case the loop will not actually reach — and it would have grown with
+        // every strategy added, which is exactly the arithmetic MaxOpenTotal exists to
+        // stop being true.
+        var maxConcurrent = opts.MaxOpenTotal > 0
+            ? Math.Min(perStrategy, opts.MaxOpenTotal)
+            : perStrategy;
+
         var maxExposurePct = maxConcurrent * opts.PositionPctOfCapital;
 
         if (maxExposurePct > 1m)

@@ -16,7 +16,7 @@ Bybit   ├─WebSocket─▶ Ingestion ─Kafka─▶ Processor ─▶ PostgreS
 OKX     ┘                                              │  trades → flow_bars_15m
                                                        │
                                                        ▼
-                                                Bot (XVENUE_FLOW)
+                                                Bot (1-2 strategies)
                                                  │ scorer → geometry → sizing
                                                  │ optional LLM veto gate
                                                  ▼
@@ -48,34 +48,96 @@ onto one internal trade shape. Orders go to OKX only, and the price feed is deli
 OKX too — a stop derived from a different venue's book is a stop for a market the position
 is not in.
 
-## The strategy: XVENUE_FLOW
+## The strategies
 
-One class, `CrossVenueFlowStrategy`, with the entry rule selected by
-`FlowStrategy:Signal:EntryMode`. Scoring lives in `CrossVenueFlowScorer`, a pure function,
-which is what lets the live bot and the backtester run identical arithmetic.
+One class, `CrossVenueFlowStrategy`, registered **twice** — each instance bound to its own
+configuration section, each carrying its own name, entry mode and thresholds. Scoring lives
+in `CrossVenueFlowScorer`, a pure function over its inputs.
 
-**`FlowRatio` is what runs.** Take the last closed 15-minute bucket, wait three minutes for
-the aggregation worker to fold in late trades, and enter **with** the dominant side when:
+| name | section | rule | live? |
+|---|---|---|---|
+| `XVENUE_FLOW` | `FlowStrategy` | `FlowRatio` — order flow | yes |
+| `CANDLE_REVERSAL` | `DipStrategy` | `CandleReversal` — price | registered, **not** in `active_strategies` |
 
-    total notional  >= RatioMinVolumeUsd   ($3M)
-    dominant side   >= RatioMinimum x the other   (2.1x)
+Which of them trade is `bot_config.active_strategies`, a database edit rather than a
+redeploy. A name there with no registration logs "Unknown strategy" every cycle and trades
+nothing; a registration missing from there is idle. The two names must differ —
+`StrategyEvaluator` keys its lookup on `Name`, so a collision throws at startup.
 
-Price is not consulted at all. Refusals carry named codes:
+### XVENUE_FLOW — two ways in
+
+Take the last closed 15-minute bucket and wait `RatioSettleMinutes` (3) for the
+aggregation worker to fold in late trades. Price is not consulted at all. There are two
+entry paths and `bot_trades.entry_path` records which one fired:
+
+    RATIO        notional >= RatioMinVolumeUsd ($3M)
+                 AND dominant side >= RatioMinimum x the other (2.1x, = |OFI| 0.355)
+
+    HIGH_VOLUME  notional >= RatioHighVolumeUsd ($20M)
+                 -> the ratio test is WAIVED, entry takes whichever side traded more,
+                    however narrow the lead
+
+The waiver exists to catch a news print, where a stampede has size on both sides and never
+produces a 2.1:1 lean — measured, ratio falls as volume rises, and only 1 of the 42 buckets
+over $20M also cleared 2.1:1. It is **H11, shipped against its own first measurement**;
+read that entry before trusting it.
+
+`entry_path` is a column and not a substring of `entry_rationale`, because the code
+branches on it and this repository has already paid once for recovering a branch condition
+from prose.
+
+Refusals carry named codes:
 
 | code | meaning |
 |---|---|
 | `BUCKET_NOT_SETTLED` | bucket closed under `RatioSettleMinutes` ago; the worker is still writing it |
 | `VOLUME_TOO_THIN` | under the notional floor — a 2:1 lean on $2M is what a quiet hour looks like |
-| `RATIO_TOO_LOW` | neither side dominates by enough |
+| `RATIO_TOO_LOW` | neither side dominates by enough, and the bucket is under the waiver |
+| `BUCKET_PERFECTLY_BALANCED` | waiver volume reached with buy exactly equal to sell — no side to take |
+| `ONE_SIDED_BUCKET` | no volume on one side at all; a data fault, not a market state |
 | `NO_CLOSED_BUCKET` | nothing to score yet |
 | `FLOW_BARS_STALE` | newest bucket older than `MaxBarAge` — ingestion has stopped |
 
-Three earlier modes remain in the enum and are dead unless configured. `ZScore` required a
-statistically unusual imbalance with independent cross-venue agreement; `OfiMagnitude`
-entered on raw |OFI| in a single bucket; `CandleReversal` bought a 0.60% fall and shorted a
-1.00% rise on price alone. They are kept because switching back is a config edit and
-because the backtester can still run them, not because they are recommended — see
-`HYPOTHESES.md` for why each was replaced.
+### CANDLE_REVERSAL — the dip rule, registered and switched off
+
+Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) closed
+15-minute bars; short after it has risen `ReversalRisePct` (1.00%) over
+`ReversalBarsShort` (1). Price only. The two thresholds are deliberately not mirror
+images — the dip pays from 0.60% and the rally does not pay until 1.00%.
+
+**Measured negative in every configuration tried**: −0.039R with ATR geometry, −0.068R
+with the range geometry it historically ran on, and negative in both sample halves and
+after discarding the best trade in all of them. The dip-buying half is the losing half.
+See H13, and the FATAL IN A TREND note — this is the rule that took 0 wins in 26 trades
+across both trending stretches. It is registered so that enabling it is one `UPDATE`, not
+so that it should be enabled.
+
+`ZScore` and `OfiMagnitude` also remain in the enum and are dead unless configured.
+`ZScore` required a statistically unusual imbalance with independent cross-venue
+agreement; `OfiMagnitude` entered on raw |OFI| in a single bucket. See `HYPOTHESES.md`
+for why each was replaced.
+
+### Position limits
+
+Four nested caps sit between an actionable verdict and an order. All are checked **before
+the gate**, because one gate call costs 25–42 seconds and there is no point spending it on
+an entry that cannot be placed.
+
+    max_open_total                 5   across every strategy
+    max_open_trades_per_strategy   2   within one strategy
+    max_open_per_side              1   within one strategy, one direction
+                                       -> "two at once, never two the same way"
+    max_open_high_volume           1   positions opened through the HIGH_VOLUME waiver
+
+Any of them set to 0 is disabled. The first exists because the other three are scoped by
+strategy name: two strategies at 2 each is 4 and a third makes it 6, with nothing but a
+startup log line noticing.
+
+**Slots are first come, first served and are not reserved per strategy.** A rule that
+signals several times a day will hold them against one that signals twice. From outside, a
+strategy blocked by a cap is indistinguishable from a strategy with nothing to trade —
+`scripts/flow.sh` section 5 and `scripts/rules.sql` section 4 both exist to tell them
+apart.
 
 ### Why the sign is what it is
 
@@ -250,8 +312,9 @@ Nine sections, exits non-zero on FAIL. Service expectations are derived from
 `docker compose config --services`, never hardcoded — a hardcoded exclusion list reported
 "0 unhealthy" three times while `db-check` was failing.
 
-`scripts/flow-vs-passive.sql` measures what the entry threshold costs: forward return in
-the direction flow pointed, banded by |z|.
+`scripts/rules.sql` prices each entry rule on its own rows — by `strategy` and by
+`entry_path` — and checks the position book against all four caps. Run it before believing
+any figure about "the strategy", because more than one rule is producing the trades.
 
 ## Measuring a rule
 
@@ -372,11 +435,29 @@ has read since the entry moved to FlowRatio, and it was flagging entry condition
 buckets the bot was correctly ignoring. A monitor that reports signals the strategy does
 not act on makes an idle bot look broken and would make a broken one look busy.
 
+`scripts/rules.sql` is the one to run before believing any result. Several hypotheses are
+open on a single trade stream at once, and it splits them: by `strategy` and by
+`entry_path`, with the repository's three checks — both sample halves, and after
+discarding the single best trade — evaluated per rule, and the position book against every
+cap. It replaced `flow-vs-passive.sql` on 2026-09-12, which banded forward returns by |z|
+and labelled the band `>= 1.5` as "bot ENTERS": `EnterZ` has been 1.0 since 2026-08-27 and
+no deployed rule has read z since the entry moved to FlowRatio, so both halves of that
+label were wrong.
+
+One hypothesis it cannot split is dynamic TP/SL, which changes the barriers on every trade
+and leaves no column behind. Its counterfactual has to be simulated offline — the feature
+is stateless and recomputed from stored levels, so replaying the same signals with it on
+and off is exact.
+
 `scripts/gate-report.sql` prices what the gate's refusals were worth. It still runs, but
 its premise is currently empty: the gate has refused nothing, so there is nothing to
-price. `scripts/flow-vs-passive.sql` measures forward return banded by |z| — a real
-measurement of a statistic nothing trades on, and its band labels still say the bot
-enters at |z| >= 1.5, which has not been true since 2026-08-27.
+price.
+
+Both SQL files read the newer `bot_config` caps through `row_to_json` rather than by
+column name, so they still print against a database that has not had `sql/032` and
+`sql/033` applied. Naming a missing column aborts the statement; a missing JSON key is
+NULL and prints as "not migrated" — which is the more useful answer during exactly the
+half-finished deploy where you would want to run them.
 
 ## Known constraints
 

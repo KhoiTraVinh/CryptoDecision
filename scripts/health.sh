@@ -246,6 +246,49 @@ else
     fi
 fi
 
+# ------------------------------------------------- 5c position book and limits
+title "5c. Position book against the four caps"
+# A signal that cannot become a trade looks exactly like no signal from outside, and
+# there are now four nested caps between an actionable verdict and an order:
+#
+#     max_open_total                 across every strategy
+#     max_open_trades_per_strategy   within one strategy
+#     max_open_per_side              within one strategy, one direction
+#     max_open_high_volume           positions from the FlowRatio high-volume waiver
+#
+# Read through row_to_json, not as columns, so this still prints against a database
+# that has not had sql/032 and sql/033 applied -- a missing column aborts the whole
+# statement, a missing json key is NULL. This check is most wanted during a half-done
+# deploy, which is exactly when those columns might be absent.
+limits=$($PSQL <<SQL
+WITH o AS (SELECT COALESCE(strategy,'?') s, COALESCE(entry_path,'') p, side
+           FROM bot_trades WHERE status='OPEN'),
+c AS (SELECT row_to_json(b) j FROM bot_config b WHERE b.id=1)
+SELECT (SELECT count(*) FROM o),
+       COALESCE((j->>'max_open_total'),'-'),
+       COALESCE((SELECT max(n) FROM (SELECT count(*) n FROM o GROUP BY s) x),0),
+       COALESCE((j->>'max_open_trades_per_strategy'),'-'),
+       (SELECT count(*) FROM o WHERE p='HIGH_VOLUME'),
+       COALESCE((j->>'max_open_high_volume'),'-'),
+       COALESCE((j->>'active_strategies'),'?')
+FROM c;
+SQL
+)
+if [ -n "$limits" ]; then
+    IFS='|' read -r lTot lTotCap lStrat lStratCap lHv lHvCap lActive <<<"$limits"
+    if [ "$lTotCap" = "-" ]; then
+        warn "max_open_total is missing -- apply sql/033, or the account-wide cap is not in force"
+    elif [ "$lTotCap" != "0" ] && [ "$lTot" -ge "$lTotCap" ] 2>/dev/null; then
+        warn "$lTot/$lTotCap positions open across all strategies -- BLOCKING every entry"
+    else
+        ok "$lTot/$lTotCap open across all strategies"
+    fi
+    ok "worst strategy holds $lStrat/$lStratCap   ·   high-volume waiver $lHv/$lHvCap"
+    printf '        trading: %s\n' "$lActive"
+else
+    warn "could not read the position book"
+fi
+
 title "6. Why it is not entering (abstain codes logged in 24h)"
 # These are LOG LINES, not decisions. CrossVenueFlowStrategy logs an abstention
 # when the code CHANGES and then only every 120th repeat, precisely so a stable

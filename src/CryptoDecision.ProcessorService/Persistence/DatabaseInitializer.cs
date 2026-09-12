@@ -200,7 +200,12 @@ public sealed class DatabaseInitializer(
                         -- line, a preserved volume that has not had sql/032 applied
                         -- fails the entire config read, and the bot polls every five
                         -- seconds forever without ever starting.
-                        ADD COLUMN IF NOT EXISTS max_open_high_volume INTEGER NOT NULL DEFAULT 1;
+                        ADD COLUMN IF NOT EXISTS max_open_high_volume INTEGER NOT NULL DEFAULT 1,
+                        -- Ceiling across ALL strategies. Mirrored from sql/033 for the
+                        -- reason in this method's summary: BotConfigRepository selects it
+                        -- by name, so a database without it fails the whole config read
+                        -- and the bot never starts.
+                        ADD COLUMN IF NOT EXISTS max_open_total INTEGER NOT NULL DEFAULT 5;
                 END IF;
             END
             $$;

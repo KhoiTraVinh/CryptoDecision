@@ -217,6 +217,22 @@ public sealed record BotOptions
     /// </summary>
     public int          MaxOpenHighVolume        { get; set; } = 1;
 
+    /// <summary>
+    /// Concurrent open positions across EVERY strategy, for the configured symbol.
+    /// 0 disables.
+    ///
+    /// Sits above MaxOpenTradesPerStrategy, which cannot bound the sum: it is scoped by
+    /// strategy name, so two strategies at 2 each is 4 and a third makes it 6, with
+    /// nothing but a startup log line noticing. That gap was harmless while one strategy
+    /// ran and became real the moment a second was registered.
+    ///
+    /// 5 does not bind at two strategies -- the per-strategy caps already hold the total
+    /// to 4 -- so it is a ceiling for the third onward. Slots are first come, first
+    /// served and are NOT reserved per strategy, so a rule firing 7.6 times a day will
+    /// crowd out one firing twice.
+    /// </summary>
+    public int          MaxOpenTotal             { get; set; } = 5;
+
     /// <remarks>
     /// Still 0.10, and still what production runs — but it no longer sizes anything.
     /// Whenever the strategy supplies a stop distance, <see cref="RiskPctPerTrade"/>

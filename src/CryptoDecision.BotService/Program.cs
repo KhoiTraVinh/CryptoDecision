@@ -39,10 +39,19 @@ builder.Services.AddSingleton<SignalOutcomeRepository>();
 
 // ─── Trading Strategies (Strategy Pattern — OCP) ─────────────────────────────
 
-// The only strategy this build registers. MOMENTUM was deleted; which strategies run
-// is still bot_config.active_strategies — a database edit, not a redeploy — so a name
-// that no longer resolves reaches StrategyEvaluator, logs "Unknown strategy" once per
-// cycle and silently trades nothing. Keep this list and the seeded config in step.
+// TWO instances of CrossVenueFlowStrategy, each bound to its own configuration section
+// and each carrying its own name. One class, two rules: XVENUE_FLOW reads order flow,
+// CANDLE_REVERSAL reads price.
+//
+// Which of them trade is still bot_config.active_strategies — a database edit, not a
+// redeploy — so both are registered here and neither is assumed to be live. A name in
+// that array with no registration here reaches StrategyEvaluator, logs "Unknown
+// strategy" once per cycle and silently trades nothing; keep the two in step.
+//
+// The names must differ. StrategyEvaluator builds its lookup with
+// ToDictionary(s => s.Name), so two instances answering the same name throw at startup
+// rather than one shadowing the other — loud, but still a crash, and the reason Name
+// moved out of a const and onto the options.
 builder.Services.AddSingleton<FlowStrategyOptions>(sp =>
 {
     var options = new FlowStrategyOptions();
@@ -50,6 +59,49 @@ builder.Services.AddSingleton<FlowStrategyOptions>(sp =>
     return options;
 });
 builder.Services.AddSingleton<ITradingStrategy, CrossVenueFlowStrategy>();
+
+// ── The dip rule, running in parallel ────────────────────────────────────────
+//
+// CANDLE_REVERSAL: buy after price has fallen ReversalDropPct over ReversalBars closed
+// 15-minute bars, short after it has risen ReversalRisePct over ReversalBarsShort. Price
+// only — no order flow is read.
+//
+// SHIPPED AGAINST THE MEASUREMENT, on the operator's decision, in paper mode. Measured
+// on 1,770 buckets from 2026-08-21 to 09-11 with the deployed exit set (stop 2%, target
+// 4%, the 10-bucket OFI reversal, 12-hour cap, costs 7 bps plus funding):
+//
+//     config                     n    meanR   1st half  2nd half  less top 1
+//     fixed, no OFI exit       159   -0.057    -0.078    -0.031     -0.070
+//     fixed, with OFI exit     159   -0.039    -0.051    -0.024     -0.052
+//     dynamic, with OFI exit   159   -0.005    -0.006    -0.005     -0.026
+//     long only, with OFI      138   -0.063    -0.080    -0.044     -0.078
+//
+// Negative overall, negative in BOTH halves, and negative after discarding the best
+// trade — in every configuration. It fails all three of this repository's checks four
+// times over. The long side, which is the dip-buying half, is the losing half at -0.063;
+// the short side is mildly positive on 21 observations. See H13 in HYPOTHESES.md, which
+// carries the decision rule, and the FATAL IN A TREND note: this is the rule that took
+// 0 wins in 26 trades across both trending periods, by buying falling knives.
+//
+// It also fires about 7.6 times a day against FlowRatio's 2, so once enabled it is the
+// majority of the trade stream. Remove it from bot_config.active_strategies to stop it;
+// nothing here needs redeploying.
+builder.Services.AddSingleton<ITradingStrategy>(sp =>
+{
+    var options = new FlowStrategyOptions
+    {
+        // Defaults that make the section a dip rule even if only the name is set, so a
+        // half-written config cannot quietly come up as a second copy of FlowRatio.
+        Name   = "CANDLE_REVERSAL",
+        Signal = new FlowSignalOptions(EntryMode: FlowEntryMode.CandleReversal),
+    };
+    builder.Configuration.GetSection(FlowStrategyOptions.DipSection).Bind(options);
+
+    return new CrossVenueFlowStrategy(
+        sp.GetRequiredService<IFlowBarRepository>(),
+        options,
+        sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>());
+});
 
 // The entry gate. This is the only place a language model can affect whether real
 // funds move, and it can only ever prevent a trade — see AiEntryGate.
@@ -177,10 +229,24 @@ var startupLog = host.Services.GetRequiredService<ILogger<Program>>();
 // ZScore while appsettings says otherwise — silently, with no error, for however
 // long the test lasts. That is the exact failure shape this codebase keeps paying
 // for, so the active rule is asserted in the log rather than assumed from config.
+// Every registered strategy states its own rule. It used to read the single
+// FlowStrategyOptions singleton and describe that one rule as "the" entry rule, which
+// was true while one strategy existed and became a lie the moment a second was
+// registered: the banner would have described FlowRatio while CANDLE_REVERSAL traded
+// alongside it, unmentioned. Which of these actually runs is bot_config.active_strategies,
+// so registration is not the same as being live -- said explicitly below.
+var registered = host.Services.GetServices<ITradingStrategy>().ToList();
+startupLog.LogWarning(
+    "[Startup] {Count} strategy instance(s) registered: [{Names}]. Which of them trade is " +
+    "bot_config.active_strategies -- a name missing there is registered and idle, and a name " +
+    "there that is missing here logs \"Unknown strategy\" every cycle and trades nothing.",
+    registered.Count, string.Join(", ", registered.Select(s => s.Name)));
+
 var flowOpts = host.Services.GetRequiredService<FlowStrategyOptions>();
 
 startupLog.LogWarning(
-    "[Startup] Entry rule is {Mode}. {Detail}",
+    "[Startup] {Name} entry rule is {Mode}. {Detail}",
+    flowOpts.Name,
     flowOpts.Signal.EntryMode,
     flowOpts.Signal.EntryMode switch
     {

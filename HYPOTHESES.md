@@ -1259,3 +1259,98 @@ finish on its own terms.
 ### Result
 
 _Open._
+
+---
+
+## H13 — CandleReversal in parallel: buy the dip, short the spike (shipped against the measurement)
+
+**Registered 2026-09-12.** A second `CrossVenueFlowStrategy` instance named
+`CANDLE_REVERSAL`, bound to the `DipStrategy` section. Registered but **not live until**
+its name is added to `bot_config.active_strategies`:
+
+```sql
+UPDATE bot_config SET active_strategies = '{XVENUE_FLOW,CANDLE_REVERSAL}', updated_at = now() WHERE id = 1;
+-- revert:
+UPDATE bot_config SET active_strategies = '{XVENUE_FLOW}', updated_at = now() WHERE id = 1;
+```
+
+Deliberately not seeded by a migration. Migrations run on deploy, so seeding it would
+turn "register the rule" into "start trading it" without anyone choosing to.
+
+### The rule
+
+LONG when price has fallen >= 0.60% over 2 closed 15-minute bars. SHORT when it has
+risen >= 1.00% over 1 closed bar. Price only; no order flow is read. Both windows and
+both thresholds are the values the rule was retired with — see `ReversalBarsShort` for
+why the two sides are not mirror images.
+
+### The measurement, which does not support it
+
+1,770 buckets, 2026-08-21 to 09-11, simulated with the **deployed exit set** — stop 2%,
+target 4%, the 10-bucket OFI reversal with its guard, 12-hour cap, costs 7 bps plus
+funding. R against the 2% stop.
+
+    config                     n    meanR   win%   1st half  2nd half  less top 1
+    fixed, no OFI exit       159   -0.057  40.9%   -0.078    -0.031     -0.070
+    fixed, with OFI exit     159   -0.039  45.3%   -0.051    -0.024     -0.052
+    dynamic, with OFI exit   159   -0.005  45.3%   -0.006    -0.005     -0.026
+    long only, with OFI      138   -0.063  44.2%   -0.080    -0.044     -0.078
+
+**Negative overall, negative in both halves, and negative after discarding the best
+trade — in all four configurations.** Nothing else measured in this repository has failed
+all three checks this consistently. For comparison, on the same rows and the same
+arithmetic: FlowRatio 2.1x **+0.385**, the news-print waiver **+0.312**.
+
+Split by side, which matters because the request was specifically for the dip:
+
+    LONG  (the dip)    n=138   -0.028 to -0.063 depending on config
+    SHORT (the spike)  n= 21   +0.013 to +0.146
+
+**The dip-buying half is the losing half.** The short side is mildly positive on 21
+observations, which is not enough to conclude anything and is the opposite of where the
+interest was.
+
+This is consistent with what was already on record: the FATAL IN A TREND note has this
+rule taking **0 wins in 26 trades** across both trending periods, losing by buying
+falling knives. Nothing here contradicts that; it measures the same thing on a longer
+window with better exits and finds it smaller but still negative.
+
+### The cadence problem, which is separate and larger
+
+159 signals in 21 days is **~7.6 a day**, against FlowRatio's ~2. Position limits and the
+15-minute cooldown will stop most of them becoming trades, but whatever gets through is
+the majority of the stream. Four hypotheses are already open on that one stream — H9
+(the ratio entry), H10 (the OFI exit), H11 (the news-print waiver), H12 (dynamic
+barriers). Adding a fifth that outnumbers all of them 3:1 means none of the five can be
+attributed, and the rule at the top of this file — one live change at a time — is already
+being broken four ways.
+
+If this is enabled, H9 and H11 should be read only on rows where
+`strategy = 'XVENUE_FLOW'`, which `bot_trades.strategy` makes a one-predicate query.
+
+### Decision rule, fixed in advance
+
+Evaluate when **40 CANDLE_REVERSAL trades have closed**, or after **21 days**.
+
+- **Keep** only if mean R over those trades is positive AND positive in both halves of
+  the window AND positive after discarding the best single trade. The same three checks
+  it has just failed four times; anything weaker would be accepting a result the
+  pre-measurement already predicted would not hold.
+- **Remove it from `active_strategies`** otherwise. This is the expected outcome.
+- **If only the short side is positive**, do not conclude the short side works. n=21 in
+  the pre-measurement, and `ReversalLongOnly` exists to test that separately with its own
+  entry here.
+- **Do not tune `ReversalDropPct` or `ReversalRisePct` in response to a negative result.**
+  The bands below 0.60% were already measured flipping sign between halves, and the
+  budget note applies: roughly eighty configurations have been measured against this
+  window.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is evidence: at 7.6 signals a day this rule
+determines what the next three weeks of trade data is about, and the four open hypotheses
+were all opened on the assumption that FlowRatio produces the stream.
+
+### Result
+
+_Open._

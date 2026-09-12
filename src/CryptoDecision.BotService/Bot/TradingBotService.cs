@@ -761,6 +761,47 @@ public sealed class TradingBotService(
             return;
         }
 
+        // ── Ceiling across every strategy ─────────────────────────────────────
+        //
+        // Checked here, once, before any strategy is asked. The three limits inside the
+        // loop below are all scoped by strategy name — positions per strategy, per side,
+        // and per entry path — which was a complete set while one strategy ran and
+        // stopped being one the moment a second was registered. Nothing bounded the SUM:
+        // two strategies at 2 each is 4, a third makes it 6, and the only thing that
+        // would have noticed is RiskEngine's exposure warning, which is a log line at
+        // startup rather than a limit.
+        //
+        // Counted from live state rather than the cycle's opening snapshot, for the same
+        // reason the per-strategy count is: the exit loop above may have closed several
+        // of those positions already, and each strategy below can add one.
+        //
+        // Slots are first come, first served and deliberately NOT reserved per strategy.
+        // A rule that signals several times a day will crowd out one that signals twice,
+        // which is a real consequence rather than an oversight — see H13, where it is
+        // the argument against enabling CANDLE_REVERSAL while four hypotheses are open.
+        if (opts.MaxOpenTotal > 0)
+        {
+            var openTotal = state.GetOpenTrades()
+                .Count(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase));
+
+            if (openTotal >= opts.MaxOpenTotal)
+            {
+                log.LogInformation(
+                    "[TradingBot] {Count} position(s) open across all strategies, at the {Max} " +
+                    "limit. No further entries from any strategy until one closes; open positions " +
+                    "are still managed.",
+                    openTotal, opts.MaxOpenTotal);
+
+                await SafeRecordAsync(
+                    configRepo.RecordEntryRefusalAsync(
+                        $"account position limit reached ({openTotal}/{opts.MaxOpenTotal} open " +
+                        "across all strategies)", ct),
+                    "account position limit refusal");
+
+                return;
+            }
+        }
+
         foreach (var strat in opts.ActiveStrategies)
         {
             // Counted from live state at the moment of the decision, not from the

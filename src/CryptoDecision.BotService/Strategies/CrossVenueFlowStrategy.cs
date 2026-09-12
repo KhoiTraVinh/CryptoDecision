@@ -55,9 +55,26 @@ public sealed class CrossVenueFlowStrategy(
     FlowStrategyOptions             tuning,
     ILogger<CrossVenueFlowStrategy> log) : ITradingStrategy
 {
+    /// <summary>The name this class registered under when only one instance existed.</summary>
     public const string StrategyName = "XVENUE_FLOW";
 
-    public string Name => StrategyName;
+    /// <summary>
+    /// This instance's name, from its own options block rather than a constant.
+    ///
+    /// It was <c>const string StrategyName</c> returned directly, which made the class a
+    /// singleton by construction: StrategyEvaluator builds its lookup with
+    /// <c>ToDictionary(s =&gt; s.Name)</c>, so registering a second instance threw
+    /// ArgumentException at startup — loudly, at least, rather than quietly shadowing one
+    /// rule with another.
+    ///
+    /// The name now travels with the options, so one configuration section is one
+    /// strategy: its own name, its own entry mode, its own thresholds, its own slot in
+    /// bot_config.active_strategies, and its own rows in bot_trades.strategy. Two
+    /// instances of this class cannot silently share a position limit or a cooldown,
+    /// because every per-strategy limit in TradingBotService keys off exactly this
+    /// string.
+    /// </summary>
+    public string Name => tuning.Name;
 
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
     {
@@ -671,6 +688,27 @@ public sealed class CrossVenueFlowStrategy(
 public sealed class FlowStrategyOptions
 {
     public const string Section = "FlowStrategy";
+
+    /// <summary>
+    /// Configuration section for the second, parallel instance: the dip rule.
+    ///
+    /// A separate section rather than a list, because every field below is a threshold
+    /// that was measured for one entry rule and means nothing for the other. Binding
+    /// them separately makes "which numbers is CANDLE_REVERSAL running?" a question with
+    /// one answer you can read.
+    /// </summary>
+    public const string DipSection = "DipStrategy";
+
+    /// <summary>
+    /// The strategy name this options block configures. Must match an entry in
+    /// bot_config.active_strategies, and it is what lands in bot_trades.strategy.
+    ///
+    /// Every per-strategy limit keys off this string — the concurrency limit, the
+    /// per-side limit, the cooldown, the consecutive-loss breaker's scope. Two blocks
+    /// sharing a name would silently merge all four, so a name is as load-bearing as
+    /// any threshold here.
+    /// </summary>
+    public string Name { get; set; } = CrossVenueFlowStrategy.StrategyName;
 
     public FlowSignalOptions Signal { get; set; } = new();
 
