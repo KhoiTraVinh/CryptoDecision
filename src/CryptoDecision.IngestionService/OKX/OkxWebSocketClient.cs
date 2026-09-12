@@ -4,6 +4,7 @@ using System.Text.Json;
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Configuration;
 using CryptoDecision.IngestionService.OKX.Models;
+using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.WebSocket;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,7 +24,8 @@ public sealed class OkxWebSocketClient(
     OkxTradeChannel tradeChannel,
     OkxNormalizer normalizer,
     IOptions<MarketSubscriptionSettings> subscription,
-    ILogger<OkxWebSocketClient> logger) : ExchangeWebSocketClient(logger)
+    FeedLiveness liveness,
+    ILogger<OkxWebSocketClient> logger) : ExchangeWebSocketClient(logger, liveness)
 {
     private static readonly byte[] PingMsg  = Encoding.UTF8.GetBytes("ping");
     private static readonly byte[] PongMsg  = Encoding.UTF8.GetBytes("pong");
@@ -115,6 +117,7 @@ public sealed class OkxWebSocketClient(
             {
                 var trade = normalizer.Normalize(t);
                 await tradeChannel.Writer.WriteAsync(trade, ct);
+                MarkDataReceived();
             }
             catch (Exception ex)
             {

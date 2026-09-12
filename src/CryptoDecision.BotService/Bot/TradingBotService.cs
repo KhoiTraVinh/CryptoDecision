@@ -357,26 +357,72 @@ public sealed class TradingBotService(
         // to judge the trailing stop against the market. That check is gone with the
         // trailing stop, so this is one fewer database read on every start attempt —
         // and the reading it produced was never used for anything else.
-        var assessment = RiskEngine.Validate(opts);
-        var profile    = assessment.Expectancy;
 
-        log.LogInformation(
-            "[Risk] TP {Tp:P2} / SL {Sl:P2} → net {NetWin:P2} vs {NetLoss:P2}, " +
-            "reward:risk {Rr:F2}:1, breakeven win rate {Be:P1} (one loss undoes {Wins:F1} wins)",
-            profile.TakeProfitPct, profile.StopLossPct, profile.NetWinPct, profile.NetLossPct,
-            profile.RewardRiskRatio, profile.BreakevenWinRate, profile.WinsPerLoss);
+        // ── One assessment per active strategy ────────────────────────────────
+        //
+        // This ran once, on bot_config's take_profit_pct and stop_loss_pct. Neither
+        // decides anything: they are read only by the no-geometry fallback, so the gate
+        // was certifying a 2.00%/1.50% pair while every position was opened on a 2.00%
+        // stop against a 4.00% target. Each strategy now states the geometry it will
+        // actually place and is judged on that — and with two strategies registered they
+        // can differ, so one verdict for the account was the wrong shape as well as the
+        // wrong number.
+        var blocked = false;
 
-        foreach (var finding in assessment.Warnings)
-            log.LogWarning("[Risk] {Code}: {Message}", finding.Code, finding.Message);
+        // No strategies is not a passing risk assessment, it is a bot that will evaluate
+        // nothing while reporting RUNNING. Said out loud rather than starting quietly.
+        if (opts.ActiveStrategies.Count == 0)
+            log.LogWarning(
+                "[Risk] bot_config.active_strategies is empty, so nothing was assessed and nothing " +
+                "will trade. The loop will run, the heartbeat will look healthy, and no entry will " +
+                "ever be evaluated.");
 
-        if (!assessment.HasCritical) return true;
+        foreach (var strat in opts.ActiveStrategies)
+        {
+            var geometry = strategy.DescribeRisk(strat);
 
-        foreach (var finding in assessment.Critical)
-            log.LogError("[Risk] BLOCKING — {Code}: {Message}", finding.Code, finding.Message);
+            if (geometry is null)
+                log.LogWarning(
+                    "[Risk] {Strategy} states no exit geometry, so it is judged on bot_config's " +
+                    "{Tp:P2}/{Sl:P2} — which is only correct if that is genuinely what it exits on.",
+                    strat, opts.TakeProfitPct, opts.StopLossPct);
+
+            var assessment = RiskEngine.Validate(
+                opts,
+                RiskEngine.DefaultRoundTripFeeRate,
+                geometry,
+                // Paper mode simulates the same perpetual, so the same leverage applies to
+                // what the margin arithmetic would have been. The figure is reported, not
+                // enforced, on that path.
+                okxOptions.Leverage);
+
+            var profile = assessment.Expectancy;
+
+            log.LogInformation(
+                "[Risk] {Strategy}: target {Tp:P2} / stop {Sl:P2} → net {NetWin:P2} vs {NetLoss:P2}, " +
+                "reward:risk {Rr:F2}:1, breakeven win rate {Be:P1} (one loss undoes {Wins:F1} wins). " +
+                "{Basis}",
+                strat, profile.TakeProfitPct, profile.StopLossPct, profile.NetWinPct,
+                profile.NetLossPct, profile.RewardRiskRatio, profile.BreakevenWinRate,
+                profile.WinsPerLoss, geometry?.Basis ?? "from bot_config, no geometry declared");
+
+            foreach (var finding in assessment.Warnings)
+                log.LogWarning("[Risk] {Strategy} {Code}: {Message}", strat, finding.Code, finding.Message);
+
+            foreach (var finding in assessment.Critical)
+            {
+                log.LogError("[Risk] BLOCKING — {Strategy} {Code}: {Message}",
+                    strat, finding.Code, finding.Message);
+                blocked = true;
+            }
+        }
+
+        if (!blocked) return true;
 
         log.LogError(
             "[TradingBot] Refusing to start: the configuration cannot profit as set. " +
-            "Adjust take profit, stop loss or position sizing and the bot will start automatically.");
+            "Adjust the strategy's stop and target settings or position sizing, and the bot will " +
+            "start automatically.");
 
         return false;
     }

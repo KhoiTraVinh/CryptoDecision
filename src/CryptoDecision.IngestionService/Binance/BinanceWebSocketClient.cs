@@ -4,6 +4,7 @@ using CryptoDecision.IngestionService.Binance.Models;
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Models;
 using CryptoDecision.IngestionService.Serialization;
+using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.WebSocket;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -22,7 +23,8 @@ public sealed class BinanceWebSocketClient(
     KlineChannel klineChannel,
     BinanceNormalizer normalizer,
     IOptions<BinanceSettings> settings,
-    ILogger<BinanceWebSocketClient> logger) : ExchangeWebSocketClient(logger)
+    FeedLiveness liveness,
+    ILogger<BinanceWebSocketClient> logger) : ExchangeWebSocketClient(logger, liveness)
 {
     protected override string ExchangeName => "Binance";
 
@@ -62,6 +64,7 @@ public sealed class BinanceWebSocketClient(
 
             var trade = normalizer.Normalize(msg);
             await tradeChannel.Writer.WriteAsync(trade, ct);
+            MarkDataReceived();
         }
         else if (envelope.Stream.Contains("@kline", StringComparison.OrdinalIgnoreCase))
         {
@@ -70,6 +73,7 @@ public sealed class BinanceWebSocketClient(
 
             var kline = normalizer.NormalizeKline(msg);
             await klineChannel.Writer.WriteAsync(kline, ct);
+            MarkDataReceived();
         }
         else
         {

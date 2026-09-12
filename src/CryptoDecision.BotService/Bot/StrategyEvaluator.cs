@@ -15,6 +15,14 @@ public sealed class StrategyEvaluator
     private readonly IOrderEngine _orderEngine;
     private readonly ILogger<StrategyEvaluator> _log;
 
+    /// <summary>
+    /// Strategy names already reported as having open positions with no implementation.
+    /// One line each, not one per cycle — the condition persists until a person acts on
+    /// it, and repeating it every thirty seconds would bury the thing it is warning about.
+    /// </summary>
+    private readonly HashSet<string> _orphanedStrategiesReported =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public StrategyEvaluator(
         IEnumerable<ITradingStrategy> strategies,
         PriceFeedResolver             prices,
@@ -30,6 +38,14 @@ public sealed class StrategyEvaluator
         _log.LogInformation("[StrategyEvaluator] Registered strategies: [{Names}]",
             string.Join(", ", _strategies.Keys));
     }
+
+    /// <summary>
+    /// The exit geometry a named strategy will place, or null when it is not registered
+    /// or expresses none. Used by the startup risk gate so it judges the stop and target
+    /// that actually run rather than bot_config's fallback percentages.
+    /// </summary>
+    public StrategyRiskProfile? DescribeRisk(string strategy) =>
+        _strategies.TryGetValue(strategy, out var impl) ? impl.DescribeRisk() : null;
 
     // ── Live price from the execution venue ───────────────────────────────────
 
@@ -140,8 +156,34 @@ public sealed class StrategyEvaluator
             }
         }
 
+        // ── The position outlived its strategy ────────────────────────────────
+        //
+        // Returning "do not exit" here used to be silent, and silence is the wrong
+        // answer: the trade's stop and target live in the strategy's EvaluateExitAsync,
+        // so an unregistered name means this position has NO stop loss and NO take
+        // profit for as long as it stays open. Only the timeout and the breakeven stop
+        // above still apply, and neither of them is what the entry was sized against.
+        //
+        // Reachable in normal operation — a strategy renamed in appsettings, a name
+        // removed from the DI registrations, a row written by a rule that has since been
+        // retired (see sql/027_archive_retired_strategy_trades.sql, which exists because
+        // this happened). The position is real either way, so this is Error, not Debug.
+        //
+        // Throttled to one line per strategy name, because it is evaluated every cycle
+        // for every such position and the point is to be noticed, not to fill the log.
         if (!_strategies.TryGetValue(trade.Strategy, out var impl))
+        {
+            if (_orphanedStrategiesReported.Add(trade.Strategy))
+                _log.LogError(
+                    "[Exit] Trade {Id} was opened by '{Strategy}', which is not registered in this " +
+                    "build. Its stop ({Stop}) and target ({Target}) are NOT being evaluated — only " +
+                    "the timeout and the breakeven stop still apply to it. Registered strategies are " +
+                    "[{Known}]. Close it by hand, or restore the strategy.",
+                    trade.Id, trade.Strategy, trade.StopPrice, trade.TargetPrice,
+                    string.Join(", ", _strategies.Keys));
+
             return new ExitDecision(false, null, currentPrice, changePct);
+        }
 
         // Dynamic TP/SL was scaled here too, and that copy is gone.
         //

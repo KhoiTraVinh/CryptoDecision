@@ -55,6 +55,12 @@ try
     // ─── ActivitySource (distributed tracing) ────────────────────────────────
     builder.Services.AddSingleton(new ActivitySource("CryptoDecision.Ingestion"));
 
+    // ─── Feed liveness ────────────────────────────────────────────────────────
+    // When each venue last said anything, and when it last said anything useful.
+    // Feeds the read watchdog in ExchangeWebSocketClient and the health check that
+    // distinguishes a dead socket from a quiet market — see FeedLiveness.
+    builder.Services.AddSingleton<FeedLiveness>();
+
     // ─── Custom Metrics (System.Diagnostics.Metrics) ──────────────────────────
     // Register singleton first so channels can be resolved for the depth gauges
     builder.Services.AddSingleton<IngestionMetrics>(sp =>
@@ -96,8 +102,13 @@ try
 
 
     // ─── Health checks ─────────────────────────────────────────────────────────
+    // Two checks that fail in opposite directions. "channels" catches Kafka falling
+    // behind the socket; "feeds" catches the socket delivering nothing, which leaves the
+    // channels EMPTY and therefore reads as healthy to the first check. The second one is
+    // the failure this service actually has.
     builder.Services.AddHealthChecks()
-        .AddCheck<ChannelHealthCheck>("channels");
+        .AddCheck<ChannelHealthCheck>("channels")
+        .AddCheck<FeedLivenessHealthCheck>("feeds");
 
     // Minimal HTTP listener for /health — workers don't have Kestrel by default
     builder.Services.AddHostedService<HealthCheckHttpServer>();

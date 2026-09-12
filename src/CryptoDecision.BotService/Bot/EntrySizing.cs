@@ -104,8 +104,15 @@ public static class EntrySizing
         // The per-order ceiling, applied identically on both paths. It only ever shrinks the
         // order, so it can lower the realised risk below risk_pct_per_trade but never raise
         // it — see the caller's log line for what that costs in interpretability.
+        //
+        // A non-positive ceiling means NO ceiling, not a ceiling of zero. The unguarded
+        // Math.Min read it as the latter and sized every order at $0, which the live engine
+        // catches at startup (OkxOptions.DescribeRefusal refuses a non-positive value) but
+        // paper mode never validates — so a misconfigured deployment would have paper-traded
+        // zero-size positions and reported them as fills. TradingBotService already treats
+        // it this way when it builds the gate's brief; these two now agree.
         var asked    = size.NotionalUsd;
-        var notional = Math.Min(asked, maxOrderNotionalUsd);
+        var notional = maxOrderNotionalUsd > 0m ? Math.Min(asked, maxOrderNotionalUsd) : asked;
 
         return new SizedEntry(size, notional, asked, riskBased, volatilityPct);
     }

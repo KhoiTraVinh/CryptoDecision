@@ -77,12 +77,37 @@ public static class RiskEngine
     /// the account than intended. Returns findings; the caller decides whether to
     /// warn or refuse to start.
     /// </summary>
+    /// <param name="geometry">
+    /// The exit geometry the strategy will actually place. When supplied, the expectancy
+    /// arithmetic and the exposure arithmetic are both done on it instead of on
+    /// bot_config's percentages, because those percentages have not decided anything
+    /// since volatility-scaled stops shipped — see <see cref="StrategyRiskProfile"/>.
+    ///
+    /// Null keeps the old behaviour, which is correct for a strategy that genuinely
+    /// exits on the configured percentages.
+    /// </param>
+    /// <param name="leverage">
+    /// Leverage in force at the venue. Notional exposure divided by this is the margin
+    /// the account has to find, and margin is what "exceeds the account" means on a
+    /// perpetual. Without it the exposure check compared a leveraged notional against
+    /// unleveraged capital and called a normal configuration over-allocated.
+    ///
+    /// 1 is the safe default and the right one for spot.
+    /// </param>
     public static RiskAssessment Validate(
         BotOptions opts,
-        decimal roundTripFeeRate = DefaultRoundTripFeeRate)
+        decimal roundTripFeeRate = DefaultRoundTripFeeRate,
+        StrategyRiskProfile? geometry = null,
+        decimal leverage = 1m)
     {
         var findings = new List<RiskFinding>();
-        var profile  = Expectancy(opts.TakeProfitPct, opts.StopLossPct, roundTripFeeRate);
+
+        // The pair that actually decides exits. bot_config's percentages are the
+        // fallback, and judging the account on them was judging a configuration nobody
+        // trades.
+        var profile = geometry is { StopPct: > 0m } g
+            ? Expectancy(g.TargetPct, g.StopPct, roundTripFeeRate)
+            : Expectancy(opts.TakeProfitPct, opts.StopLossPct, roundTripFeeRate);
 
         // ── Fees swallowing the target ──
         if (profile.NetWinPct <= 0m)
@@ -90,16 +115,38 @@ public static class RiskEngine
             findings.Add(new RiskFinding(
                 RiskSeverity.Critical,
                 "TAKE_PROFIT_BELOW_FEES",
-                $"Take profit {opts.TakeProfitPct:P2} does not cover the {roundTripFeeRate:P2} " +
+                $"Take profit {profile.TakeProfitPct:P2} does not cover the {roundTripFeeRate:P2} " +
                 "round-trip fee. Every winning trade still loses money."));
         }
-        else if (roundTripFeeRate / opts.TakeProfitPct > 0.33m)
+        else if (roundTripFeeRate / profile.TakeProfitPct > 0.33m)
         {
             findings.Add(new RiskFinding(
                 RiskSeverity.Warning,
                 "FEES_DOMINATE_TARGET",
-                $"Fees consume {roundTripFeeRate / opts.TakeProfitPct:P0} of the {opts.TakeProfitPct:P2} " +
-                "target. Widen the target or trade less often."));
+                $"Fees consume {roundTripFeeRate / profile.TakeProfitPct:P0} of the " +
+                $"{profile.TakeProfitPct:P2} target. Widen the target or trade less often."));
+        }
+
+        // ── The fallback, judged as a fallback ──
+        //
+        // Only reached for a position whose geometry could not be written, so an unsound
+        // pair here is a warning rather than a reason to refuse the whole configuration:
+        // refusing would stop a bot whose real geometry is fine because of numbers it
+        // will probably never read. Saying nothing was the other error — the fallback
+        // silently became the policy for any trade that hit that path.
+        if (geometry is { StopPct: > 0m })
+        {
+            var fallback = Expectancy(opts.TakeProfitPct, opts.StopLossPct, roundTripFeeRate);
+
+            if (fallback.NetWinPct <= 0m || fallback.BreakevenWinRate >= ImplausibleWinRate)
+                findings.Add(new RiskFinding(
+                    RiskSeverity.Warning,
+                    "FALLBACK_TPSL_UNSOUND",
+                    $"The configured {opts.TakeProfitPct:P2}/{opts.StopLossPct:P2} pair needs a " +
+                    $"{fallback.BreakevenWinRate:P1} win rate. It is not what this strategy exits " +
+                    "on — it applies only to a position whose stop and target could not be " +
+                    "persisted — but that path exists, and a trade that falls into it would be " +
+                    "managed by this."));
         }
 
         // ── Inverted reward:risk ──
@@ -136,23 +183,60 @@ public static class RiskEngine
             ? Math.Min(perStrategy, opts.MaxOpenTotal)
             : perStrategy;
 
-        var maxExposurePct = maxConcurrent * opts.PositionPctOfCapital;
+        // An account-wide ceiling that cannot bind is not a ceiling. MaxOpenTotal 5
+        // against 2 strategies × 2 positions is 5 against a reachable 4, so the limit
+        // never fires and reads as protection that is not there.
+        if (opts.MaxOpenTotal > 0 && opts.MaxOpenTotal > perStrategy)
+        {
+            findings.Add(new RiskFinding(
+                RiskSeverity.Warning,
+                "ACCOUNT_LIMIT_INERT",
+                $"max_open_total is {opts.MaxOpenTotal} but at most {perStrategy} position(s) can " +
+                $"be open ({strategyCount} strategies × {opts.MaxOpenTradesPerStrategy}), so the " +
+                "account-wide ceiling can never bind. Lower it below that, or accept that the " +
+                "per-strategy limits are the only ones in force."));
+        }
 
-        if (maxExposurePct > 1m)
+        // Notional per position, sized the way orders are actually sized.
+        //
+        // This multiplied position_pct, which risk-based sizing stopped reading the day
+        // it shipped: notional = capital × risk_pct / stop_pct. At risk 1.0% over a 2.00%
+        // stop that is 50% of capital per position, and the check was reporting 10%.
+        // It understated exposure fivefold, in the reassuring direction.
+        var notionalPctPerPosition = geometry is { StopPct: > 0m } sized
+            ? opts.RiskPctPerTrade / sized.StopPct
+            : opts.PositionPctOfCapital;
+
+        var maxExposurePct = maxConcurrent * notionalPctPerPosition;
+
+        // Margin, not notional, is what the account has to find on a leveraged venue.
+        // Comparing a 3x notional against unleveraged capital would call an ordinary
+        // configuration over-allocated and refuse to start on it.
+        var lever     = leverage > 0m ? leverage : 1m;
+        var marginPct = maxExposurePct / lever;
+
+        var sizingBasis = geometry is { StopPct: > 0m } b
+            ? $"risk {opts.RiskPctPerTrade:P2} over a {b.StopPct:P2} stop = " +
+              $"{notionalPctPerPosition:P0} of capital per position"
+            : $"{opts.PositionPctOfCapital:P0} of capital per position";
+
+        if (marginPct > 1m)
         {
             findings.Add(new RiskFinding(
                 RiskSeverity.Critical,
                 "OVER_ALLOCATED",
-                $"{strategyCount} strategies × {opts.MaxOpenTradesPerStrategy} positions × " +
-                $"{opts.PositionPctOfCapital:P0} = {maxExposurePct:P0} of capital committed at once. " +
+                $"{maxConcurrent} concurrent position(s) at {sizingBasis} is {maxExposurePct:P0} " +
+                $"of capital in notional, needing {marginPct:P0} of it as margin at {lever:F0}x. " +
                 "This exceeds the account."));
         }
-        else if (maxExposurePct > 0.60m)
+        else if (marginPct > 0.60m)
         {
             findings.Add(new RiskFinding(
                 RiskSeverity.Warning,
                 "HIGH_EXPOSURE",
-                $"Worst-case exposure is {maxExposurePct:P0} of capital across {maxConcurrent} positions."));
+                $"Worst-case exposure is {maxExposurePct:P0} of capital in notional across " +
+                $"{maxConcurrent} position(s) ({sizingBasis}), or {marginPct:P0} as margin at " +
+                $"{lever:F0}x."));
         }
 
         // ── Worst-case drawdown vs the daily loss limit ──
@@ -178,13 +262,18 @@ public static class RiskEngine
         // movement — is now enforced where it belongs, in VolatilityStops.
 
         // ── Breakeven trigger unreachable before the target ──
-        if (opts.UseBreakevenStop && opts.BreakevenTriggerPct >= opts.TakeProfitPct)
+        //
+        // Against the target that actually closes the trade, not the configured one. The
+        // breakeven stop is evaluated on the live position, so comparing it to a
+        // percentage the position does not use would have declared it unreachable, or
+        // reachable, on the wrong number.
+        if (opts.UseBreakevenStop && opts.BreakevenTriggerPct >= profile.TakeProfitPct)
         {
             findings.Add(new RiskFinding(
                 RiskSeverity.Warning,
                 "BREAKEVEN_AFTER_TARGET",
                 $"Breakeven arms at {opts.BreakevenTriggerPct:P2} but the trade closes at " +
-                $"{opts.TakeProfitPct:P2}, so it never engages."));
+                $"{profile.TakeProfitPct:P2}, so it never engages."));
         }
 
         return new RiskAssessment(profile, findings);
@@ -336,6 +425,24 @@ public enum RiskSeverity
 }
 
 public sealed record RiskFinding(RiskSeverity Severity, string Code, string Message);
+
+/// <summary>
+/// The exit geometry a strategy will actually place, at its narrowest.
+///
+/// Reported by the strategy rather than inferred from bot_config, because the two have
+/// not described the same thing since volatility-scaled stops shipped: bot_config's
+/// take_profit_pct / stop_loss_pct survive only as the fallback for a position whose
+/// geometry write failed.
+/// </summary>
+/// <param name="Strategy">The name this profile belongs to, for the log line.</param>
+/// <param name="StopPct">Narrowest stop this configuration can produce, as a fraction.</param>
+/// <param name="TargetPct">The target that goes with that stop, as a fraction.</param>
+/// <param name="Basis">Where the two numbers came from, in one sentence.</param>
+public sealed record StrategyRiskProfile(
+    string  Strategy,
+    decimal StopPct,
+    decimal TargetPct,
+    string  Basis);
 
 /// <summary>What a TP/SL pair requires arithmetically, net of fees.</summary>
 public sealed record ExpectancyProfile(

@@ -151,8 +151,15 @@ public sealed class PaperOrderEngine(
                 "so this simulated fill matches what the live engine would have placed.",
                 sized.AskedNotionalUsd, okxOptions.MaxOrderNotionalUsd);
 
-        var qty      = Math.Round(notional / price, 6);
-        var fee      = Math.Round(notional * FeeRate, 4);
+        var qty = Math.Round(notional / price, 6);
+
+        // Notional is what the position is worth, and the fee is a cost beside it — not
+        // a haircut on the size. This used to record `notional - fee`, which made the
+        // recorded notional disagree with `qty x price` by the entry fee and quietly
+        // became the denominator of pnl_pct. OkxOrderEngine records the filled notional
+        // and carries the fee separately; the two modes now agree.
+        var filledNotional = Math.Round(qty * price, 4);
+        var entryFee       = Math.Round(filledNotional * FeeRate, 8);
 
         if (useAiSizing && size.ConfidenceScalar != 1.0m)
             log.LogInformation(
@@ -174,11 +181,11 @@ public sealed class PaperOrderEngine(
             Strategy    = strategy,
             EntryPrice  = price,
             Quantity    = qty,
-            NotionalUsd = notional - fee,
+            NotionalUsd = filledNotional,
             // Recorded, not merely deducted. Every paper row had fee_usd NULL while the
             // live rows carried it, so any query that compared cost across modes
             // silently read paper as free.
-            FeeUsd      = fee,
+            FeeUsd      = entryFee,
             Status      = "OPEN",
             OpenedAt    = DateTime.UtcNow,
             Mode        = "PAPER",
@@ -199,25 +206,50 @@ public sealed class PaperOrderEngine(
         trade = trade with { Id = await repo.InsertTradeAsync(trade, ct) };
 
         log.LogInformation(
-            "[PaperBot] OPEN {Side} {Symbol} @ ${Price} qty={Qty} notional=${Notional}",
-            side, symbol, price, qty, notional);
+            "[PaperBot] OPEN {Side} {Symbol} @ ${Price} qty={Qty} notional=${Notional} fee=${Fee}",
+            side, symbol, price, qty, filledNotional, entryFee);
 
         return trade;
     }
 
+    /// <summary>
+    /// Settle a simulated position, charging BOTH legs.
+    ///
+    /// The entry fee used to be charged nowhere. It was subtracted from the recorded
+    /// notional at open and then never appeared again, so P&amp;L was
+    /// <c>gross - exitFee</c> and every paper trade came out ~3.5 bps better than the
+    /// same trade live. On a rule whose whole measured edge is single-digit basis points
+    /// that is not a rounding difference: it is most of the margin the hypotheses in
+    /// HYPOTHESES.md are being judged on.
+    ///
+    /// The arithmetic is now the same shape as OkxOrderEngine.ApplyExit — gross, less
+    /// the sum of both legs — so a paper row and a live row mean the same thing.
+    ///
+    /// NOTE FOR ANYONE COMPARING HISTORY: rows closed before this fix carry the old,
+    /// flattering figure. A series that spans the change is not homogeneous; subtract
+    /// fee_usd/2 from the older rows before pooling them.
+    ///
+    /// Funding is still not modelled, and at a 12-hour hold it is the larger omission —
+    /// a measured 63 bps against these 7. See <see cref="TradingCosts"/>.
+    /// </summary>
     public async Task<BotTrade> CloseTradeAsync(
         BotTrade trade, decimal exitPrice, string reason, CancellationToken ct)
     {
-        var fee    = Math.Round(trade.NotionalUsd * FeeRate, 4);
+        // Charged on the value being closed, not on the entry notional: that is what a
+        // percentage fee is, and it is what the exchange bills.
+        var exitFee = Math.Round(trade.Quantity * exitPrice * FeeRate, 8);
+
         var rawPnl = trade.Side == "SHORT"
             ? (trade.EntryPrice - exitPrice) * trade.Quantity
             : (exitPrice - trade.EntryPrice) * trade.Quantity;
 
-        var pnlUsd = Math.Round(rawPnl - fee, 4);
+        // Both legs, matching how OkxOrderEngine accumulates it. FeeUsd already holds
+        // the entry leg from OpenPositionAsync.
+        var totalFee = Math.Round((trade.FeeUsd ?? 0m) + exitFee, 8);
+        var pnlUsd   = Math.Round(rawPnl - totalFee, 4);
 
-        // Both legs, matching how OkxOrderEngine accumulates it.
-        trade.FeeUsd = Math.Round((trade.FeeUsd ?? 0m) + fee, 8);
-        var pnlPct = Math.Round(pnlUsd / trade.NotionalUsd, 6);
+        trade.FeeUsd = totalFee;
+        var pnlPct = trade.NotionalUsd > 0m ? Math.Round(pnlUsd / trade.NotionalUsd, 6) : 0m;
 
         trade.ExitPrice   = exitPrice;
         trade.PnlUsd      = pnlUsd;

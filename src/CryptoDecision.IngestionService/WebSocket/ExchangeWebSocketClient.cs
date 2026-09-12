@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using CryptoDecision.IngestionService.Telemetry;
 using Microsoft.Extensions.Logging;
 
 namespace CryptoDecision.IngestionService.WebSocket;
@@ -15,8 +16,36 @@ namespace CryptoDecision.IngestionService.WebSocket;
 ///
 /// Adding a new exchange = extend this class + override 4–5 methods. Zero base code modified (OCP).
 /// </summary>
-public abstract class ExchangeWebSocketClient(ILogger logger)
+public abstract class ExchangeWebSocketClient(ILogger logger, FeedLiveness liveness)
 {
+    /// <summary>
+    /// How long a connection may go without a single frame before it is treated as dead
+    /// and torn down.
+    ///
+    /// The reconnect loop below only re-enters on an exception, and a half-open socket
+    /// does not throw: TCP stays up, the peer is gone, and ReceiveAsync blocks forever.
+    /// Nothing in this class noticed that — the ping loop kept sending into the void,
+    /// because sending on a half-open socket succeeds, and nothing ever checked that a
+    /// reply came back. The service would sit connected, silent, and reporting healthy
+    /// for as long as the container lived.
+    ///
+    /// 90 seconds is comfortably past every heartbeat here: OKX pings at 25s and expects
+    /// traffic within 30, Bybit at 20, and Binance's own keepalive is 20. A feed with
+    /// nothing to say for a minute and a half on a pair that prints continuously is not
+    /// quiet, it is gone.
+    /// </summary>
+    protected virtual TimeSpan IdleTimeout => TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Record that this feed delivered something worth having — a trade or a kline that
+    /// reached a channel, not merely a frame.
+    ///
+    /// Called by subclasses because only they can tell the two apart. A connection that
+    /// answers every ping and was subscribed to nothing is alive by every measure this
+    /// base class can take, and useless.
+    /// </summary>
+    protected void MarkDataReceived() => liveness.RecordData(ExchangeName);
+
     /// <summary>Exchange name used in log messages.</summary>
     protected abstract string ExchangeName { get; }
 
@@ -53,6 +82,10 @@ public abstract class ExchangeWebSocketClient(ILogger logger)
         var backoff    = TimeSpan.FromSeconds(1);
         var maxBackoff = TimeSpan.FromSeconds(60);
 
+        // Declared before the first connection attempt, so a feed that never connects at
+        // all is still a feed the health check knows should exist.
+        liveness.Expect(ExchangeName);
+
         while (!ct.IsCancellationRequested)
         {
             using var ws = new ClientWebSocket();
@@ -65,24 +98,40 @@ public abstract class ExchangeWebSocketClient(ILogger logger)
                 await ws.ConnectAsync(uri, ct);
                 logger.LogInformation("{Exchange} WebSocket connected", ExchangeName);
 
+                liveness.RecordConnected(ExchangeName);
+
                 await OnConnectedAsync(ws, ct);
                 backoff = TimeSpan.FromSeconds(1); // reset on success
 
-                if (UsesAppLevelPing)
+                // The watchdog shares the connection's lifetime: cancelling it when the
+                // receive loop ends is what stops it outliving the socket it watches.
+                using var connCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+                var watchdogTask = WatchdogAsync(ws, connCts.Token);
+
+                try
                 {
-                    using var pingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    var pingTask    = PingLoopAsync(ws, pingCts.Token);
-                    var receiveTask = ReceiveLoopAsync(ws, ct);
+                    if (UsesAppLevelPing)
+                    {
+                        var pingTask    = PingLoopAsync(ws, connCts.Token);
+                        var receiveTask = ReceiveLoopAsync(ws, ct);
 
-                    await Task.WhenAny(pingTask, receiveTask);
-                    await pingCts.CancelAsync();
+                        await Task.WhenAny(pingTask, receiveTask);
 
-                    try { await pingTask; }    catch (OperationCanceledException) { }
-                    try { await receiveTask; } catch (OperationCanceledException) { }
+                        await connCts.CancelAsync();
+
+                        try { await pingTask; }    catch (OperationCanceledException) { }
+                        try { await receiveTask; } catch (OperationCanceledException) { }
+                    }
+                    else
+                    {
+                        await ReceiveLoopAsync(ws, ct);
+                    }
                 }
-                else
+                finally
                 {
-                    await ReceiveLoopAsync(ws, ct);
+                    await connCts.CancelAsync();
+                    try { await watchdogTask; } catch (OperationCanceledException) { }
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -135,8 +184,51 @@ public abstract class ExchangeWebSocketClient(ILogger logger)
             }
             while (!result.EndOfMessage);
 
+            // Stamped before processing, not after: this clock answers "is the socket
+            // alive", and a message that arrived and then failed to parse still proves
+            // the connection is carrying traffic. Whether it carried anything USEFUL is
+            // MarkDataReceived's question, and the subclasses answer it.
+            liveness.RecordFrame(ExchangeName);
+
             ms.Position = 0;
             await ProcessMessageAsync(ms, ws, ct);
+        }
+    }
+
+    // ── Invariant: read watchdog ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Abort a connection that has stopped delivering frames.
+    ///
+    /// <see cref="ClientWebSocket.Abort"/> rather than a graceful close: the point is to
+    /// make the blocked ReceiveAsync throw so the reconnect loop re-enters, and a
+    /// graceful close handshake needs the peer to answer — which is exactly what is not
+    /// happening. Aborting is the only move that works on a socket whose other end is
+    /// gone.
+    /// </summary>
+    private async Task WatchdogAsync(ClientWebSocket ws, CancellationToken ct)
+    {
+        // Checked several times per timeout so the detection delay is a fraction of the
+        // window rather than a second copy of it.
+        var tick = TimeSpan.FromTicks(Math.Max(TimeSpan.TicksPerSecond, IdleTimeout.Ticks / 6));
+
+        using var timer = new PeriodicTimer(tick);
+
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            if (ws.State != WebSocketState.Open) return;
+
+            var idle = liveness.SinceLastFrame(ExchangeName);
+            if (idle is not { } silence || silence <= IdleTimeout) continue;
+
+            logger.LogWarning(
+                "{Exchange} WebSocket has delivered nothing for {Idle:F0}s, past the {Limit:F0}s " +
+                "limit. The socket still reports Open, which is what a half-open connection looks " +
+                "like — aborting it so the reconnect loop can run.",
+                ExchangeName, silence.TotalSeconds, IdleTimeout.TotalSeconds);
+
+            ws.Abort();
+            return;
         }
     }
 

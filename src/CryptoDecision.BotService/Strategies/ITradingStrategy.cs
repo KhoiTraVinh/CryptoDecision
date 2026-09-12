@@ -28,6 +28,31 @@ public interface ITradingStrategy
     /// </summary>
     string DescribeRule();
 
+    /// <summary>
+    /// The stop and target this strategy will actually place, or null when it expresses
+    /// no geometry and the configured percentages are what will be used.
+    ///
+    /// Why the risk gate needs this, and did not have it
+    /// -------------------------------------------------
+    /// RiskEngine.Validate judged bot_config.take_profit_pct against
+    /// bot_config.stop_loss_pct — 2.00% and 1.50%, a 1.19:1 needing a 45.7% win rate.
+    /// Neither number decides anything: they are read only by the no-geometry fallback in
+    /// EvaluateExitAsync, and every position this strategy opens carries geometry. What
+    /// actually runs is a 2.00% stop floor against a 2.0x target, which is 4.00% and a
+    /// different configuration entirely.
+    ///
+    /// So the startup gate was certifying a setup nobody trades — the same defect the
+    /// three trailing-stop findings were deleted for, reappearing on the other side of
+    /// the file. It is also the defect this repository has paid for most often: a check
+    /// that reports on a control the bot does not have.
+    ///
+    /// This returns the FLOOR geometry — the stop at its narrowest and the target that
+    /// goes with it. A live reading can only widen the stop, and under the ATR rule the
+    /// target widens with it, so the reward:risk this reports is the one that holds. It
+    /// is a statement about the configuration, not a forecast of any one trade.
+    /// </summary>
+    StrategyRiskProfile? DescribeRisk();
+
     /// <summary>Evaluate whether to open a new position.</summary>
     Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct);
 

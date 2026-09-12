@@ -4,6 +4,7 @@ using System.Text.Json;
 using CryptoDecision.IngestionService.Bybit.Models;
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Configuration;
+using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.WebSocket;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -20,7 +21,8 @@ public sealed class BybitWebSocketClient(
     BybitTradeChannel tradeChannel,
     BybitNormalizer normalizer,
     IOptions<MarketSubscriptionSettings> subscription,
-    ILogger<BybitWebSocketClient> logger) : ExchangeWebSocketClient(logger)
+    FeedLiveness liveness,
+    ILogger<BybitWebSocketClient> logger) : ExchangeWebSocketClient(logger, liveness)
 {
     private static readonly byte[] PingMsg = Encoding.UTF8.GetBytes("""{"op":"ping"}""");
 
@@ -102,6 +104,7 @@ public sealed class BybitWebSocketClient(
             {
                 var trade = normalizer.Normalize(t);
                 await tradeChannel.Writer.WriteAsync(trade, ct);
+                MarkDataReceived();
             }
             catch (Exception ex)
             {

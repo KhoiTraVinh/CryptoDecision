@@ -1060,10 +1060,19 @@ public static class CrossVenueFlowScorer
         // will change.
         var recent = OfiByClosedBucket(barsByVenue, nowUtc, 1);
 
+        // Every verdict below reports the same venue count, abstention or not. It was 0
+        // on four abstentions and barsByVenue.Count on the fifth and on the actionable
+        // ones, so strategy_verdicts.participating_venues meant "how many venues have
+        // bars" on some rows and "nothing was measured" on others, with no way to tell
+        // which from the row. The count is a fact about the input and does not depend on
+        // which test the bucket failed.
+        var venues = barsByVenue.Count;
+
         if (recent.Count == 0)
             return FlowVerdict.Abstain(
                 "NO_CLOSED_BUCKET",
-                "flow_bars_15m has no closed bucket for this symbol yet.");
+                "flow_bars_15m has no closed bucket for this symbol yet.",
+                [], 0.0, 0.0, 0, venues, 0.0);
 
         var bucket = recent[0];
 
@@ -1080,7 +1089,8 @@ public static class CrossVenueFlowScorer
                 "BUCKET_NOT_SETTLED",
                 $"The {bucket.Bucket:HH:mm} bucket closed {settled.TotalMinutes:F1} min ago and " +
                 $"the aggregation worker is still folding late trades into it. Waiting for " +
-                $"{options.RatioSettleMinutes} min.");
+                $"{options.RatioSettleMinutes} min.",
+                [], bucket.Ofi, 0.0, 0, venues, 0.0);
 
         if (bucket.VolumeUsd < options.RatioMinVolumeUsd)
             return FlowVerdict.Abstain(
@@ -1089,7 +1099,8 @@ public static class CrossVenueFlowScorer
                 $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
                 $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floor. A 2:1 imbalance on thin " +
                 "volume is what thin volume looks like: below the floor those signals measured " +
-                "-0.012 mean R once the largest winner is removed, against +0.332 above it.");
+                "-0.012 mean R once the largest winner is removed, against +0.332 above it.",
+                [], bucket.Ofi, 0.0, 0, venues, 0.0);
 
         // ratio = buy/sell, recovered from the imbalance:
         //   ofi = (b-s)/(b+s)  =>  b/s = (1+ofi)/(1-ofi)
@@ -1102,7 +1113,8 @@ public static class CrossVenueFlowScorer
             return FlowVerdict.Abstain(
                 "ONE_SIDED_BUCKET",
                 $"The {bucket.Bucket:HH:mm} bucket has no volume on one side at all, which is a " +
-                "data fault rather than a market state.");
+                "data fault rather than a market state.",
+                [], ofi, 0.0, 0, venues, 0.0);
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
 
@@ -1136,7 +1148,7 @@ public static class CrossVenueFlowScorer
                     $"${largestPrint:N0} print is {concentration:P0} of that side's " +
                     $"${dominant / 1_000_000m:F2}M — over the " +
                     $"{options.RatioMaxConcentration:P0} cap. One order is not a crowd.",
-                    [], ofi, 0.0, 0, barsByVenue.Count, 0.0);
+                    [], ofi, 0.0, 0, venues, 0.0);
         }
 
         // ── The news-print exception ──────────────────────────────────────────
@@ -1165,7 +1177,7 @@ public static class CrossVenueFlowScorer
                     $"The {bucket.Bucket:HH:mm} bucket traded " +
                     $"${bucket.VolumeUsd / 1_000_000m:F2}M with buy and sell exactly equal, so " +
                     "there is no dominant side to enter with.",
-                    [], ofi, 0.0, 0, 0, 0.0);
+                    [], ofi, 0.0, 0, venues, 0.0);
 
             return new FlowVerdict(
                 Actionable:          true,
@@ -1173,7 +1185,7 @@ public static class CrossVenueFlowScorer
                 AggregateOfi:        ofi,
                 AggregateZ:          0.0,
                 AgreeingVenues:      0,
-                ParticipatingVenues: barsByVenue.Count,
+                ParticipatingVenues: venues,
                 DispersionBps:       0.0,
                 AbstainCode:         "",
                 Reason:              $"The {bucket.Bucket:HH:mm} bucket traded " +
@@ -1182,7 +1194,12 @@ public static class CrossVenueFlowScorer
                                      $"threshold, so the {options.RatioMinimum:F2}:1 ratio test is " +
                                      $"skipped. Entering WITH the heavier side at {ratio:F2}:1 " +
                                      $"{(ofi > 0 ? "buy" : "sell")} (OFI {ofi:+0.000;-0.000}) — a " +
-                                     "lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
+                                     // The $ on this segment is load-bearing. Without it the
+                                     // brief printed the expression source verbatim, and this
+                                     // string is the gate's evidence: a system prompt that
+                                     // demands "every claim must be true of a number in the
+                                     // brief" was being handed a claim with no number in it.
+                                     $"lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
                                      "Volume is the whole signal here; price is not consulted.",
                 Votes:               [],
                 EntryPath:           EntryPaths.HighVolume);
@@ -1199,7 +1216,7 @@ public static class CrossVenueFlowScorer
                     ? $", and under the ${options.RatioHighVolumeUsd / 1_000_000m:F1}M that " +
                       "would have waived it."
                     : "."),
-                [], ofi, 0.0, 0, 0, 0.0);
+                [], ofi, 0.0, 0, venues, 0.0);
 
         var side = ofi > 0 ? "LONG" : "SHORT";
 
@@ -1209,7 +1226,7 @@ public static class CrossVenueFlowScorer
             AggregateOfi:        ofi,
             AggregateZ:          0.0,
             AgreeingVenues:      0,
-            ParticipatingVenues: barsByVenue.Count,
+            ParticipatingVenues: venues,
             DispersionBps:       0.0,
             AbstainCode:         "",
             Reason:              $"The {bucket.Bucket:HH:mm} bucket closed {ratio:F2}:1 " +

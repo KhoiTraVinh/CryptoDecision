@@ -313,6 +313,26 @@ public sealed class AiEntryGate(
     /// the scorer's own ceiling is 25 bps and anything above it never reaches the
     /// model. A number with no scale invites the model to supply one from nowhere.
     /// </summary>
+    /// <summary>
+    /// Venues the scorer measured and then rejected, or null when this rule does not
+    /// score venues at all.
+    ///
+    /// One method, because there were two copies of this subtraction and only one of
+    /// them got fixed. Both read <c>Votes.Count - ParticipatingVenues</c>, which is
+    /// correct for a rule that scores venues individually and nonsense for one that does
+    /// not: FlowRatio reads the aggregate, returns no votes, and reports all three venues
+    /// as participating, so the subtraction came out at MINUS THREE. <see cref="Describe"/>
+    /// was corrected and <see cref="ContradictsBrief"/> was not, which left the
+    /// fabricated-premise detector permanently off for the only rule that trades.
+    ///
+    /// Null rather than zero is the distinction that matters. "No venue was excluded"
+    /// and "exclusion is not a thing this rule can express" are different facts, and
+    /// collapsing them is what let a model reason about venue quality on a rule that
+    /// never measured it.
+    /// </summary>
+    private static int? ExcludedVenues(FlowVerdict flow) =>
+        flow.Votes.Count > 0 ? flow.Votes.Count - flow.ParticipatingVenues : null;
+
     private static string Describe(EntryCandidate c, IReadOnlyList<SimilarCase> examples)
     {
         var flow = c.Flow;
@@ -325,20 +345,9 @@ public sealed class AiEntryGate(
 
         var g = c.Geometry;
 
-        // Excluded venues, and whether that number means anything for this rule.
-        //
-        // This was `Votes.Count - ParticipatingVenues`, which is correct for a rule that
-        // scores venues individually and nonsense for one that does not. FlowRatio reads
-        // the aggregate and returns no votes at all while reporting all three venues as
-        // participating, so the subtraction came out at MINUS THREE — printed directly
-        // under a line asserting "zero", in a brief whose own system prompt demands that
-        // every claim be true of a number in it.
-        //
-        // A rule that does not score venues has no excluded count, and saying so is the
-        // honest rendering. Inventing one from an empty list is how the model ends up
-        // reasoning about venue quality on a rule that never measured it.
-        var scoresVenues = flow.Votes.Count > 0;
-        var excluded     = scoresVenues ? flow.Votes.Count - flow.ParticipatingVenues : 0;
+        var excludedOrNull = ExcludedVenues(flow);
+        var scoresVenues   = excludedOrNull is not null;
+        var excluded       = excludedOrNull ?? 0;
 
         // Each of these is one of the four grounds for refusing, rendered so the
         // condition attached to that ground can be evaluated by reading one line.
@@ -521,14 +530,30 @@ public sealed class AiEntryGate(
     /// have an unambiguous answer. "The evidence is incoherent" is a judgement and is
     /// not checkable; "venues were excluded" is arithmetic and was wrong twice in one
     /// day.
+    ///
+    /// THE EXCLUDED COUNT IS DERIVED THE SAME WAY <see cref="Describe"/> DERIVES IT, and
+    /// was not until this was fixed. Both read <c>Votes.Count - ParticipatingVenues</c>;
+    /// Describe was corrected for the rule that does not score venues, and this one was
+    /// left behind. Under FlowRatio that expression is <c>0 - 3 = -3</c>, so
+    /// <c>excluded == 0</c> never held and the detector was dead for the only rule that
+    /// trades — the exact defect it exists to catch, in the code that catches it.
     /// </summary>
     private static string? ContradictsBrief(string reason, EntryCandidate c)
     {
-        var text     = reason.ToLowerInvariant();
-        var excluded = c.Flow.Votes.Count - c.Flow.ParticipatingVenues;
+        var text = reason.ToLowerInvariant();
 
-        if ((text.Contains("excluded") || text.Contains("thin data")) && excluded == 0)
-            return $"it cites excluded venues, and the brief showed {excluded} excluded.";
+        if (text.Contains("excluded") || text.Contains("thin data"))
+        {
+            // Null means the rule does not score venues, so citing exclusions against it
+            // is a fabricated premise by construction — a stronger statement than "the
+            // count was zero", and reported as one.
+            if (ExcludedVenues(c.Flow) is not { } excluded)
+                return "it cites excluded venues, and this rule reads the aggregate — it " +
+                       "does not score venues at all, so no venue could have been excluded.";
+
+            if (excluded == 0)
+                return $"it cites excluded venues, and the brief showed {excluded} excluded.";
+        }
 
         if ((text.Contains("already open") || text.Contains("positions are open")) && c.OpenPositions < 2)
             return $"it cites open positions, and the brief showed {c.OpenPositions}.";

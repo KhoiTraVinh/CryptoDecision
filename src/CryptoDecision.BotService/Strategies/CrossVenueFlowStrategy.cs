@@ -118,6 +118,40 @@ public sealed class CrossVenueFlowStrategy(
              "configured. Fix the config; do not trust anything below this line.",
     };
 
+    /// <inheritdoc />
+    public StrategyRiskProfile? DescribeRisk()
+    {
+        // The narrowest stop this configuration can place. Both floors, exactly as
+        // VolatilityStops applies them — reproduced rather than shared because the live
+        // path needs a volatility reading and this one is a statement about the config.
+        // If the two ever disagree the geometry is what runs; this is only a report.
+        var feeFloor = tuning.RoundTripFeeRate * VolatilityStops.MinStopAsFeeMultiple;
+        var stopPct  = Math.Max(feeFloor, tuning.MinStopPct ?? 0m);
+
+        if (tuning.MaxStopPct is { } cap && cap > 0m && stopPct > cap) stopPct = cap;
+        if (stopPct <= 0m) return null;
+
+        if (!tuning.UseRangeGeometry)
+            return new StrategyRiskProfile(
+                Name, stopPct, stopPct * (decimal)tuning.TargetRiskMultiple,
+                $"ATR geometry: stop floored at {stopPct:P2} (fee floor {feeFloor:P2}, noise " +
+                $"floor {tuning.MinStopPct ?? 0m:P2}), target {tuning.TargetRiskMultiple:F2}x " +
+                "the stop. A larger ATR widens both together, so the ratio holds.");
+
+        // Under range geometry the target is wherever the boundary falls and is not a
+        // configured number at all. The one thing that IS fixed is the worst ratio the
+        // strategy will accept, so that is what gets reported — inverting MinRewardRisk,
+        // which is net of fees: rr = (target - fee) / (stop + fee).
+        var minTarget = tuning.MinRewardRisk * (stopPct + tuning.RoundTripFeeRate)
+                      + tuning.RoundTripFeeRate;
+
+        return new StrategyRiskProfile(
+            Name, stopPct, minTarget,
+            $"range geometry: stop floored at {stopPct:P2}; the target is the range boundary " +
+            $"and varies, so this is the smallest one MinRewardRisk {tuning.MinRewardRisk:F2}:1 " +
+            "will admit. Real entries are usually wider.");
+    }
+
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
     {
         var opts = ctx.Options;

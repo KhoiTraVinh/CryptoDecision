@@ -23,6 +23,25 @@ public sealed class MarketSubscriptionSettings
     /// <summary>
     /// Pairs in dashed form, e.g. ["SOL-USDT"].
     ///
+    /// THESE ARE SPOT INSTRUMENTS, AND THE BOT TRADES THE PERPETUAL. All three clients
+    /// subscribe to the spot book — Binance's solusdt@trade, OKX's SOL-USDT, Bybit's
+    /// /v5/public/spot — while OkxOrderEngine places orders on SOL-USDT-SWAP and
+    /// OkxPriceFeed quotes it. klines_1m is Binance spot as well, so the ATR and the
+    /// range boundaries are measured there too.
+    ///
+    /// Every number the entry rule is calibrated against therefore comes from a
+    /// different instrument than the one the position is in: the $3M bucket floor, the
+    /// 2.1:1 ratio, the per-venue medians ($7.0M / $2.07M / $0.89M), and the $20M
+    /// news-print threshold are all spot notional. A perp carries its own flow —
+    /// liquidation cascades and funding-driven positioning that never touch the spot
+    /// tape — which is precisely the kind of event the high-volume waiver is trying to
+    /// catch, and it is the half this feed cannot see.
+    ///
+    /// This is not a defect to fix by editing the list. Switching to SOL-USDT-SWAP would
+    /// change what every open hypothesis was measured on, and H9 and H11 are both live
+    /// against the spot-derived numbers. It is written down because it was not written
+    /// down anywhere, and an unstated assumption is how this repository loses weeks.
+    ///
     /// Empty by default, and it has to stay that way. The .NET configuration binder
     /// <em>appends</em> to a collection property that already holds items rather than
     /// replacing it, so a non-empty default plus a config value yields both — which

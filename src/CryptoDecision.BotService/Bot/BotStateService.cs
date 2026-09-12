@@ -166,14 +166,27 @@ public sealed class BotStateService
 
     // ── Stats ─────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Fold one closed trade into the running counters.
+    ///
+    /// A trade that made exactly nothing is neither a win nor a loss, and it used to be
+    /// counted as a win. That mattered more than the rounding suggests: a trade whose
+    /// pnl_usd is NULL — a close whose settlement write failed, or a row from an older
+    /// schema — reaches the callers as 0m and was therefore recorded as a WIN, which
+    /// inflates exactly the number an operator uses to decide whether to keep running.
+    ///
+    /// So win and loss are counted strictly, and <see cref="_totalTrades"/> still counts
+    /// every close: win + loss need not equal total, and the gap is the honest count of
+    /// trades that resolved to nothing or never reported.
+    /// </summary>
     public void RecordClose(decimal pnlUsd)
     {
         lock (_lock)
         {
             _totalTrades++;
             _totalPnlUsd += pnlUsd;
-            if (pnlUsd >= 0) _winCount++;
-            else             _lossCount++;
+            if      (pnlUsd > 0m) _winCount++;
+            else if (pnlUsd < 0m) _lossCount++;
         }
     }
 
@@ -187,7 +200,8 @@ public sealed class BotStateService
                 _totalTrades++;
                 var p = t.PnlUsd ?? 0m;
                 _totalPnlUsd += p;
-                if (p >= 0) _winCount++; else _lossCount++;
+                if      (p > 0m) _winCount++;
+                else if (p < 0m) _lossCount++;
             }
         }
     }
