@@ -176,24 +176,39 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     /// z=+0.50 and the actual state had to be reconstructed by hand from
     /// flow_bars_15m. One row, always current, so looking is a query.
     /// </summary>
+    /// <summary>
+    /// Record the current verdict for one strategy, upserted into strategy_verdicts.
+    ///
+    /// Keyed by strategy, and it was not until 2026-09-12. This wrote
+    /// bot_config.last_verdict_* — one set of columns on one row — from inside the loop
+    /// over active_strategies, so with two strategies each overwrote the other every
+    /// cycle and whichever ran last won. The monitoring surface an operator trusts would
+    /// have shown one rule and silently hidden the other. See sql/034.
+    /// </summary>
     public async Task RecordVerdictAsync(
+        string strategy, string symbol,
         string code, string detail, double aggregateZ,
         int agreeingVenues, int participatingVenues, CancellationToken ct = default)
     {
         const string sql = """
-            UPDATE bot_config
-            SET last_verdict_code   = @code,
-                last_verdict_detail = @detail,
-                last_verdict_z      = @z,
-                last_verdict_agree  = @agree,
-                last_verdict_venues = @venues,
-                last_verdict_at     = NOW()
-            WHERE id = 1
+            INSERT INTO strategy_verdicts
+                (strategy, symbol, code, detail, aggregate_z, agree, venues, updated_at)
+            VALUES (@strategy, @symbol, @code, @detail, @z, @agree, @venues, NOW())
+            ON CONFLICT (strategy) DO UPDATE SET
+                symbol      = EXCLUDED.symbol,
+                code        = EXCLUDED.code,
+                detail      = EXCLUDED.detail,
+                aggregate_z = EXCLUDED.aggregate_z,
+                agree       = EXCLUDED.agree,
+                venues      = EXCLUDED.venues,
+                updated_at  = NOW()
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
 
+        cmd.Parameters.AddWithValue("strategy", strategy);
+        cmd.Parameters.AddWithValue("symbol",   symbol);
         cmd.Parameters.AddWithValue("code",
             code.Length > 48 ? code[..48] : code);
         // Same reasoning as the refusal reason: it is meant to be read at a glance.

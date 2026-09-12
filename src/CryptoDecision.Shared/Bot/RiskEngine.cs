@@ -239,29 +239,51 @@ public static class RiskEngine
         var streakDays  = Math.Max(2, (int)Math.Ceiling((double)maxConsecutiveLosses / perDay) * 2);
         var streakSince = DateTime.UtcNow - TimeSpan.FromDays(streakDays);
 
-        var newestStrategy = closedTradesNewestFirst[0].Strategy;
-        var streak = 0;
+        // Every strategy gets its own streak, walked over its own trades only.
+        //
+        // This was a single walk from the newest trade that STOPPED at the first trade
+        // belonging to a different strategy. That scoping was right and the reason for it
+        // still stands — a streak that spanned a strategy rewrite halted the bot for
+        // fifteen hours — but it was written when one strategy traded, and "stop at the
+        // first other strategy" only equals "this strategy's streak" while no other
+        // strategy is trading concurrently.
+        //
+        // With two running, their trades interleave, so the walk stopped almost
+        // immediately every time and the breaker became unreachable: it required N losses
+        // in a row with no other strategy's trade in between, which at one rule signalling
+        // several times a day against another signalling twice is close to impossible.
+        // A breaker that cannot fire is not a conservative breaker, it is an absent one.
+        //
+        // Filtering per strategy keeps the original intent — the claim is about ONE
+        // signal being out of regime — and makes it hold for any number of strategies.
+        var strategies = closedTradesNewestFirst
+            .Select(t => t.Strategy)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
-        foreach (var trade in closedTradesNewestFirst)
+        foreach (var strat in strategies)
         {
-            // A different strategy ends the streak rather than being skipped:
-            // skipping would stitch two strategies' losses into one run, which
-            // is the bug this comment exists for.
-            if (!string.Equals(trade.Strategy, newestStrategy, StringComparison.OrdinalIgnoreCase))
-                break;
+            var streak = 0;
 
-            if ((trade.ClosedAt ?? trade.OpenedAt) < streakSince) break;
-            if ((trade.PnlUsd ?? 0m) >= 0m) break;
+            foreach (var trade in closedTradesNewestFirst
+                         .Where(t => string.Equals(t.Strategy, strat, StringComparison.OrdinalIgnoreCase)))
+            {
+                if ((trade.ClosedAt ?? trade.OpenedAt) < streakSince) break;
+                if ((trade.PnlUsd ?? 0m) >= 0m) break;
 
-            streak++;
-        }
+                streak++;
+            }
 
-        if (streak >= maxConsecutiveLosses)
-        {
-            return new CircuitBreak(
-                "CONSECUTIVE_LOSSES",
-                $"{streak} losing {newestStrategy} trades in a row within {streakDays} days " +
-                $"(limit {maxConsecutiveLosses}). The signal is likely out of regime.");
+            if (streak >= maxConsecutiveLosses)
+            {
+                return new CircuitBreak(
+                    "CONSECUTIVE_LOSSES",
+                    $"{streak} losing {strat} trades in a row within {streakDays} days " +
+                    $"(limit {maxConsecutiveLosses}). That signal is likely out of regime. " +
+                    "The breaker halts the whole bot, not just this strategy — one rule " +
+                    "losing repeatedly is not a reason to trust the others unattended.");
+            }
         }
 
         // ── Peak-to-trough drawdown on the realised equity curve ──

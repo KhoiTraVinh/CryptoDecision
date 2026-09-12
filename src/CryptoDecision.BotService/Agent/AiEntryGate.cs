@@ -323,8 +323,22 @@ public sealed class AiEntryGate(
               $"concentration {v.Concentration:P1}{(v.Agreed ? "   <-- agrees" : "")}"
             : $"  {v.Exchange,-8} EXCLUDED: {v.ExclusionReason}"));
 
-        var g        = c.Geometry;
-        var excluded = flow.Votes.Count - flow.ParticipatingVenues;
+        var g = c.Geometry;
+
+        // Excluded venues, and whether that number means anything for this rule.
+        //
+        // This was `Votes.Count - ParticipatingVenues`, which is correct for a rule that
+        // scores venues individually and nonsense for one that does not. FlowRatio reads
+        // the aggregate and returns no votes at all while reporting all three venues as
+        // participating, so the subtraction came out at MINUS THREE — printed directly
+        // under a line asserting "zero", in a brief whose own system prompt demands that
+        // every claim be true of a number in it.
+        //
+        // A rule that does not score venues has no excluded count, and saying so is the
+        // honest rendering. Inventing one from an empty list is how the model ends up
+        // reasoning about venue quality on a rule that never measured it.
+        var scoresVenues = flow.Votes.Count > 0;
+        var excluded     = scoresVenues ? flow.Votes.Count - flow.ParticipatingVenues : 0;
 
         // Each of these is one of the four grounds for refusing, rendered so the
         // condition attached to that ground can be evaluated by reading one line.
@@ -348,10 +362,26 @@ public sealed class AiEntryGate(
                 never a reason to skip; breakeven win rate {1m / (1m + g.RewardRisk):P1})
               stop basis: {g.Basis}, from ATR {g.AtrPctUsed:F2}% of price
 
-            EVIDENCE — cross-venue aggressive order flow
-              aggregate z {flow.AggregateZ:+0.00;-0.00}, OFI {flow.AggregateOfi:+0.000;-0.000}
-              {flow.AgreeingVenues} of {flow.ParticipatingVenues} participating venues agree
-              venues that participated but did not reach the threshold: {flow.ParticipatingVenues - flow.AgreeingVenues}
+            EVIDENCE — {(scoresVenues
+                ? "cross-venue aggressive order flow"
+                : "aggregate aggressive order flow (this rule does not score venues)")}
+            {(scoresVenues
+                ? $"  aggregate z {flow.AggregateZ:+0.00;-0.00}, OFI {flow.AggregateOfi:+0.000;-0.000}\n" +
+                  $"  {flow.AgreeingVenues} of {flow.ParticipatingVenues} participating venues agree\n" +
+                  $"  venues that participated but did not reach the threshold: " +
+                  $"{flow.ParticipatingVenues - flow.AgreeingVenues}"
+                // Under FlowRatio the venue fields are structurally zero: it reads one
+                // aggregate bucket and never scores a venue. Printing "z +0.00" and
+                // "0 of 3 venues agree" reads as strong evidence AGAINST the trade, and
+                // it is not evidence at all -- it is the shape of a record that was never
+                // filled in. What decided this entry is the imbalance and the notional,
+                // so that is what the brief states.
+                : $"  imbalance {(1.0 + Math.Abs(flow.AggregateOfi)) / (1.0 - Math.Abs(flow.AggregateOfi)):F2}:1 " +
+                  $"{(flow.AggregateOfi > 0 ? "buy" : "sell")}-dominated " +
+                  $"(OFI {flow.AggregateOfi:+0.000;-0.000}) across {flow.ParticipatingVenues} venue(s)\n" +
+                  $"  entry path: {(string.IsNullOrEmpty(flow.EntryPath) ? "n/a" : flow.EntryPath)}\n" +
+                  "  z, venue agreement and dispersion are NOT computed by this rule. They are\n" +
+                  "  absent, not zero, and are not grounds for anything.")}
 
             CHECKS ALREADY PASSED IN CODE, with the threshold each was judged against
               dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
@@ -360,9 +390,13 @@ public sealed class AiEntryGate(
                                     : flow.DispersionBps >= 0.8 * c.MaxDispersionBps
                                         ? "AT OR NEAR THE CEILING — 'late entry' is available as a ground"
                                         : "well inside the ceiling — 'late entry' is NOT available as a ground")}
-              excluded venues   {excluded,6}       — {(excluded > 0
-                                    ? "above zero — 'thin evidence' is available as a ground"
-                                    : "zero — 'thin evidence' is NOT available as a ground")}
+              excluded venues   {(scoresVenues ? excluded.ToString() : "n/a"),6}       — {(!scoresVenues
+                                    ? "this rule reads the AGGREGATE and does not score venues " +
+                                      "individually, so there is no excluded count and 'thin " +
+                                      "evidence' is NOT available as a ground"
+                                    : excluded > 0
+                                        ? "above zero — 'thin evidence' is available as a ground"
+                                        : "zero — 'thin evidence' is NOT available as a ground")}
               open positions    {c.OpenPositions,6}       — limit {c.MaxOpenPositions}; {(c.OpenPositions >= 2
                                     ? "'concentration' is available as a ground"
                                     : "below 2, so 'concentration' is NOT available as a ground")}

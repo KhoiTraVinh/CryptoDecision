@@ -1,6 +1,145 @@
 namespace CryptoDecision.Shared.Signals;
 
 /// <summary>
+/// Which rule turns flow into an entry.
+/// </summary>
+public enum FlowEntryMode
+{
+    /// <summary>
+    /// The original rule: the aggregate imbalance must be statistically unusual
+    /// against its own trailing distribution, and venues must independently agree.
+    ///
+    /// Its measured defect is latency, not direction. The statistic is a sum over
+    /// <see cref="FlowSignalOptions.SignalBars"/> buckets — an hour at the default 4 —
+    /// so it reports what happened over the past hour, not what is happening. Measured
+    /// on 440 buckets: aggregate z correlates +0.467 with the PRECEDING hour's return
+    /// and −0.116 with the following one. Observed live on 2026-09-07: price fell 1.5%
+    /// in 45 minutes while z read +1.01, because the one-hour window still held the
+    /// buying from before the fall.
+    /// </summary>
+    ZScore = 0,
+
+    /// <summary>
+    /// Enter on the RAW magnitude of the aggregate imbalance in the single bucket
+    /// that just closed: <c>|OFI| ≥ MinAbsOfi</c>, direction from its sign.
+    ///
+    /// Two things it deliberately drops, and why
+    /// -----------------------------------------
+    /// <b>The trailing sum.</b> ZScore adds up SignalBars buckets — an hour at the
+    /// default — so its centre of mass is 30-45 minutes behind the market. This reads
+    /// one closed bucket, so the lag is 0-15 minutes and nothing else.
+    ///
+    /// <b>The standardisation.</b> Dividing by a trailing MAD converts "the imbalance
+    /// is large" into "the imbalance is unusual for recently", and those are not the
+    /// same claim. A 0.30 imbalance during a volatile stretch has a large MAD under
+    /// it and scores a small z, so ZScore rejects exactly the readings that are big in
+    /// absolute terms. That is the mechanism behind the thing this bot kept doing:
+    /// standing aside through real moves and entering on quiet-period noise.
+    ///
+    /// What the measurement actually says — read this before trusting a result
+    /// ---------------------------------------------------------------------
+    /// Selected on out-of-sample performance across a 22-cell grid of |OFI| against
+    /// volume-ratio thresholds. At the chosen 0.30, forward return in the signal's
+    /// direction at 4 hours:
+    ///
+    ///     all        n=141   +0.174%
+    ///     out-of-s.  n=82    +0.134%   hit 50.0%   t=1.08
+    ///
+    /// and the finer grid rises monotonically with the threshold out-of-sample
+    /// (+0.044 at 0.20 → +0.181 at 0.35), which is the shape a real dose-response has
+    /// and is why this was picked over the alternatives.
+    ///
+    /// But it is NOT significant and the caveats are load-bearing. The hit rate is
+    /// ~50% at every threshold — below the 52.6% you get from going long at random —
+    /// so the positive mean comes from magnitude asymmetry, not from being right more
+    /// often. t never exceeds 1.32, and even that is inflated because 15-minute
+    /// signals against a 4-hour horizon share up to 16 overlapping observations. And
+    /// splitting by direction at 0.30, SHORT ran +0.409% (71.4% hit) in-sample and
+    /// −0.214% (32.4%) out-of-sample while LONG did the reverse — the two sides swap
+    /// which half they work in, which is what noise looks like.
+    ///
+    /// It is being paper-traded because the operator judged 7 days of information a
+    /// fair price for finding out, and paper risks none. Treat the result as the
+    /// experiment, not the expectation.
+    /// </summary>
+    OfiMagnitude = 1,
+
+    /// <summary>
+    /// Fade the last move: go long once price has fallen at least
+    /// <see cref="FlowSignalOptions.ReversalDropPct"/>, or short once it has risen at
+    /// least <see cref="FlowSignalOptions.ReversalRisePct"/>, over the last
+    /// <see cref="FlowSignalOptions.ReversalBars"/> closed candles. No order flow in
+    /// it at all — only price.
+    ///
+    /// The two thresholds are different numbers because the two sides are not
+    /// symmetric: the dip pays from 0.60% and the rally does not pay until 1.00%.
+    /// The table for each is on the option it belongs to.
+    ///
+    /// It is here because the flow data does not contain direction. Over 1,496 buckets
+    /// aggregate OFI correlates −0.015 with the next hour's signed return, and four
+    /// rules built on flow (z-score, OFI sign flip, volume burst, prior-return
+    /// momentum) all landed within noise of going long at random. Price's own recent
+    /// shape carries more than the flow does.
+    ///
+    /// Measured on the 30-minute change into the entry, return from the next candle's
+    /// open:
+    ///
+    ///     prior 30m       n       +30m     +1h      +2h    hit@1h
+    ///     fell >=0.60%   IN  78  +0.237  +0.249  +0.181   61.5%
+    ///                    OOS 40  +0.115  +0.208  +0.026   65.0%
+    ///     fell 0.35-0.60 IN  75  +0.026  -0.044  -0.197   42.7%
+    ///                    OOS 61  +0.013  +0.062  +0.014   52.5%
+    ///     ROSE           IN 291  -0.021  -0.066  -0.049   43.0%
+    ///                    OOS 228 -0.023  -0.068  -0.036   43.9%
+    ///
+    /// The 0.60% threshold is where it starts working and is not a tuned value — the
+    /// band below it flips sign between halves, and the band above is positive at
+    /// every horizon in both halves at better than 60% hit. At one hour it returns
+    /// three times the 7 bps round trip.
+    ///
+    /// The bottom row is the same finding from the other side: buying after a RISE
+    /// loses, in both halves, at every horizon, on n=519. Refusing those is half of
+    /// what this mode does, and it costs nothing because it prevents trades rather
+    /// than creating them.
+    ///
+    /// Long only. Shorting after a rise is the mirror image and measures +0.066/+0.068
+    /// at one hour — real, but sitting exactly on the 0.070% round trip, so it pays
+    /// the exchange rather than the account.
+    ///
+    /// The honest discount: SOL rose 12.65% over the sample, about 0.044% of drift per
+    /// hour. Perhaps a fifth of the one-hour figure is the market going up rather than
+    /// the pattern working, and none of this has been seen in a falling market.
+    /// </summary>
+    CandleReversal = 2,
+
+    /// <summary>
+    /// Enter WITH the side that dominated the last closed bucket: buy volume at least
+    /// <see cref="FlowSignalOptions.RatioMinimum"/> times sell volume (or the reverse
+    /// for a short), on at least <see cref="FlowSignalOptions.RatioMinVolumeUsd"/> of
+    /// notional. Price is not consulted at all.
+    ///
+    /// The opposite sign to every rule above it, and the first to enter with the tape
+    /// rather than against it. See <see cref="CrossVenueFlowScorer.ScoreFlowRatio"/>
+    /// for the measurement, including why it does not contradict the finding that
+    /// aggregate OFI carries no direction: that figure averages the whole
+    /// distribution, and this rule only reads its extreme tail.
+    ///
+    /// Wants the ATR geometry, not the range geometry: entering with the dominant side
+    /// puts price at the edge of its own range, so a range-boundary target sits almost
+    /// on top of the entry and fails MinRewardRisk. Set UseRangeGeometry false, which
+    /// with a 2.00% stop floor and TargetRiskMultiple 2.0 gives the 2%/4% pair this
+    /// was measured on.
+    /// </summary>
+    FlowRatio = 3,
+}
+
+// The block below documents FlowSignalOptions and lived at the top of this file, above
+// `public enum FlowEntryMode` -- so every <param> tag described a parameter the enum
+// does not have, and the summary called the enum "tunable thresholds for
+// CrossVenueFlowScorer". Tooling showed nothing on the record and the wrong text on the
+// enum. Moved 2026-09-12; no wording changed.
+
+/// <summary>
 /// Tunable thresholds for <see cref="CrossVenueFlowScorer"/>.
 ///
 /// Every field here is a parameter rather than a constant because every one of
@@ -153,139 +292,6 @@ namespace CryptoDecision.Shared.Signals;
 /// and with no ceiling the brief states plainly that the ground is unavailable. The
 /// gate refused eight entries in one day on that ground at 2.8-13.2 bps.
 /// </param>
-/// <summary>
-/// Which rule turns flow into an entry.
-/// </summary>
-public enum FlowEntryMode
-{
-    /// <summary>
-    /// The original rule: the aggregate imbalance must be statistically unusual
-    /// against its own trailing distribution, and venues must independently agree.
-    ///
-    /// Its measured defect is latency, not direction. The statistic is a sum over
-    /// <see cref="FlowSignalOptions.SignalBars"/> buckets — an hour at the default 4 —
-    /// so it reports what happened over the past hour, not what is happening. Measured
-    /// on 440 buckets: aggregate z correlates +0.467 with the PRECEDING hour's return
-    /// and −0.116 with the following one. Observed live on 2026-09-07: price fell 1.5%
-    /// in 45 minutes while z read +1.01, because the one-hour window still held the
-    /// buying from before the fall.
-    /// </summary>
-    ZScore = 0,
-
-    /// <summary>
-    /// Enter on the RAW magnitude of the aggregate imbalance in the single bucket
-    /// that just closed: <c>|OFI| ≥ MinAbsOfi</c>, direction from its sign.
-    ///
-    /// Two things it deliberately drops, and why
-    /// -----------------------------------------
-    /// <b>The trailing sum.</b> ZScore adds up SignalBars buckets — an hour at the
-    /// default — so its centre of mass is 30-45 minutes behind the market. This reads
-    /// one closed bucket, so the lag is 0-15 minutes and nothing else.
-    ///
-    /// <b>The standardisation.</b> Dividing by a trailing MAD converts "the imbalance
-    /// is large" into "the imbalance is unusual for recently", and those are not the
-    /// same claim. A 0.30 imbalance during a volatile stretch has a large MAD under
-    /// it and scores a small z, so ZScore rejects exactly the readings that are big in
-    /// absolute terms. That is the mechanism behind the thing this bot kept doing:
-    /// standing aside through real moves and entering on quiet-period noise.
-    ///
-    /// What the measurement actually says — read this before trusting a result
-    /// ---------------------------------------------------------------------
-    /// Selected on out-of-sample performance across a 22-cell grid of |OFI| against
-    /// volume-ratio thresholds. At the chosen 0.30, forward return in the signal's
-    /// direction at 4 hours:
-    ///
-    ///     all        n=141   +0.174%
-    ///     out-of-s.  n=82    +0.134%   hit 50.0%   t=1.08
-    ///
-    /// and the finer grid rises monotonically with the threshold out-of-sample
-    /// (+0.044 at 0.20 → +0.181 at 0.35), which is the shape a real dose-response has
-    /// and is why this was picked over the alternatives.
-    ///
-    /// But it is NOT significant and the caveats are load-bearing. The hit rate is
-    /// ~50% at every threshold — below the 52.6% you get from going long at random —
-    /// so the positive mean comes from magnitude asymmetry, not from being right more
-    /// often. t never exceeds 1.32, and even that is inflated because 15-minute
-    /// signals against a 4-hour horizon share up to 16 overlapping observations. And
-    /// splitting by direction at 0.30, SHORT ran +0.409% (71.4% hit) in-sample and
-    /// −0.214% (32.4%) out-of-sample while LONG did the reverse — the two sides swap
-    /// which half they work in, which is what noise looks like.
-    ///
-    /// It is being paper-traded because the operator judged 7 days of information a
-    /// fair price for finding out, and paper risks none. Treat the result as the
-    /// experiment, not the expectation.
-    /// </summary>
-    OfiMagnitude = 1,
-
-    /// <summary>
-    /// Fade the last move: go long once price has fallen at least
-    /// <see cref="FlowSignalOptions.ReversalDropPct"/>, or short once it has risen at
-    /// least <see cref="FlowSignalOptions.ReversalRisePct"/>, over the last
-    /// <see cref="FlowSignalOptions.ReversalBars"/> closed candles. No order flow in
-    /// it at all — only price.
-    ///
-    /// The two thresholds are different numbers because the two sides are not
-    /// symmetric: the dip pays from 0.60% and the rally does not pay until 1.00%.
-    /// The table for each is on the option it belongs to.
-    ///
-    /// It is here because the flow data does not contain direction. Over 1,496 buckets
-    /// aggregate OFI correlates −0.015 with the next hour's signed return, and four
-    /// rules built on flow (z-score, OFI sign flip, volume burst, prior-return
-    /// momentum) all landed within noise of going long at random. Price's own recent
-    /// shape carries more than the flow does.
-    ///
-    /// Measured on the 30-minute change into the entry, return from the next candle's
-    /// open:
-    ///
-    ///     prior 30m       n       +30m     +1h      +2h    hit@1h
-    ///     fell >=0.60%   IN  78  +0.237  +0.249  +0.181   61.5%
-    ///                    OOS 40  +0.115  +0.208  +0.026   65.0%
-    ///     fell 0.35-0.60 IN  75  +0.026  -0.044  -0.197   42.7%
-    ///                    OOS 61  +0.013  +0.062  +0.014   52.5%
-    ///     ROSE           IN 291  -0.021  -0.066  -0.049   43.0%
-    ///                    OOS 228 -0.023  -0.068  -0.036   43.9%
-    ///
-    /// The 0.60% threshold is where it starts working and is not a tuned value — the
-    /// band below it flips sign between halves, and the band above is positive at
-    /// every horizon in both halves at better than 60% hit. At one hour it returns
-    /// three times the 7 bps round trip.
-    ///
-    /// The bottom row is the same finding from the other side: buying after a RISE
-    /// loses, in both halves, at every horizon, on n=519. Refusing those is half of
-    /// what this mode does, and it costs nothing because it prevents trades rather
-    /// than creating them.
-    ///
-    /// Long only. Shorting after a rise is the mirror image and measures +0.066/+0.068
-    /// at one hour — real, but sitting exactly on the 0.070% round trip, so it pays
-    /// the exchange rather than the account.
-    ///
-    /// The honest discount: SOL rose 12.65% over the sample, about 0.044% of drift per
-    /// hour. Perhaps a fifth of the one-hour figure is the market going up rather than
-    /// the pattern working, and none of this has been seen in a falling market.
-    /// </summary>
-    CandleReversal = 2,
-
-    /// <summary>
-    /// Enter WITH the side that dominated the last closed bucket: buy volume at least
-    /// <see cref="FlowSignalOptions.RatioMinimum"/> times sell volume (or the reverse
-    /// for a short), on at least <see cref="FlowSignalOptions.RatioMinVolumeUsd"/> of
-    /// notional. Price is not consulted at all.
-    ///
-    /// The opposite sign to every rule above it, and the first to enter with the tape
-    /// rather than against it. See <see cref="CrossVenueFlowScorer.ScoreFlowRatio"/>
-    /// for the measurement, including why it does not contradict the finding that
-    /// aggregate OFI carries no direction: that figure averages the whole
-    /// distribution, and this rule only reads its extreme tail.
-    ///
-    /// Wants the ATR geometry, not the range geometry: entering with the dominant side
-    /// puts price at the edge of its own range, so a range-boundary target sits almost
-    /// on top of the entry and fails MinRewardRisk. Set UseRangeGeometry false, which
-    /// with a 2.00% stop floor and TargetRiskMultiple 2.0 gives the 2%/4% pair this
-    /// was measured on.
-    /// </summary>
-    FlowRatio = 3,
-}
-
 public sealed record FlowSignalOptions(
     int     SignalBars                    = 4,
     int     BaselineBars                  = 44,
@@ -512,6 +518,31 @@ public sealed record FlowSignalOptions(
     /// as H11 in HYPOTHESES.md. Set to 0 to remove it.
     /// </summary>
     decimal RatioHighVolumeUsd            = 20_000_000m,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: reject a bucket when this fraction or
+    /// more of the dominant side's notional came from a single print. 0 disables.
+    ///
+    /// THE GAP THIS CLOSES. `MaxConcentration` (0.35, "one order is not a crowd") lives
+    /// in <see cref="Prepare"/>, and FlowRatio is dispatched before Prepare and never
+    /// calls it — deliberately, because the per-venue quality gates are not what this
+    /// rule was measured with. The side effect was that the concentration guard, which is
+    /// about data quality rather than about venue selection, silently did not apply to
+    /// the rule that actually trades. Observed 2026-09-11: a single $1.04M print on
+    /// BINANCE inside one bucket. On a $3-4M bucket that one order can carry the entire
+    /// 2.1:1 imbalance by itself, and nothing would have rejected it.
+    ///
+    /// DEFAULT 0, WHICH CHANGES NOTHING. Turning it on is an entry-rule change, and H9
+    /// and H11 are both open on the current rule — shipping a silent tightening would
+    /// invalidate the very measurements they exist to collect. This makes the capability
+    /// exist and the gap visible; enabling it wants its own entry in HYPOTHESES.md.
+    ///
+    /// Note the aggregate is across venues while max_buy_usd/max_sell_usd are per venue,
+    /// so this compares the largest single print on any venue against the market-wide
+    /// dominant side. That is the conservative direction: it can only under-report
+    /// concentration, never invent it.
+    /// </summary>
+    double  RatioMaxConcentration         = 0.0,
 
     /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: minutes to wait after a bucket closes
@@ -1074,6 +1105,39 @@ public static class CrossVenueFlowScorer
                 "data fault rather than a market state.");
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
+
+        // ── One print is not a crowd ──────────────────────────────────────────
+        //
+        // Off unless RatioMaxConcentration is set; see that option for why the default
+        // leaves behaviour unchanged. Applied before both entry paths, because a bucket
+        // whose imbalance is one order is a data-quality problem under either of them —
+        // and the high-volume waiver is if anything more exposed, since it takes whichever
+        // side is heavier however narrow the lead.
+        if (options.RatioMaxConcentration > 0.0)
+        {
+            decimal dominant = 0m, largestPrint = 0m;
+
+            foreach (var bars in barsByVenue.Values)
+                foreach (var bar in bars)
+                {
+                    if (bar.BucketStart != bucket.Bucket) continue;
+
+                    dominant     += ofi > 0 ? bar.BuyVolumeUsd : bar.SellVolumeUsd;
+                    largestPrint  = Math.Max(largestPrint, ofi > 0 ? bar.MaxBuyUsd : bar.MaxSellUsd);
+                }
+
+            var concentration = dominant > 0m ? (double)(largestPrint / dominant) : 0.0;
+
+            if (concentration >= options.RatioMaxConcentration)
+                return FlowVerdict.Abstain(
+                    "PRINT_CONCENTRATION_TOO_HIGH",
+                    $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
+                    $"{(ofi > 0 ? "buy" : "sell")}-dominated, but a single " +
+                    $"${largestPrint:N0} print is {concentration:P0} of that side's " +
+                    $"${dominant / 1_000_000m:F2}M — over the " +
+                    $"{options.RatioMaxConcentration:P0} cap. One order is not a crowd.",
+                    [], ofi, 0.0, 0, barsByVenue.Count, 0.0);
+        }
 
         // ── The news-print exception ──────────────────────────────────────────
         //

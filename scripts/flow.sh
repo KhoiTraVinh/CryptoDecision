@@ -78,18 +78,38 @@ bold "flow -- $SYMBOL -- $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
 echo
 
 # -- 1. The scorer's own answer -----------------------------------------------
-bold "1. THE BOT'S VERDICT (the scorer that actually ran -- authoritative)"
-row=$($PSQL <<SQL
-SELECT enabled, coalesce(last_verdict_code,'(none)'),
-       coalesce(date_trunc('second', now()-last_verdict_at)::text,'never'),
-       coalesce(left(last_verdict_detail,170),''),
-       (SELECT count(*) FROM bot_trades WHERE status='OPEN')
+bold "1. EACH STRATEGY'S VERDICT (the scorer that actually ran -- authoritative)"
+# One row per strategy, from strategy_verdicts. This read bot_config.last_verdict_*,
+# which is a single set of columns written from inside the loop over active_strategies --
+# so with two strategies each overwrote the other every cycle and this section showed
+# whichever ran last, permanently hiding the other. See sql/034.
+if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" = "t" ]; then
+    $PSQLT <<SQL
+SELECT v.strategy,
+       CASE WHEN c.active_strategies @> ARRAY[v.strategy] THEN 'trading' ELSE 'idle' END AS state,
+       v.code,
+       date_trunc('second', now() - v.updated_at)::text AS age,
+       left(v.detail, 96) AS detail
+FROM strategy_verdicts v, bot_config c
+WHERE c.id = 1 ORDER BY v.strategy;
+SQL
+    dim "a strategy marked idle is registered but not in active_strategies -- its verdict is stale"
+else
+    warn_line="  strategy_verdicts is missing -- apply sql/034. Falling back to bot_config."
+    printf '\033[33m%s\033[0m\n' "$warn_line"
+    $PSQLT <<SQL
+SELECT coalesce(last_verdict_code,'(none)') AS code,
+       coalesce(date_trunc('second', now()-last_verdict_at)::text,'never') AS age,
+       left(coalesce(last_verdict_detail,''),96) AS detail
 FROM bot_config WHERE id=1;
 SQL
+fi
+row=$($PSQL <<SQL
+SELECT enabled, (SELECT count(*) FROM bot_trades WHERE status='OPEN') FROM bot_config WHERE id=1;
+SQL
 )
-IFS="|" read -r en code age detail open <<< "$row"
-printf '  %-22s %s old   %s open position(s)\n' "$code" "$age" "$open"
-[ -n "$detail" ] && dim "$detail"
+IFS="|" read -r en open <<< "$row"
+printf '  %s open position(s)\n' "$open"
 if [ "$en" = "f" ]; then
     printf '  \033[31mFROZEN\033[0m  bot_config.enabled = false -- this will not update.\n'
 fi

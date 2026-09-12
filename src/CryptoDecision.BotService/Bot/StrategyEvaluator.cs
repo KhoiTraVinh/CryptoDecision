@@ -143,30 +143,22 @@ public sealed class StrategyEvaluator
         if (!_strategies.TryGetValue(trade.Strategy, out var impl))
             return new ExitDecision(false, null, currentPrice, changePct);
 
-        // ── Dynamic TP/SL scaling (universal) ───────────────────────────────
-        // Adjust thresholds based on volatility: high vol → wider TP/SL
-        var effectiveOpts = opts;
-        if (opts.UseDynamicTpSl && trade.PeakPrice.HasValue)
-        {
-            // Use peak-to-entry ratio as a volatility proxy for the trade
-            var volatilityFactor = Math.Abs(
-                (trade.PeakPrice.Value - trade.EntryPrice) / trade.EntryPrice);
-            var scale = Math.Max(1m, 1m + volatilityFactor * 10m); // scale 1x-2x
-            scale = Math.Min(scale, 2m);
-
-            // `with`, not a fresh BotOptions. This built a new object and copied six
-            // properties by hand, so every other one — Symbol, CapitalUsd,
-            // MaxHoldMinutes, the gate switches — silently reverted to its compiled
-            // default before being handed to the strategy. Nothing read them yet, so
-            // it never misbehaved; it was waiting for the first exit rule that did.
-            effectiveOpts = opts with
-            {
-                TakeProfitPct = opts.TakeProfitPct * scale,
-                StopLossPct   = opts.StopLossPct   * scale,
-            };
-        }
-
-        return await impl.EvaluateExitAsync(trade, currentPrice, effectiveOpts, ct);
+        // Dynamic TP/SL was scaled here too, and that copy is gone.
+        //
+        // It multiplied opts.TakeProfitPct and opts.StopLossPct by 1 + 10x excursion,
+        // capped at 2x — the same formula CrossVenueFlowStrategy applies to the STORED
+        // geometry. Two implementations of one rule, and this was the one that could not
+        // do anything: those two percentages are read only by the no-geometry fallback,
+        // and every trade that carries geometry — which is every trade the live strategy
+        // opens — never reaches them.
+        //
+        // Deleting it rather than wiring it up, for two reasons. The duplicate formula is
+        // a drift waiting to happen: H12 is open on the scaling rule and a second copy
+        // with the same magic numbers would have to be found and changed alongside it.
+        // And the fallback is a fallback — it exists for a trade whose geometry write
+        // failed, and scaling an emergency stop by a volatility proxy is not a thing to
+        // do to a position that is already in trouble.
+        return await impl.EvaluateExitAsync(trade, currentPrice, opts, ct);
     }
 }
 

@@ -283,6 +283,24 @@ public sealed class DatabaseInitializer(
                 ADD COLUMN IF NOT EXISTS entry_path       TEXT;
             """, ct);
 
+        // One current verdict per strategy. Mirrored from sql/034 for the same reason
+        // the bot_config columns are: a preserved volume that has not had the migration
+        // applied would fail every verdict write, and those writes are wrapped in
+        // SafeRecordAsync -- so it would fail SILENTLY, every cycle, leaving the one
+        // surface an operator reads frozen at whatever it last held.
+        await Exec(conn, """
+            CREATE TABLE IF NOT EXISTS strategy_verdicts (
+                strategy     TEXT         PRIMARY KEY,
+                symbol       TEXT         NOT NULL,
+                code         VARCHAR(48)  NOT NULL,
+                detail       TEXT,
+                aggregate_z  NUMERIC(10, 4),
+                agree        SMALLINT,
+                venues       SMALLINT,
+                updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+            );
+            """, ct);
+
         await Exec(conn, """
             CREATE INDEX IF NOT EXISTS idx_bot_trades_symbol ON bot_trades(symbol);
             """, ct);

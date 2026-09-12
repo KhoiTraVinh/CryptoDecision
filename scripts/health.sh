@@ -221,6 +221,17 @@ if [ -z "$v" ] || [ "${v%%|*}" = "-" ]; then
     warn "no verdict recorded yet -- needs sql/026 applied and the bot restarted"
 else
     IFS='|' read -r vcode vz vagree vvenues vage vdetail <<<"$v"
+    # Superseded by strategy_verdicts: bot_config holds ONE verdict written from inside
+    # the per-strategy loop, so with two strategies it shows whichever ran last. Prefer
+    # the per-strategy table when it exists, and say so when it does not.
+    if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" = "t" ]; then
+        while IFS='|' read -r sv_strat sv_code sv_age sv_detail; do
+            [ -z "$sv_strat" ] && continue
+            ok "$sv_strat  $sv_code  (${sv_age}s ago)"
+            printf '        %s\n' "$sv_detail"
+        done < <($PSQL -c "SELECT strategy, code, round(extract(epoch FROM now()-updated_at))::int, left(detail,150) FROM strategy_verdicts ORDER BY strategy")
+    else
+        warn "strategy_verdicts missing -- apply sql/034; the line below is bot_config's single verdict"
     # z and the venue tally are NOT printed any more. They are the ZScore rule's
     # statistics, and FlowRatio does not compute either -- it reads one closed bucket
     # and never calls Prepare, so the scorer writes 0.0000 and 0/0 every time. Showing
@@ -228,8 +239,10 @@ else
     # code that is live. The detail string below carries what actually decided it: the
     # bucket, its imbalance and its notional. They stay in the SELECT so that switching
     # EntryMode back to ZScore is a one-line change here.
-    ok "$vcode  (${vage}s ago)"
-    printf '        %s\n' "$vdetail"
+        ok "$vcode  (${vage}s ago)"
+        printf '        %s\n' "$vdetail"
+    fi
+
     # A stale verdict is only a fault when the strategy SHOULD be evaluating.
     # With a position open and max_open_trades_per_strategy reached, the loop
     # skips the strategy entirely by design, so no verdict is produced and this

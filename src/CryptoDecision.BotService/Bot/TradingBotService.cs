@@ -1,3 +1,4 @@
+using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Agent;
 using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.BotService.Strategies;
@@ -33,10 +34,13 @@ public sealed class TradingBotService(
     // Read for its thresholds, not to score anything: the gate's brief states each
     // checked value against the limit the scorer applied to it.
     FlowStrategyOptions   flowOptions,
+    // For the per-order notional ceiling only. The brief quotes the size the exchange
+    // will actually be asked for, and that ceiling is the last thing to shrink it.
+    OkxOptions            okxOptions,
     ILogger<TradingBotService> log) : BackgroundService
 {
     /// <summary>
-    /// Declines the gate has already given, keyed by symbol, side and the
+    /// Declines the gate has already given, keyed by STRATEGY, symbol, side and the
     /// 15-minute bucket the verdict belongs to.
     ///
     /// The evaluation loop runs every 30 seconds but flow bars only change on the
@@ -53,8 +57,20 @@ public sealed class TradingBotService(
     /// cached either, for the opposite reason: it is not a verdict about the evidence,
     /// so the argument for the cache does not apply to it, and caching one turned a
     /// momentary Ollama hiccup into a fifteen-minute blackout.
+    ///
+    /// THE STRATEGY IS PART OF THE KEY, and was not until 2026-09-12. Two strategies now
+    /// run in parallel on the same symbol and can propose the same side in the same
+    /// bucket on completely different evidence — XVENUE_FLOW on order flow,
+    /// CANDLE_REVERSAL on price. Without the strategy in the key, a decline earned by one
+    /// was replayed to the other and the gate never saw the second candidate at all, with
+    /// a cached Reason citing flow thresholds at a rule that does not read flow.
+    ///
+    /// The justification for caching is "the evidence cannot change until the next bar
+    /// closes". That is true within one strategy and false across two, because it is
+    /// different evidence — exactly the kind of premise that stops holding quietly when
+    /// something new is registered beside it.
     /// </summary>
-    private readonly Dictionary<(string Symbol, string Side, DateTime Bucket), GateDecision>
+    private readonly Dictionary<(string Strategy, string Symbol, string Side, DateTime Bucket), GateDecision>
         _declinedThisBucket = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -416,11 +432,30 @@ public sealed class TradingBotService(
             todayPnl = 0m;
         }
 
-        var sizing = PositionSizer.Resolve(
-            opts.CapitalUsd, opts.PositionPctOfCapital,
-            currentVolatilityPct: geometry.AtrPctUsed,
+        // Sized the way the ORDER will be sized, not the way orders used to be.
+        //
+        // This called PositionSizer.Resolve — the percentage-of-capital rule — while
+        // EntrySizing has used ResolveByRisk on every entry that carries a stop since
+        // risk-based sizing shipped. At capital $30, risk 0.005 and a 2.00% stop the real
+        // order is $7.50 and the brief said $3.00: the gate was judging the
+        // proportionality of a trade two and a half times smaller than the one it was
+        // approving. It also fed geometry.AtrPctUsed — a 15-minute ATR — into a parameter
+        // PositionSizer calibrates against DAILY volatility, which is the two-readings-of-
+        // one-thing interaction ResolveByRisk exists to remove.
+        //
+        // EntrySizing consolidated the paper and live copies of this arithmetic and missed
+        // this one, because it is not placing an order — it is describing one.
+        var sizing = PositionSizer.ResolveByRisk(
+            opts.CapitalUsd, opts.RiskPctPerTrade, geometry.StopPct,
             confidence: decision.Confidence,
             useAiSizing: opts.UseAiSizing);
+
+        // The per-order ceiling only ever shrinks the order, so leaving it out would make
+        // the brief overstate rather than understate — but it is known here and there is
+        // no reason to hand the model a number the exchange will not be asked for.
+        var briefNotional = okxOptions.MaxOrderNotionalUsd > 0m
+            ? Math.Min(sizing.NotionalUsd, okxOptions.MaxOrderNotionalUsd)
+            : sizing.NotionalUsd;
 
         var candidate = new EntryCandidate(
             Symbol:        opts.Symbol,
@@ -428,7 +463,7 @@ public sealed class TradingBotService(
             Price:         price,
             Flow:          flow,
             Geometry:      geometry,
-            NotionalUsd:   sizing.NotionalUsd,
+            NotionalUsd:   briefNotional,
             OpenPositions: openPositions,
             TodayPnlUsd:   todayPnl,
 
@@ -451,14 +486,14 @@ public sealed class TradingBotService(
         // comment in SafeSignalAsync already claimed they were one — which is the
         // shape of a drift nobody would notice until the gate cache and the signal
         // table disagreed about which bucket a decision belonged to.
-        (string Symbol, string Side, DateTime Bucket) key =
-            (opts.Symbol, decision.Side, SignalOutcomeRepository.BucketOf(DateTime.UtcNow));
+        (string Strategy, string Symbol, string Side, DateTime Bucket) key =
+            (strategyName, opts.Symbol, decision.Side, SignalOutcomeRepository.BucketOf(DateTime.UtcNow));
 
         if (_declinedThisBucket.TryGetValue(key, out var cached))
         {
             log.LogDebug(
-                "[Gate] Already declined {Side} {Symbol} for the {Bucket:HH:mm} bucket: {Reason}",
-                decision.Side, opts.Symbol, key.Bucket, cached.Reason);
+                "[Gate] Already declined {Strat} {Side} {Symbol} for the {Bucket:HH:mm} bucket: {Reason}",
+                strategyName, decision.Side, opts.Symbol, key.Bucket, cached.Reason);
             return cached;
         }
 
@@ -668,14 +703,20 @@ public sealed class TradingBotService(
                 "error.",
                 opts.Symbol, opts.Exchange, openCount);
 
-            await SafeRecordAsync(
-                configRepo.RecordVerdictAsync(
-                    "NO_PRICE",
-                    $"No price available for {opts.Symbol} from {opts.Exchange}. The cycle was " +
-                    $"skipped, so nothing was evaluated and {openCount} open position(s) went " +
-                    "unmanaged this pass; the exchange OCO is what is protecting them.",
-                    0.0, 0, 0, ct),
-                "no-price verdict");
+            // Written against EVERY active strategy, not once. A missing price skips the
+            // whole cycle, so no strategy evaluated — and leaving the others showing the
+            // verdict they happened to record before the outage is the stale-surface
+            // problem the verdict table exists to remove.
+            foreach (var strat in opts.ActiveStrategies)
+                await SafeRecordAsync(
+                    configRepo.RecordVerdictAsync(
+                        strat, opts.Symbol,
+                        "NO_PRICE",
+                        $"No price available for {opts.Symbol} from {opts.Exchange}. The cycle " +
+                        $"was skipped, so nothing was evaluated and {openCount} open position(s) " +
+                        "went unmanaged this pass; the exchange OCO is what is protecting them.",
+                        0.0, 0, 0, ct),
+                    "no-price verdict");
 
             return;
         }
@@ -841,6 +882,7 @@ public sealed class TradingBotService(
                     // failed write must not stop an entry, hence SafeRecordAsync.
                     await SafeRecordAsync(
                         configRepo.RecordVerdictAsync(
+                            strat, opts.Symbol,
                             decision.Flow?.AbstainCode is { Length: > 0 } code
                                 ? code
                                 : decision.Pass ? "ACTIONABLE" : "NO_FLOW_VERDICT",
