@@ -12,6 +12,22 @@ public interface ITradingStrategy
     /// <summary>Strategy identifier matching BotOptions.ActiveStrategies values.</summary>
     string Name { get; }
 
+    /// <summary>
+    /// The rule this instance will actually apply, in one sentence, with its live
+    /// thresholds substituted in. Logged once at startup.
+    ///
+    /// On the interface rather than in Program.cs, which is where it used to live as a
+    /// switch over EntryMode — and that switch had no FlowRatio arm, so it fell to its
+    /// catch-all and announced the ZScore rule while FlowRatio traded. The banner exists
+    /// precisely to catch a configured mode differing from the running one, and it was
+    /// producing that confusion instead of catching it. Third time this codebase has been
+    /// bitten by a switch whose default silently absorbs a new case.
+    ///
+    /// Keeping it next to the code it describes is what makes it maintainable: a new
+    /// entry mode cannot be added without the compiler pointing at this method.
+    /// </summary>
+    string DescribeRule();
+
     /// <summary>Evaluate whether to open a new position.</summary>
     Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct);
 

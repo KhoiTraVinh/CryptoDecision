@@ -242,36 +242,28 @@ startupLog.LogWarning(
     "there that is missing here logs \"Unknown strategy\" every cycle and trades nothing.",
     registered.Count, string.Join(", ", registered.Select(s => s.Name)));
 
-var flowOpts = host.Services.GetRequiredService<FlowStrategyOptions>();
-
-startupLog.LogWarning(
-    "[Startup] {Name} entry rule is {Mode}. {Detail}",
-    flowOpts.Name,
-    flowOpts.Signal.EntryMode,
-    flowOpts.Signal.EntryMode switch
-    {
-        FlowEntryMode.CandleReversal =>
-            $"LONG when price has fallen at least {flowOpts.Signal.ReversalDropPct:F2}% over " +
-            $"{flowOpts.Signal.ReversalBars} closed 15m bar(s)" +
-            $"{(flowOpts.Signal.ReversalLongOnly ? ", long only" : ", both sides")}. " +
-            "PRICE ONLY — no order flow is read in this mode, so every flow threshold " +
-            "(EnterZ, MinAbsOfi, VenueAgreementZ, SufficientVenue) is inert and " +
-            "signal_outcomes will record AggregateZ = 0 meaning 'not measured'.",
-
-        FlowEntryMode.OfiMagnitude =>
-            $"|OFI| >= {flowOpts.Signal.MinAbsOfi:F2} over {flowOpts.Signal.MagnitudeBars} closed " +
-            $"bucket(s), direction from its sign. EnterZ, VenueAgreementZ, MinAgreeingVenues and " +
-            $"SufficientVenue are NOT read in this mode.",
-        _ =>
-            $"|aggregate z| >= {flowOpts.Signal.EnterZ:F2} over {flowOpts.Signal.SignalBars} " +
-            $"bucket(s), plus {flowOpts.Signal.MinAgreeingVenues} venues at " +
-            $"z >= {flowOpts.Signal.VenueAgreementZ:F2} or {flowOpts.Signal.SufficientVenue} alone.",
-    });
+// Each registered strategy states its own rule, with its own live thresholds.
+//
+// This was a switch over EntryMode here in Program.cs, and it had no FlowRatio arm -- so
+// it fell to its catch-all and announced the ZScore rule at Warning level while FlowRatio
+// traded. A banner written to catch "configured mode differs from running mode" was
+// producing exactly that confusion. The description now lives on the strategy, next to the
+// scorer it describes, so a new mode cannot be added without the compiler asking about it.
+foreach (var s in registered)
+    startupLog.LogWarning("[Startup] {Name}: {Rule}", s.Name, s.DescribeRule());
 
 // The pullback wait and a fast-entry rule work against each other: the magnitude
 // rule exists to cut the lag to one bucket, and then the pullback adds an open-ended
 // wait for a price that may never come. Six of eight waits expired unfilled on
 // 2026-09-06 and cost that day's signals.
+//
+// Only the XVENUE_FLOW options are checked here. That is not an oversight but it is a
+// limit: the dip instance binds its own section and could in principle be configured
+// into the same conflict without this noticing. It is left narrow because the warning
+// is about one specific interaction rather than about any strategy, and widening it
+// would mean resolving every instance's options, which the DI shape does not offer.
+var flowOpts = host.Services.GetRequiredService<FlowStrategyOptions>();
+
 if (flowOpts.Signal.EntryMode == FlowEntryMode.OfiMagnitude && flowOpts.EntryPullbackAtr > 0)
     startupLog.LogWarning(
         "[Startup] EntryPullbackAtr is {Pullback:F2} while the entry rule is OfiMagnitude. " +

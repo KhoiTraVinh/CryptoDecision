@@ -76,6 +76,48 @@ public sealed class CrossVenueFlowStrategy(
     /// </summary>
     public string Name => tuning.Name;
 
+    /// <inheritdoc />
+    public string DescribeRule() => tuning.Signal.EntryMode switch
+    {
+        FlowEntryMode.FlowRatio =>
+            $"the last closed 15m bucket, settled {tuning.Signal.RatioSettleMinutes} min, must " +
+            $"trade >= ${tuning.Signal.RatioMinVolumeUsd / 1_000_000m:F1}M with one side >= " +
+            $"{tuning.Signal.RatioMinimum:F2}x the other -> enter WITH that side" +
+            (tuning.Signal.RatioHighVolumeUsd > 0m
+                ? $"; OR >= ${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY ratio, " +
+                  "which waives the ratio test entirely (H11)"
+                : "") +
+            ". PRICE IS NOT READ, so every price and z threshold is inert.",
+
+        FlowEntryMode.CandleReversal =>
+            $"LONG when price has fallen at least {tuning.Signal.ReversalDropPct:F2}% over " +
+            $"{tuning.Signal.ReversalBars} closed 15m bar(s)" +
+            (tuning.Signal.ReversalLongOnly
+                ? ", long only"
+                : $"; SHORT when it has risen {tuning.Signal.ReversalRisePct:F2}% over " +
+                  $"{tuning.Signal.ReversalBarsShort} bar(s)") +
+            ". PRICE ONLY — no order flow is read, so every flow threshold (EnterZ, " +
+            "MinAbsOfi, VenueAgreementZ, SufficientVenue) is inert and signal_outcomes " +
+            "records AggregateZ = 0 meaning 'not measured'.",
+
+        FlowEntryMode.OfiMagnitude =>
+            $"|OFI| >= {tuning.Signal.MinAbsOfi:F2} over {tuning.Signal.MagnitudeBars} closed " +
+            $"bucket(s), direction from its sign. EnterZ, VenueAgreementZ, MinAgreeingVenues " +
+            "and SufficientVenue are NOT read in this mode.",
+
+        FlowEntryMode.ZScore =>
+            $"|aggregate z| >= {tuning.Signal.EnterZ:F2} over {tuning.Signal.SignalBars} " +
+            $"bucket(s), plus {tuning.Signal.MinAgreeingVenues} venues at " +
+            $"z >= {tuning.Signal.VenueAgreementZ:F2} or {tuning.Signal.SufficientVenue} alone.",
+
+        // No catch-all that describes a real rule. An unrecognised mode says so, rather
+        // than borrowing the nearest description -- which is the defect this method was
+        // extracted to fix.
+        _ => $"UNRECOGNISED EntryMode '{tuning.Signal.EntryMode}'. The scorer will fall " +
+             "through to its own default and this bot is not running the rule you " +
+             "configured. Fix the config; do not trust anything below this line.",
+    };
+
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
     {
         var opts = ctx.Options;
