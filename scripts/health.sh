@@ -243,6 +243,24 @@ else
         printf '        %s\n' "$vdetail"
     fi
 
+    # Staleness is measured against the FRESHEST per-strategy verdict, not against
+    # bot_config.last_verdict_at.
+    #
+    # That column stopped being written when strategy_verdicts took over, so it freezes
+    # at whatever the last single-strategy build left and its age grows without bound --
+    # which made this check FAIL on a perfectly healthy bot within six minutes of the
+    # deploy that fixed the thing it was checking. A monitor reading a field nobody
+    # writes any more is the same defect as a monitor reporting a retired rule, and this
+    # session has now produced both.
+    #
+    # The freshest row is the right reference: every active strategy is written in the
+    # same cycle, so if ANY of them is current then the loop is reaching the strategies.
+    # A single strategy lagging is a different fault and shows up as its own row above.
+    if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" = "t" ]; then
+        fresh=$($PSQL -c "SELECT COALESCE(MIN(EXTRACT(EPOCH FROM now()-updated_at))::INT, 99999) FROM strategy_verdicts")
+        vage=${fresh:-$vage}
+    fi
+
     # A stale verdict is only a fault when the strategy SHOULD be evaluating.
     # With a position open and max_open_trades_per_strategy reached, the loop
     # skips the strategy entirely by design, so no verdict is produced and this
