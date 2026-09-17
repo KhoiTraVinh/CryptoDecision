@@ -945,6 +945,26 @@ public sealed class FlowStrategyOptions
     /// The operator's choice, argued from slot turnover: a shorter hold frees the one
     /// per-side slot sooner. The mechanism is real and was missing from earlier
     /// measurements here; the magnitude was then measured and does not pay.
+    ///
+    /// WIDENED TO 20 FOR XVENUE_FLOW ON 2026-09-17, in appsettings. The default here stays
+    /// at 10 so the change lives in one configuration section and DipStrategy keeps the
+    /// value it was running under.
+    ///
+    /// Why, from production: of the first nine RATIO trades, EIGHT closed on this exit and
+    /// one on the stop. Mean hold 3.83h, longest 7.94h — not one reached the 12-hour cap.
+    /// The rule measures +0.382R on a 12-hour hold against +0.120R at 2.5 hours, so it has
+    /// been running nearer the low end of its own curve, and max_hold_minutes has never
+    /// had the chance to apply. Widening the window is the narrowest lever on that: the
+    /// entry, the barriers and the cap are all untouched.
+    ///
+    /// NOT MEASURED. 20 was never swept — the 8/10/12-bar plateau under H10 does not reach
+    /// it, and neighbouring values there disagreed by more than the effect claimed. A wider
+    /// window also holds losers longer, not only winners; that the first effect dominates
+    /// is the claim under test, not an established fact. Registered as H14 with a decision
+    /// rule fixed in advance.
+    ///
+    /// It costs H9 its sample: the nine RATIO trades already closed exited under a
+    /// different rule and cannot be pooled with what follows.
     /// </summary>
     public int FlowOfiBars { get; set; } = 10;
 }

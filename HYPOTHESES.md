@@ -1354,3 +1354,93 @@ were all opened on the assumption that FlowRatio produces the stream.
 ### Result
 
 _Open._
+
+---
+
+## H14 — Widen the OFI exit window from 10 buckets to 20
+
+### The change
+
+`FlowStrategy:FlowOfiBars` 10 → 20, for XVENUE_FLOW only. `DipStrategy` stays at 10.
+Nothing else moves: entry rule, thresholds, stop floor, target multiple and
+`max_hold_minutes` are all unchanged.
+
+### Why, from production rather than from a sweep
+
+Nine RATIO trades have closed since FlowRatio shipped on 2026-09-11:
+
+    n   wins   pnl_usd   total_R   mean_R    mean_hold   max_hold
+    9      0   -0.6500    -4.333   -0.481       3.83h      7.94h
+
+    close_reason    n   avg_hrs      pnl
+    OFI_REVERSAL    8     4.19    -0.4824
+    SL              1     0.90    -0.1676
+
+**Eight of nine closed on this exit, and not one reached the 12-hour cap.** The measured
+hold curve for this rule is +0.032 / +0.082 / +0.273 / +0.346 / +0.379 / +0.330 at 1, 2,
+4, 6, 12 and 24 hours, and the head-to-head table under H11 puts it at +0.120R on a
+2.5-hour hold against +0.382R at 12 hours.
+
+So the rule has been running nearer the low end of its own curve than the high one, and
+`max_hold_minutes = 720` — kept at 720 in the H11 addendum specifically to protect the
++0.382R cell — has never once been reached, because this exit fires first. Widening the
+window is the narrowest available lever on that: it does not touch the entry, the
+barriers or the cap.
+
+The mean is also stable rather than drifting: -0.486R at six trades, -0.481R at nine. The
+result being corrected is consistent, not a swing.
+
+### What is NOT claimed
+
+20 was not swept and is not a measured value. The 8/10/12-bar plateau recorded under H10
+does not reach it, and the neighbouring values there disagreed by more than the effect
+being claimed. This is a change made on a mechanism and on nine observations, which is
+what this file exists to make falsifiable rather than to prevent.
+
+It is also not obviously safe in the direction it is being moved. A longer window makes
+the exit slower in both directions: it will hold winners longer and losers longer. The
+hold curve says the first effect should dominate for this rule; that is the claim under
+test.
+
+And the entry may be the real problem rather than the exit. `signal_outcomes` grades the
+ENTRY against a fixed 2%/4% pair over 12 hours, independent of the deployed exit, and
+XVENUE_FLOW scores 14 LOSS / 8 TIMEOUT / 1 WIN there — mean about -0.45R. If that holds,
+no exit window rescues it. This hypothesis tests the exit; it does not defend the entry.
+
+### What this costs H9
+
+**H9's sample breaks here.** The nine RATIO trades already closed were exited under a
+different rule and cannot be pooled with what follows. H9's 30-trade / 21-day clock
+should be read from 2026-09-17, not from 2026-09-11, and the nine trades above belong to
+a configuration that no longer runs.
+
+That is the price of this change and it is the main argument against having made it: H9
+was six days into a twenty-one day window with a decision rule already written down.
+
+### Decision rule, fixed in advance
+
+Evaluate when **20 RATIO trades have closed under this setting**, or after **21 days**
+from 2026-09-17, whichever comes first. Trades are identifiable by
+`entry_path = 'RATIO'` and `opened_at >= 2026-09-17`.
+
+- **Keep 20** only if mean R over those trades is positive AND positive after discarding
+  the single largest winner AND mean hold is materially above the 3.83h it replaces. All
+  three: a positive mean arriving with an unchanged hold would mean the window did
+  nothing and the result is noise.
+- **Revert to 10** if mean R is negative, or if the hold does not move.
+- **Do not try 15, 25 or 30 in response to a negative result.** One value has been tried
+  without evidence; a second would be a sweep conducted one deploy at a time, which is
+  the slowest and least honest form of the overfitting this repository has already paid
+  for. If 20 fails, the question is whether the OFI exit belongs at all — H10 already
+  carries that, and its own answer was "remove it".
+- **DipStrategy stays at 10 throughout**, so the comparison is available at the end: two
+  strategies, one market, two exit windows.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is six days of H9 evidence, and a second
+live change on a stream that already carries four open hypotheses.
+
+### Result
+
+_Open._
