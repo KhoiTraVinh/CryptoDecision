@@ -36,11 +36,9 @@ public sealed class OkxKafkaBatchPublisherWorker(
 {
     protected override string ExchangeName => "OKX";
 
+    // Two named arms used to sit above this and each produced the identical string the
+    // fallback produces. The service only ever subscribes to what MarketSubscription:Pairs
+    // names, so neither was reachable either.
     protected override string GetTopic(string symbol) =>
-        symbol.ToUpperInvariant() switch
-        {
-            "BTCUSDT" => "okx.trade.btcusdt",
-            "ETHUSDT" => "okx.trade.ethusdt",
-            _         => $"okx.trade.{symbol.ToLowerInvariant()}"
-        };
+        $"okx.trade.{symbol.ToLowerInvariant()}";
 }

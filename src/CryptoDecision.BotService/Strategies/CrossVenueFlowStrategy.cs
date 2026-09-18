@@ -100,22 +100,13 @@ public sealed class CrossVenueFlowStrategy(
             "MinAbsOfi, VenueAgreementZ, SufficientVenue) is inert and signal_outcomes " +
             "records AggregateZ = 0 meaning 'not measured'.",
 
-        FlowEntryMode.OfiMagnitude =>
-            $"|OFI| >= {tuning.Signal.MinAbsOfi:F2} over {tuning.Signal.MagnitudeBars} closed " +
-            $"bucket(s), direction from its sign. EnterZ, VenueAgreementZ, MinAgreeingVenues " +
-            "and SufficientVenue are NOT read in this mode.",
-
-        FlowEntryMode.ZScore =>
-            $"|aggregate z| >= {tuning.Signal.EnterZ:F2} over {tuning.Signal.SignalBars} " +
-            $"bucket(s), plus {tuning.Signal.MinAgreeingVenues} venues at " +
-            $"z >= {tuning.Signal.VenueAgreementZ:F2} or {tuning.Signal.SufficientVenue} alone.",
-
         // No catch-all that describes a real rule. An unrecognised mode says so, rather
         // than borrowing the nearest description -- which is the defect this method was
-        // extracted to fix.
-        _ => $"UNRECOGNISED EntryMode '{tuning.Signal.EntryMode}'. The scorer will fall " +
-             "through to its own default and this bot is not running the rule you " +
-             "configured. Fix the config; do not trust anything below this line.",
+        // extracted to fix. Two arms for ZScore and OfiMagnitude sat here until those
+        // modes were removed on 2026-09-18.
+        _ => $"UNRECOGNISED EntryMode '{tuning.Signal.EntryMode}'. Only FlowRatio and " +
+             "CandleReversal have scorers in this build, and the evaluator will refuse " +
+             "rather than score. Fix the config; do not trust anything below this line.",
     };
 
     /// <summary>
@@ -207,8 +198,7 @@ public sealed class CrossVenueFlowStrategy(
 
         try
         {
-            var needed = tuning.Signal.MinimumBars + tuning.Signal.SignalBars;
-            var set    = await flowRepo.GetRecentAsync(opts.Symbol, needed, ct);
+            var set = await flowRepo.GetRecentAsync(opts.Symbol, tuning.Signal.MinimumBars, ct);
 
             if (set.VenueCount == 0)
                 return Refuse("NO_FLOW_BARS",
@@ -250,7 +240,15 @@ public sealed class CrossVenueFlowStrategy(
                 FlowEntryMode.FlowRatio =>
                     CrossVenueFlowScorer.ScoreFlowRatio(set.ByVenue, DateTime.UtcNow, tuning.Signal),
 
-                _ => CrossVenueFlowScorer.Score(set.ByVenue, tuning.Signal),
+                // No catch-all that scores something. ZScore and OfiMagnitude were removed
+                // on 2026-09-18 and this arm used to send anything unrecognised to the
+                // z-rule — which is the exact defect that got the backtester deleted, a
+                // caller silently scored on a rule it did not ask for.
+                _ => FlowVerdict.Abstain(
+                    "UNRECOGNISED_ENTRY_MODE",
+                    $"EntryMode '{tuning.Signal.EntryMode}' has no scorer in this build. " +
+                    "FlowRatio and CandleReversal are the only rules that exist; fix the " +
+                    "config rather than trusting anything downstream of this."),
             };
 
             if (!verdict.Actionable)
@@ -406,11 +404,23 @@ public sealed class CrossVenueFlowStrategy(
                     $"{geometry.RewardRisk:F2}:1 after fees, under the {tuning.MinRewardRisk:F2}:1 " +
                     $"minimum (ATR {volatility.AtrPct:F2}%).");
 
-            // Confidence drives position sizing when AI sizing is on. Derived from how
-            // unusual the reading is, capped so an extreme z cannot size past the
-            // limit — an outlier is a reason for a normal position, not a bigger one.
-            var confidence = (decimal)Math.Clamp(
-                Math.Abs(verdict.AggregateZ) / (tuning.Signal.EnterZ * 2.0), 0.0, 1.0);
+            // ── Confidence: there isn't one ───────────────────────────────────
+            //
+            // This was |AggregateZ| / (EnterZ * 2). Neither surviving rule computes an
+            // aggregate z — FlowRatio reads one bucket's ratio, CandleReversal reads price
+            // — so AggregateZ has been structurally 0 since 2026-09-11 and the expression
+            // has evaluated to 0 on every entry since. Removing EnterZ only made that
+            // visible; it did not change a number.
+            //
+            // Zero is also the SAFE value rather than merely the honest one. PositionSizer
+            // applies confidence scaling only when `useAiSizing && confidence > 0`, so 0
+            // leaves the scalar at 1.0 and sizing stays purely risk-based. Substituting
+            // 1.0 to look neutral would silently multiply every order by 1.5 the moment
+            // use_ai_sizing was switched on.
+            //
+            // If a rule ever produces a real confidence measure, it belongs on FlowVerdict
+            // where the rule that knows it can set it.
+            const decimal confidence = 0m;
 
             log.LogInformation(
                 "[XFlow] {Symbol} {Side} — z={Z:F2}, {Agree}/{Part} venues, dispersion {Disp:F1}bps, " +

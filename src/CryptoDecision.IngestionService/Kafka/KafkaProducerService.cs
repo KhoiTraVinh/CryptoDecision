@@ -141,15 +141,11 @@ public sealed class KafkaProducerSettings
     public const string Section = "Kafka";
     public string BootstrapServers { get; set; } = "localhost:9092";
 
-    public Topics Topics { get; set; } = new();
-}
-
-public sealed class Topics
-{
-    public string TradeBtcUsdt    { get; set; } = "binance.trade.btcusdt";
-    public string TradeEthUsdt    { get; set; } = "binance.trade.ethusdt";
-    public string Kline1mBtcUsdt  { get; set; } = "binance.kline.1m.btcusdt";
-    public string Kline1mEthUsdt  { get; set; } = "binance.kline.1m.ethusdt";
+    // A `Topics` block with four named BTCUSDT/ETHUSDT topics used to live here. Every
+    // publisher now derives its topic as `<exchange>.trade.<symbol>` / `.kline.1m.`,
+    // which is exactly what those four settings contained, and the symbols they named
+    // are not ones this service subscribes to. Removed rather than left configurable:
+    // a setting that can only reproduce the default is a way to break the default.
 }
 
 public sealed class BatchSettings

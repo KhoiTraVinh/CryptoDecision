@@ -2,7 +2,6 @@ using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.Models;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Workers;
 
@@ -14,13 +13,11 @@ namespace CryptoDecision.IngestionService.Workers;
 public sealed class KlinePublisherWorker(
     KlineChannel channel,
     KafkaProducerService producer,
-    IOptions<KafkaProducerSettings> kafkaSettings,
     ILogger<KlinePublisherWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("KlinePublisherWorker starting");
-        var topics = kafkaSettings.Value.Topics;
 
         await foreach (var kline in channel.Reader.ReadAllAsync(stoppingToken))
         {
@@ -34,12 +31,11 @@ public sealed class KlinePublisherWorker(
                 BatchTimestamp: DateTimeOffset.UtcNow,
                 Kline:          kline);
 
-            var topic = kline.Symbol.ToUpperInvariant() switch
-            {
-                "BTCUSDT" => topics.Kline1mBtcUsdt,
-                "ETHUSDT" => topics.Kline1mEthUsdt,
-                _         => $"binance.kline.1m.{kline.Symbol.ToLowerInvariant()}"
-            };
+            // Derived, not looked up. This was a switch with named BTCUSDT and ETHUSDT
+            // arms read from a `Topics` settings block; both produced exactly the string
+            // this expression produces, and neither was reachable — the service only
+            // subscribes to what MarketSubscription:Pairs names, which is SOL-USDT.
+            var topic = $"binance.kline.1m.{kline.Symbol.ToLowerInvariant()}";
 
             await producer.PublishAsync(topic, key: kline.Symbol, batch, stoppingToken);
 

@@ -35,11 +35,7 @@ public sealed class BybitKafkaBatchPublisherWorker(
 {
     protected override string ExchangeName => "BYBIT";
 
+    // Same two unreachable arms as the other two workers, removed for the same reason.
     protected override string GetTopic(string symbol) =>
-        symbol.ToUpperInvariant() switch
-        {
-            "BTCUSDT" => "bybit.trade.btcusdt",
-            "ETHUSDT" => "bybit.trade.ethusdt",
-            _         => $"bybit.trade.{symbol.ToLowerInvariant()}"
-        };
+        $"bybit.trade.{symbol.ToLowerInvariant()}";
 }

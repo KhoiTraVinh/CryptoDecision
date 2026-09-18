@@ -252,25 +252,11 @@ startupLog.LogWarning(
 foreach (var s in registered)
     startupLog.LogWarning("[Startup] {Name}: {Rule}", s.Name, s.DescribeRule());
 
-// The pullback wait and a fast-entry rule work against each other: the magnitude
-// rule exists to cut the lag to one bucket, and then the pullback adds an open-ended
-// wait for a price that may never come. Six of eight waits expired unfilled on
-// 2026-09-06 and cost that day's signals.
-//
-// Only the XVENUE_FLOW options are checked here. That is not an oversight but it is a
-// limit: the dip instance binds its own section and could in principle be configured
-// into the same conflict without this noticing. It is left narrow because the warning
-// is about one specific interaction rather than about any strategy, and widening it
-// would mean resolving every instance's options, which the DI shape does not offer.
-var flowOpts = host.Services.GetRequiredService<FlowStrategyOptions>();
-
-if (flowOpts.Signal.EntryMode == FlowEntryMode.OfiMagnitude && flowOpts.EntryPullbackAtr > 0)
-    startupLog.LogWarning(
-        "[Startup] EntryPullbackAtr is {Pullback:F2} while the entry rule is OfiMagnitude. " +
-        "These fight each other — the rule cuts entry lag to one bucket and the pullback then " +
-        "waits an unbounded time for a retracement. Set FlowStrategy:EntryPullbackAtr to 0 " +
-        "unless the interaction is what is being tested.",
-        flowOpts.EntryPullbackAtr);
+// A startup warning about EntryPullbackAtr fighting the OfiMagnitude rule stood here
+// until 2026-09-18. It warned about an interaction between two things that no longer
+// exist together: OfiMagnitude was removed, and EntryPullbackAtr has been 0 since H4 was
+// set aside. A check whose precondition cannot be met is one more thing to read and
+// nothing to learn from, which is the same class of dead weight as the rules it named.
 
 var liveRefusal = okxOptions.DescribeRefusal();
 

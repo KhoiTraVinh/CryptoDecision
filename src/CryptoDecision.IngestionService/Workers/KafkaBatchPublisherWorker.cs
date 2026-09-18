@@ -18,20 +18,22 @@ public sealed class KafkaBatchPublisherWorker(
     TradeChannel channel,
     KafkaProducerService producer,
     IngestionMetrics metrics,
-    IOptions<KafkaProducerSettings> kafkaSettings,
     IOptions<BatchSettings> batchSettings,
     ILogger<KafkaBatchPublisherWorker> logger)
     : KafkaTradePublisherBase(channel.Reader, producer, metrics, batchSettings, logger)
 {
-    private readonly Topics _topics = kafkaSettings.Value.Topics;
-
     protected override string ExchangeName => "BINANCE";
 
+    /// <summary>
+    /// One rule, no table. This had named overrides for BTCUSDT and ETHUSDT read from a
+    /// `Topics` settings block, and both arms were unreachable: the service subscribes to
+    /// what MarketSubscription:Pairs names, which is SOL-USDT, so every message took the
+    /// fallback. The overrides also produced exactly the string the fallback produces —
+    /// `binance.trade.btcusdt` — so they were a configurable way to get the default.
+    ///
+    /// The two other exchange workers already derived their topic this way, so this also
+    /// removes the last disagreement about how a topic name is formed.
+    /// </summary>
     protected override string GetTopic(string symbol) =>
-        symbol.ToUpperInvariant() switch
-        {
-            "BTCUSDT" => _topics.TradeBtcUsdt,
-            "ETHUSDT" => _topics.TradeEthUsdt,
-            _         => $"binance.trade.{symbol.ToLowerInvariant()}"
-        };
+        $"binance.trade.{symbol.ToLowerInvariant()}";
 }
