@@ -79,6 +79,27 @@ public sealed class CrossVenueFlowStrategy(
     /// <inheritdoc />
     public string DescribeRule() => tuning.Signal.EntryMode switch
     {
+        // The ratio path is switched off by raising its threshold out of reach rather than
+        // by a flag, so the banner has to say so out loud. A reader seeing "99.00x" can
+        // work it out; a reader seeing "the ratio path is DISABLED" cannot miss it, and
+        // the difference matters because a threshold nobody can reach and a threshold
+        // nobody meant to set look identical in a config file.
+        //
+        // 10.0 as the cut-off is not a tuning knob: the highest ratio ever observed on a
+        // qualifying bucket in 28 days of production is 2.53 on average and the sample
+        // maximum is far under 10, so anything at or above it is unreachable by
+        // construction rather than merely strict.
+        FlowEntryMode.FlowRatio when tuning.Signal.RatioMinimum >= 10m =>
+            $"RATIO PATH DISABLED (RatioMinimum {tuning.Signal.RatioMinimum:F2}x is " +
+            "unreachable — no bucket in 28 days came close). " +
+            (tuning.Signal.RatioHighVolumeUsd > 0m
+                ? $"The ONLY way in is the high-volume waiver: a closed 15m bucket, settled " +
+                  $"{tuning.Signal.RatioSettleMinutes} min, trading >= " +
+                  $"${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY ratio -> enter " +
+                  "WITH the heavier side (H11). Expect ~0.9 signals/day."
+                : "and RatioHighVolumeUsd is 0, so THIS STRATEGY CANNOT ENTER AT ALL.") +
+            " PRICE IS NOT READ.",
+
         FlowEntryMode.FlowRatio =>
             $"the last closed 15m bucket, settled {tuning.Signal.RatioSettleMinutes} min, must " +
             $"trade >= ${tuning.Signal.RatioMinVolumeUsd / 1_000_000m:F1}M with one side >= " +

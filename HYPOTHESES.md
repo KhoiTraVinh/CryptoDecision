@@ -1521,3 +1521,99 @@ None in money; `paper_mode` is true. The cost is the third reset of H9's sample.
 ### Result
 
 _Open._
+
+---
+
+## H16 — Turn the ratio path off, keep the high-volume waiver
+
+### The change
+
+`FlowStrategy:Signal:RatioMinimum` 2.1 → 99.0. Nothing else moves. The threshold is out
+of reach by construction — the highest ratio on a qualifying bucket in 28 days averages
+2.53 — so `RATIO_TOO_LOW` is now the verdict for every bucket under $20M, and the only
+way XVENUE_FLOW can enter is the H11 waiver.
+
+The volume floor stays at $3M, which is what makes this work: it sits below the $20M
+waiver threshold, so a large bucket still clears the volume gate before reaching the
+waiver. Lowering RatioHighVolumeUsd below $3M would silently close that door.
+
+### The evidence that motivated it, and the evidence against it
+
+Traded: 12 RATIO trades, 2 winners, **-4.477R** — LONG -2.231R over 9, SHORT -2.247R
+over 3. It is where essentially all of the account's loss came from.
+
+Against, and it is not weak. Reconstructed over all 59 qualifying buckets in 28 days —
+five times the traded sample — signed to the side the rule takes, forward return:
+
+    side    n    +1h      +2h     +4h    +12h   hit12
+    LONG   33  -0.076   -0.010  +0.308  +0.406  45.5%
+    SHORT  26  +0.154   +0.267  +0.221  +0.550  57.7%
+
+Unconditional base rate over 2,454 buckets is +0.249% at 12h, so the alpha is +0.157%
+for LONG and **+0.799%** for SHORT. Both sides beat holding at random; the short side
+beats it by five times as much as the long side does.
+
+Simulated on the deployed geometry (2% stop, 4% target, first touch on 1m bars, 12h cap):
+
+    side   half  n   stops  targets  timeouts  mean_R
+    LONG   1st   12    3       5        4      +0.615
+    LONG   2nd   21    7       1       13      -0.088
+    SHORT  1st   15    3       6        6      +0.759
+    SHORT  2nd   11    3       0        8      -0.095
+
+So the rule worked, then stopped, and the second half is roughly break-even rather than
+catastrophic. The traded -0.248R / -0.749R is worse than the simulated -0.09R because
+of the OFI exit, fees, and a dynamic target the rule was never measured against.
+
+### What was known and not acted on
+
+`use_dynamic_tp_sl` has been TRUE throughout. The real target was 6.667%, not 4.00%, and
+**no trade has exited on TP in nine days**. This rule has therefore never once run the
+configuration H9 measured. It is being retired without that test ever having been done,
+and that is a deliberate operator decision taken with the numbers above in front of them.
+
+Why the market changed, measured rather than assumed:
+
+    half                 SOL          range   1m bar   |12h move| median   reaches 4%
+    1st (08-21→09-03)  91.93→103.94   26.1%  12.41bps       1.577%          15.4%
+    2nd (09-04→09-18)  103.93→110.89  15.9%   8.61bps       1.149%           6.8%
+
+A 4% target needs an event that now happens once in fifteen tries; a 2% stop is 1.74x the
+typical move and stays well within reach. The asymmetry, not the entry, is what turned
++0.6R into -0.09R.
+
+### What this ends
+
+- **H9 (the ratio entry) is terminated without a verdict.** It never ran its own
+  configuration. Do not record it as refuted.
+- **H15 (OFI window 15) loses its population.** Its rule counts RATIO trades and there
+  will be none. It must not be re-scoped onto HIGH_VOLUME trades after the fact; that is
+  changing a decision rule to fit the data available, which is the thing this file exists
+  to prevent. Record it as cut short.
+- **H11 becomes the whole of XVENUE_FLOW.** At ~0.9 qualifying buckets a day it will not
+  reach its 20-trade bar inside its window either, and it now has no competition for the
+  per-strategy slot, which is the one thing that changes in its favour.
+
+### Decision rule, fixed in advance
+
+This is a removal, not an experiment, so the rule governs bringing it BACK rather than
+keeping it.
+
+- **Restore `RatioMinimum` to 2.1 only if** the market's 12-hour move distribution returns
+  to the first half's shape — median |move| above 1.5% and at least 12% of windows
+  reaching 4% — measured over a trailing 14 days. That is the condition the rule's
+  profitable half ran in, and it is checkable in one query.
+- **Do not restore it on a run of good CANDLE_REVERSAL results**, or on a revised ratio
+  or volume threshold. Those are different claims.
+- **If it is restored, turn `use_dynamic_tp_sl` off first**, so the configuration under
+  test is the one that was measured.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is that the strongest alpha found anywhere
+in this project — the short side at +0.799% against base rate — is switched off on twelve
+trades taken under a geometry nobody chose.
+
+### Result
+
+_Open (removal in force)._
