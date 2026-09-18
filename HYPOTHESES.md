@@ -1444,3 +1444,80 @@ live change on a stream that already carries four open hypotheses.
 ### Result
 
 _Open._
+
+---
+
+## H14 — ABANDONED 2026-09-18 after 3 trades, superseded by H15
+
+Widening the OFI window 10 → 20 ran for one day and produced three RATIO trades, which is
+not a sample. The operator judged 20 buckets (5h) too long and asked for 15.
+
+This is the thing H14's own decision rule forbade, in its own words: *"Do not try 15, 25
+or 30 in response to a negative result. One value has been tried without evidence; a
+second would be a sweep conducted one deploy at a time, which is the slowest and least
+honest form of the overfitting this repository has already paid for."*
+
+It is recorded as abandoned rather than edited into H15, because a decision rule that gets
+rewritten when it becomes inconvenient is not a decision rule. The three trades belong to
+a configuration that ran for one day and are not poolable with anything.
+
+### Result
+
+_Abandoned untested._
+
+---
+
+## H15 — The OFI exit window at 15 buckets
+
+### The change
+
+`FlowStrategy:FlowOfiBars` 20 → 15, for XVENUE_FLOW only. `DipStrategy` stays at 10.
+15 buckets is 3h45m.
+
+### What is claimed, and what is not
+
+Nothing is claimed from measurement. 15 WAS in the original H10 sweep and it was the
+second-worst cell in it:
+
+    window    mean R      (no rule: +0.379)
+     8 bars   +0.391
+    10 bars   +0.410
+    12 bars   +0.340
+    15 bars   +0.318   <- this value
+    20 bars   +0.346
+    30 bars   +0.338
+
+That sweep is the one this file already describes as measuring noise — neighbours
+disagreeing by more than the claimed effect — so it is not evidence against 15 either. It
+is simply the case that no measurement supports this number, and the one that exists
+ranks it last but one.
+
+The argument for it is the operator's: 20 buckets held positions longer than they wanted.
+That is a real preference about exposure, and it is not the same kind of claim as an edge.
+
+### The sample cost, now paid twice
+
+H9's clock was reset on 2026-09-17 by H14 and is reset again here. Nine RATIO trades ran
+under 10 buckets, three under 20, and the count starts from zero under 15. Three
+configurations in eight days on a rule whose decision rule asks for thirty trades.
+
+### Decision rule, fixed in advance
+
+Evaluate when **20 RATIO trades have closed under this setting**, or after **21 days**
+from 2026-09-18. Identify them by `entry_path = 'RATIO'` and `opened_at >= 2026-09-18`.
+
+- **Keep 15** if mean R is positive AND positive after discarding the single largest
+  winner AND mean hold is above the 3.83h measured under 10 buckets.
+- **Revert to 10** otherwise — to 10, the shipped default, not to 20 and not to 12.
+- **This is the last window value to be tried.** If 15 fails, the question is whether the
+  OFI exit belongs at all. H10 already answered that with "remove it", and the answer was
+  overridden twice.
+- **DipStrategy stays at 10 throughout.**
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is the third reset of H9's sample.
+
+### Result
+
+_Open._

@@ -118,8 +118,35 @@ public sealed class CrossVenueFlowStrategy(
              "configured. Fix the config; do not trust anything below this line.",
     };
 
+    /// <summary>
+    /// Where the target really sits once <c>use_dynamic_tp_sl</c> is on.
+    ///
+    /// The widening scales the barrier by <c>1 + 10 x excursion</c>, capped at 2, and the
+    /// excursion is the trade's own peak — so the target RETREATS as price advances. Price
+    /// and barrier meet where
+    ///
+    ///     x = t (1 + 10x)   =>   x = t / (1 - 10t)
+    ///
+    /// which turns a stored 4.00% target into 6.667%. Past t = 5% the scale clamps at 2
+    /// before they converge, and the effective target is simply 2t.
+    ///
+    /// This is not a refinement. Until 2026-09-18 the startup risk line quoted the stored
+    /// 4.00% and a 35.0% breakeven win rate, and NO TRADE HAD EXITED ON TP IN NINE DAYS —
+    /// the level being reported was one nothing was measured against.
+    /// </summary>
+    internal static decimal EffectiveTargetPct(decimal storedTargetPct, bool dynamicOn)
+    {
+        if (!dynamicOn || storedTargetPct <= 0m) return storedTargetPct;
+
+        // Below 5% the two converge before the scale caps; at or above it the cap binds
+        // first. The two branches agree exactly at t = 5%, so this is continuous.
+        return storedTargetPct < 0.05m
+            ? storedTargetPct / (1m - 10m * storedTargetPct)
+            : storedTargetPct * 2m;
+    }
+
     /// <inheritdoc />
-    public StrategyRiskProfile? DescribeRisk()
+    public StrategyRiskProfile? DescribeRisk(BotOptions opts)
     {
         // The narrowest stop this configuration can place. Both floors, exactly as
         // VolatilityStops applies them — reproduced rather than shared because the live
@@ -131,12 +158,29 @@ public sealed class CrossVenueFlowStrategy(
         if (tuning.MaxStopPct is { } cap && cap > 0m && stopPct > cap) stopPct = cap;
         if (stopPct <= 0m) return null;
 
+        // The stop is reported at its STORED width even when the dynamic widening is on.
+        // That half is genuinely path-dependent — it only widens once the trade is in
+        // profit, and the measured scale at the moment of an actual stop-out averaged
+        // 1.04 — so the stored width is the honest summary and the overrun is named in
+        // the basis rather than guessed at.
+        var dyn = opts.UseDynamicTpSl;
+
         if (!tuning.UseRangeGeometry)
+        {
+            var stored    = stopPct * (decimal)tuning.TargetRiskMultiple;
+            var effective = EffectiveTargetPct(stored, dyn);
+
             return new StrategyRiskProfile(
-                Name, stopPct, stopPct * (decimal)tuning.TargetRiskMultiple,
+                Name, stopPct, effective,
                 $"ATR geometry: stop floored at {stopPct:P2} (fee floor {feeFloor:P2}, noise " +
                 $"floor {tuning.MinStopPct ?? 0m:P2}), target {tuning.TargetRiskMultiple:F2}x " +
-                "the stop. A larger ATR widens both together, so the ratio holds.");
+                "the stop. A larger ATR widens both together, so the ratio holds." +
+                (dyn
+                    ? $" use_dynamic_tp_sl is ON, so the {stored:P2} target RETREATS as price " +
+                      $"advances and is only reachable at {effective:P2}; the stop may widen to " +
+                      "2x the same way, measured at 1.04x when stops actually fired."
+                    : ""));
+        }
 
         // Under range geometry the target is wherever the boundary falls and is not a
         // configured number at all. The one thing that IS fixed is the worst ratio the
@@ -145,11 +189,16 @@ public sealed class CrossVenueFlowStrategy(
         var minTarget = tuning.MinRewardRisk * (stopPct + tuning.RoundTripFeeRate)
                       + tuning.RoundTripFeeRate;
 
+        var minEffective = EffectiveTargetPct(minTarget, dyn);
+
         return new StrategyRiskProfile(
-            Name, stopPct, minTarget,
+            Name, stopPct, minEffective,
             $"range geometry: stop floored at {stopPct:P2}; the target is the range boundary " +
             $"and varies, so this is the smallest one MinRewardRisk {tuning.MinRewardRisk:F2}:1 " +
-            "will admit. Real entries are usually wider.");
+            "will admit. Real entries are usually wider." +
+            (dyn
+                ? $" use_dynamic_tp_sl is ON, so that floor is only reachable at {minEffective:P2}."
+                : ""));
     }
 
     public async Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct)
@@ -521,6 +570,11 @@ public sealed class CrossVenueFlowStrategy(
         var stopPrice = trade.StopPrice!.Value;
         var tgtPrice  = trade.TargetPrice!.Value;
 
+        // The dynamic levels, when they differ from the stored ones. Reported on the
+        // decision so the caller can persist them for an operator to read; nothing in
+        // this method ever reads them back.
+        decimal? dynamicStop = null, dynamicTarget = null;
+
         // ── Dynamic widening, off by default ──────────────────────────────────
         //
         // Scales both barriers outward as the trade's own favourable excursion grows,
@@ -541,10 +595,29 @@ public sealed class CrossVenueFlowStrategy(
         // from time — which is why the two halves are not equally defensible even
         // though one switch controls both.
         //
-        // Left OFF in bot_config. It was inert before this: it scaled TakeProfitPct
-        // and StopLossPct, which only the no-geometry fallback above ever reads, and
-        // all eight trades on this deployment carry geometry. A switch that reports
-        // success and changes nothing is the third of its kind found in this project.
+        // IT IS ON. `use_dynamic_tp_sl` is TRUE in bot_config and has been throughout, and
+        // this comment said "Left OFF" until 2026-09-18 — which is how the following went
+        // unnoticed for nine days: NOT ONE TRADE HAS EXITED ON TP since the 2.00% stop
+        // floor shipped. 28 closed on the OFI reversal, 5 on the stop, 2 on the timeout,
+        // 0 on target. Trade 93 was the first whose price genuinely cleared its stored
+        // target (peak 106.12 against a 105.06 target) and it still did not fire, because
+        // the level it was actually compared against was 107.75.
+        //
+        // WHERE THE TARGET REALLY SITS. The barrier retreats as price advances, so the two
+        // only meet where x = t(1 + 10x), i.e. x = t / (1 - 10t): a stored 4.00% target is
+        // a 6.667% one in practice, and the stored number is not the number that trades.
+        // Above t = 5% the scale clamps at 2 first and the effective target is simply 2t.
+        // DescribeRisk reports this, so the startup risk line stops quoting a level
+        // nothing is measured against.
+        //
+        // The levels are still RECOMPUTED FROM THE STORED ONES every cycle and never
+        // written back to `target_price`. That is not an oversight and must not be
+        // "fixed": `tgtDist = |tgtPrice - entry| * scale` reads its own input, so writing
+        // the scaled value into the column it reads compounds it — d·s, d·s², d·s³ once
+        // every 30 seconds. At s≈1.4 the barrier is past +116% within five minutes and the
+        // stop goes with it, which is a position with no stop at all. The observable copy
+        // goes to dedicated columns instead; see DynamicStopPrice / DynamicTargetPrice on
+        // ExitDecision.
         if (opts.UseDynamicTpSl && trade.PeakPrice.HasValue)
         {
             var excursion = isLong
@@ -564,12 +637,21 @@ public sealed class CrossVenueFlowStrategy(
                 stopPrice = isLong ? trade.EntryPrice - stopDist : trade.EntryPrice + stopDist;
                 tgtPrice  = isLong ? trade.EntryPrice + tgtDist  : trade.EntryPrice - tgtDist;
 
+                dynamicStop   = stopPrice;
+                dynamicTarget = tgtPrice;
+
+                // Information, not Debug. At Debug this was invisible under the default
+                // minimum level, so a mechanism that moves both barriers on every open
+                // position left no trace anywhere — not in the log, not on the row. The
+                // operator reported it as "price passed TP and nothing happened", which is
+                // exactly what a silent barrier looks like from outside.
                 if (scale > 1.01m)
-                    log.LogDebug(
+                    log.LogInformation(
                         "[XFlow] Trade {Id} dynamic scale {Scale:F2}x on {Exc:P2} excursion: " +
-                        "stop {Stop:F4}, target {Target:F4}. Risk now up to {Risk:F2}x what this " +
-                        "position was sized for.",
-                        trade.Id, scale, excursion, stopPrice, tgtPrice, scale);
+                        "stop {Stop:F4}, target {Target:F4} (stored target was {Stored:F4}). " +
+                        "Risk now up to {Risk:F2}x what this position was sized for.",
+                        trade.Id, scale, excursion, stopPrice, tgtPrice,
+                        trade.TargetPrice!.Value, scale);
             }
         }
 
@@ -577,10 +659,10 @@ public sealed class CrossVenueFlowStrategy(
         // both. Same ordering in both places or the live results cannot be compared
         // with the simulated ones they were validated on.
         var hitStop = isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice;
-        if (hitStop) return Exit("SL", currentPrice, changePct);
+        if (hitStop) return Exit("SL", currentPrice, changePct, dynamicStop, dynamicTarget);
 
         var hitTarget = isLong ? currentPrice >= tgtPrice : currentPrice <= tgtPrice;
-        if (hitTarget) return Exit("TP", currentPrice, changePct);
+        if (hitTarget) return Exit("TP", currentPrice, changePct, dynamicStop, dynamicTarget);
 
         // ── Exit when the aggregate imbalance turns against the position ───────
         //
@@ -638,11 +720,11 @@ public sealed class CrossVenueFlowStrategy(
                     "[XFlow] Trade {Id} {Side} closing on OFI reversal at {Change:P2}: {Why}",
                     trade.Id, trade.Side, changePct, reversal);
 
-                return Exit("OFI_REVERSAL", currentPrice, changePct);
+                return Exit("OFI_REVERSAL", currentPrice, changePct, dynamicStop, dynamicTarget);
             }
         }
 
-        return new ExitDecision(false, null, currentPrice, changePct);
+        return new ExitDecision(false, null, currentPrice, changePct, dynamicStop, dynamicTarget);
     }
 
     /// <summary>
@@ -749,8 +831,10 @@ public sealed class CrossVenueFlowStrategy(
     }
 
 
-    private static ExitDecision Exit(string reason, decimal price, decimal changePct) =>
-        new(true, reason, price, changePct);
+    private static ExitDecision Exit(
+        string reason, decimal price, decimal changePct,
+        decimal? dynamicStop = null, decimal? dynamicTarget = null) =>
+        new(true, reason, price, changePct, dynamicStop, dynamicTarget);
 }
 
 /// <summary>
@@ -946,7 +1030,7 @@ public sealed class FlowStrategyOptions
     /// per-side slot sooner. The mechanism is real and was missing from earlier
     /// measurements here; the magnitude was then measured and does not pay.
     ///
-    /// WIDENED TO 20 FOR XVENUE_FLOW ON 2026-09-17, in appsettings. The default here stays
+    /// SET TO 15 FOR XVENUE_FLOW ON 2026-09-18, in appsettings. The default here stays
     /// at 10 so the change lives in one configuration section and DipStrategy keeps the
     /// value it was running under.
     ///

@@ -51,7 +51,7 @@ public interface ITradingStrategy
     /// target widens with it, so the reward:risk this reports is the one that holds. It
     /// is a statement about the configuration, not a forecast of any one trade.
     /// </summary>
-    StrategyRiskProfile? DescribeRisk();
+    StrategyRiskProfile? DescribeRisk(BotOptions opts);
 
     /// <summary>Evaluate whether to open a new position.</summary>
     Task<EntryDecision> EvaluateEntryAsync(StrategyContext ctx, CancellationToken ct);

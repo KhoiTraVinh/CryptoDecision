@@ -44,8 +44,8 @@ public sealed class StrategyEvaluator
     /// or expresses none. Used by the startup risk gate so it judges the stop and target
     /// that actually run rather than bot_config's fallback percentages.
     /// </summary>
-    public StrategyRiskProfile? DescribeRisk(string strategy) =>
-        _strategies.TryGetValue(strategy, out var impl) ? impl.DescribeRisk() : null;
+    public StrategyRiskProfile? DescribeRisk(string strategy, BotOptions opts) =>
+        _strategies.TryGetValue(strategy, out var impl) ? impl.DescribeRisk(opts) : null;
 
     // ── Live price from the execution venue ───────────────────────────────────
 
@@ -204,4 +204,24 @@ public sealed class StrategyEvaluator
     }
 }
 
-public sealed record ExitDecision(bool ShouldExit, string? Reason, decimal CurrentPrice, decimal ChangePct);
+/// <param name="DynamicStopPrice">
+/// The stop the dynamic widening is currently applying, when it differs from the stored
+/// one. Null when the feature is off or has not moved anything.
+///
+/// Carried so the caller can PERSIST it for an operator to read. It exists because the
+/// mechanism was otherwise completely invisible: the levels are recomputed each cycle and
+/// never written back, and the log line announcing them sat at Debug under an Information
+/// minimum. The visible consequence was a trade whose price cleared its stored target and
+/// did not close, with nothing anywhere explaining why.
+///
+/// It must never be read back into the widening arithmetic — see the comment on the
+/// dynamic block in CrossVenueFlowStrategy for what compounding it would do.
+/// </param>
+/// <param name="DynamicTargetPrice">The target under the same rule, same caveats.</param>
+public sealed record ExitDecision(
+    bool     ShouldExit,
+    string?  Reason,
+    decimal  CurrentPrice,
+    decimal  ChangePct,
+    decimal? DynamicStopPrice   = null,
+    decimal? DynamicTargetPrice = null);

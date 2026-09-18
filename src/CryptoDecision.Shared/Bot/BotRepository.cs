@@ -267,6 +267,33 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Record where the dynamic widening currently has the barriers.
+    ///
+    /// Write-only by design. Nothing reads these back — the widening is recomputed each
+    /// cycle from <c>stop_price</c> / <c>target_price</c>, and feeding a scaled value into
+    /// the column that arithmetic reads would compound it every 30 seconds. See sql/035.
+    ///
+    /// Null clears them, which is the correct state when the feature is off or the trade
+    /// has no favourable excursion: "not applicable" rather than "unchanged".
+    /// </summary>
+    public async Task UpdateDynamicLevelsAsync(
+        long tradeId, decimal? stopPrice, decimal? targetPrice, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE bot_trades
+               SET dynamic_stop_price = @stop, dynamic_target_price = @target
+             WHERE id = @id
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("stop",   NpgsqlDbType.Numeric, (object?)stopPrice   ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("target", NpgsqlDbType.Numeric, (object?)targetPrice ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id",     tradeId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // ── Query recent trades ───────────────────────────────────────────────────
 
     public async Task<IReadOnlyList<BotTrade>> GetRecentTradesAsync(

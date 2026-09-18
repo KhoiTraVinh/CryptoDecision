@@ -122,6 +122,19 @@ public sealed record BotTrade
     public decimal? AtrPctAtEntry { get; init; }
 
     /// <summary>
+    /// Where the dynamic widening has moved the barriers, or null when it is moving
+    /// nothing. Observational: written for an operator to read, never read back.
+    ///
+    /// <see cref="StopPrice"/> and <see cref="TargetPrice"/> stay the anchor the widening
+    /// is applied to. Feeding these back into it would compound the scale once per cycle
+    /// — see sql/035 and the dynamic block in CrossVenueFlowStrategy.
+    /// </summary>
+    public decimal? DynamicStopPrice   { get; set; }
+
+    /// <inheritdoc cref="DynamicStopPrice"/>
+    public decimal? DynamicTargetPrice { get; set; }
+
+    /// <summary>
     /// How this entry got past the gate: APPROVED, APPROVED_DEGRADED, or NOT_GATED.
     ///
     /// Only ever set on entries that happened. A refused candidate produces no row —

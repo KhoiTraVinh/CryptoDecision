@@ -379,7 +379,7 @@ public sealed class TradingBotService(
 
         foreach (var strat in opts.ActiveStrategies)
         {
-            var geometry = strategy.DescribeRisk(strat);
+            var geometry = strategy.DescribeRisk(strat, opts);
 
             if (geometry is null)
                 log.LogWarning(
@@ -785,6 +785,30 @@ public sealed class TradingBotService(
         foreach (var trade in openTrades)
         {
             var decision = await strategy.EvaluateExitAsync(trade, currentPrice.Value, opts, clockTrusted, ct);
+
+            // ── Where the dynamic widening has the barriers, onto the row ──────
+            //
+            // Written only when it CHANGES, so a position that is not moving costs no
+            // writes. The levels themselves are recomputed from the stored ones every
+            // cycle and are never read back from here — see sql/035 for why feeding them
+            // into their own input would push the barrier past +116% inside five minutes.
+            //
+            // This exists because the mechanism was invisible: recomputed and discarded,
+            // logged at Debug under an Information minimum, with target_price still
+            // showing the anchor. Trade 93 cleared its stored target and did not close,
+            // and there was nothing to look at that would have explained it.
+            if (decision.DynamicStopPrice   != trade.DynamicStopPrice ||
+                decision.DynamicTargetPrice != trade.DynamicTargetPrice)
+            {
+                trade.DynamicStopPrice   = decision.DynamicStopPrice;
+                trade.DynamicTargetPrice = decision.DynamicTargetPrice;
+
+                await SafeRecordAsync(
+                    repo.UpdateDynamicLevelsAsync(
+                        trade.Id, decision.DynamicStopPrice, decision.DynamicTargetPrice, ct),
+                    "dynamic exit levels");
+            }
+
             if (decision.ShouldExit)
             {
                 log.LogInformation("[TradingBot] Closing trade {Id} at ${Price} reason={Reason}",
