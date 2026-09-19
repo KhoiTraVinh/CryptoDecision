@@ -5,9 +5,11 @@
 #
 # Why images and not a build on the instance
 # ------------------------------------------
-# The target is a t4g.large — two Graviton cores. Those two cores are what keeps
-# three WebSocket feeds ingesting, Postgres aggregating and the bot evaluating, and
-# a .NET multi-stage build would take them away for several minutes on every deploy,
+# The target is a 2-vCPU x86_64 instance -- NOT Graviton, whatever this comment used to
+# say; the deploy workflow defaults BUILD_PLATFORM to linux/amd64 and that is what runs.
+# Those two cores are what keeps three WebSocket feeds ingesting, Postgres aggregating and
+# the bot evaluating, and a .NET multi-stage build would take them away for minutes on
+# every deploy,
 # during which the ingestion gap shows up as missing 15-minute buckets. Buckets are
 # the thing the strategy is waiting on, so a deploy that costs data is expensive in
 # a way that is easy to miss.

@@ -5,10 +5,20 @@ exchanges, aggregates them into disjoint 15-minute flow buckets in PostgreSQL, a
 **with** the side that dominated the last closed bucket — when it dominated by enough, on
 enough volume. Exits are a fixed-percentage stop and target plus a flow-reversal rule.
 
-**It is in paper mode and must stay there.** See [Arming](#arming) and
-[Status, honestly](#status-honestly). Two of the three switches that reach real funds are
-already open; `bot_config.paper_mode` is the only one still closed, and the strategy has
-never been shown to survive a trending market.
+**It is in paper mode.** Two of the three switches that reach real funds are already open —
+`Okx__EnableLiveTrading=true` and `Okx__DemoTrading=false`, pointing at **real funds** with
+a $30-per-order ceiling. `bot_config.paper_mode` is the only one still closed. See
+[Arming](#arming) and [Status, honestly](#status-honestly) before opening it: 45 closed
+trades sit at +0.003R with the account net negative, two trades carry the entire result,
+and the strategy has never been observed in a sustained trend.
+
+Paper is sized and filled to match live: `$100 capital × 0.60% risk / 2% stop = $30
+notional = $10 margin at 3x`, filled on the **real top of book** — the entry rests on its
+own side like the live post-only order, the exit crosses like the live OCO — and charged
+maker 2 bps in, taker 5 bps out. **One gap remains and it is not small:** the live
+post-only entry can fail to fill, and measured on 68 recorded signals that drops 29% of
+them — the *better* 29%, at +0.014R against −0.023R. Live will take fewer trades than paper
+and worse ones. Do not read paper P&L as a forecast of live.
 
 ```
 Binance ┐
@@ -16,7 +26,7 @@ Bybit   ├─WebSocket─▶ Ingestion ─Kafka─▶ Processor ─▶ PostgreS
 OKX     ┘                                              │  trades → flow_bars_15m
                                                        │
                                                        ▼
-                                                Bot (1-2 strategies)
+                                                Bot (2 strategies, both live)
                                                  │ scorer → geometry → sizing
                                                  │ optional LLM veto gate
                                                  ▼
@@ -56,8 +66,8 @@ in `CrossVenueFlowScorer`, a pure function over its inputs.
 
 | name | section | rule | live? |
 |---|---|---|---|
-| `XVENUE_FLOW` | `FlowStrategy` | `FlowRatio` — order flow | yes |
-| `CANDLE_REVERSAL` | `DipStrategy` | `CandleReversal` — price | registered, **not** in `active_strategies` |
+| `XVENUE_FLOW` | `FlowStrategy` | `FlowRatio` — order flow | yes, ~2/day |
+| `CANDLE_REVERSAL` | `DipStrategy` | `CandleReversal` — price | yes, ~7.6/day — the MAJORITY of trades |
 
 Which of them trade is `bot_config.active_strategies`, a database edit rather than a
 redeploy. A name there with no registration logs "Unknown strategy" every cycle and trades
@@ -72,6 +82,10 @@ entry paths and `bot_trades.entry_path` records which one fired:
 
     RATIO        notional >= RatioMinVolumeUsd ($3M)
                  AND dominant side >= RatioMinimum x the other (2.1x, = |OFI| 0.355)
+                 SWITCHED OFF as H16 on 2026-09-18 after 12 trades at -4.477R by
+                 raising RatioMinimum to 99.0, and switched back ON as H18 on
+                 2026-09-19 -- by operator override, with H16's own restore
+                 condition measured and NOT met. See H18.
 
     HIGH_VOLUME  notional >= RatioHighVolumeUsd ($20M)
                  -> the ratio test is WAIVED, entry takes whichever side traded more,
@@ -98,32 +112,38 @@ Refusals carry named codes:
 | `NO_CLOSED_BUCKET` | nothing to score yet |
 | `FLOW_BARS_STALE` | newest bucket older than `MaxBarAge` — ingestion has stopped |
 
-### CANDLE_REVERSAL — the dip rule, registered and switched off
+### CANDLE_REVERSAL — the dip rule, and the majority of the trade stream
 
 Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) closed
 15-minute bars; short after it has risen `ReversalRisePct` (1.00%) over
 `ReversalBarsShort` (1). Price only. The two thresholds are deliberately not mirror
 images — the dip pays from 0.60% and the rally does not pay until 1.00%.
 
-**Measured negative in every configuration tried**: −0.039R with ATR geometry, −0.068R
-with the range geometry it historically ran on, and negative in both sample halves and
-after discarding the best trade in all of them. The dip-buying half is the losing half.
-See H13, and the FATAL IN A TREND note — this is the rule that took 0 wins in 26 trades
-across both trending stretches. It is registered so that enabling it is one `UPDATE`, not
-so that it should be enabled.
+**It was measured negative in every pre-launch configuration** — −0.039R with ATR
+geometry, −0.068R with the range geometry, negative in both halves and after discarding
+the best trade in all of them — and was enabled anyway as H13. Live it is the only rule in
+positive R: **17 closed at +0.211 mean** as of 2026-09-19. Read that with the outlier check
+applied, which is the whole point of the check: two trades from the 2026-09-18 rally carry
+it, and without them the same 17 trades are **−0.102**.
 
-`ZScore` and `OfiMagnitude` also remain in the enum and are dead unless configured.
-`ZScore` required a statistically unusual imbalance with independent cross-venue
-agreement; `OfiMagnitude` entered on raw |OFI| in a single bucket. See `HYPOTHESES.md`
-for why each was replaced.
+It fires about 7.6 times a day against FlowRatio's 2, so it is most of what the account
+does. See H13, and the FATAL IN A TREND note — this is the rule that took 0 wins in 26
+trades across both trending stretches, by buying falling knives.
+
+`ZScore` and `OfiMagnitude` **were deleted from the code on 2026-09-18**, along with the
+~660 lines only reachable through a config typo. The enum numbering starts at 2 because
+renumbering would silently change what an existing `entry_mode` string resolves to. An
+unrecognised mode now abstains with `UNRECOGNISED_ENTRY_MODE` instead of falling through
+to the z-rule — which is the defect that got the backtester deleted. `git log` has them.
 
 ### Position limits
 
 Four nested caps sit between an actionable verdict and an order. All are checked **before
-the gate**, because one gate call costs 25–42 seconds and there is no point spending it on
-an entry that cannot be placed.
+the gate**, because a gate call costs 24-42 seconds -- measured at 24.0s with no retrieved
+examples in the brief and 34.4s with five -- and there is no point spending it on an entry
+that cannot be placed.
 
-    max_open_total                 5   across every strategy
+    max_open_total                 5   across every strategy -- INERT, see below
     max_open_trades_per_strategy   2   within one strategy
     max_open_per_side              1   within one strategy, one direction
                                        -> "two at once, never two the same way"
@@ -132,6 +152,10 @@ an entry that cannot be placed.
 Any of them set to 0 is disabled. The first exists because the other three are scoped by
 strategy name: two strategies at 2 each is 4 and a third makes it 6, with nothing but a
 startup log line noticing.
+
+**`max_open_total` at 5 can never bind** -- two strategies at 2 each is 4 -- and the bot
+says so at every start with `ACCOUNT_LIMIT_INERT`. Lower it below 4 or accept that the
+per-strategy caps are the only ones in force.
 
 **Slots are first come, first served and are not reserved per strategy.** A rule that
 signals several times a day will hold them against one that signals twice. From outside, a
@@ -191,13 +215,43 @@ Verdicts are cached per `(symbol, side, 15-minute bucket)`: the loop runs every 
 while the evidence only changes on the quarter hour, and the model does not answer the same
 question the same way twice.
 
-**Caveat, stated because it is load-bearing.** The gate has twice refused candidates by
-reciting a criterion from its own skip list without checking whether it applied — once
-misjudging reward:risk that code had already validated, once claiming venues had been
-"excluded" when none ever has been. Both prompts are fixed and the brief now states the
-counts as explicit numbers, but the honest summary is that a small model handed a list of
-skip criteria will treat it as a menu of excuses. If a criterion can be checked
-arithmetically, check it in code before the model sees it.
+**The gate approved 45 of 45 and refused nothing, and it was not the model's fault.** All
+four grounds the prompt allowed it to refuse on were arithmetically unreachable: dispersion
+needs a ceiling and `MaxDispersionBps` is 0; thin evidence needs an excluded venue and
+neither surviving rule scores venues; a losing day needs half the daily limit against a
+worst day of $0.65; concentration needs two open positions while the per-side cap is
+checked *before* the gate is called. The model said so on every call — *"is not subject to
+any grounds for skipping"*. A bigger model or a tool loop would have changed nothing.
+
+**H17 (2026-09-19) replaced them with four grounds this account can actually meet**,
+computed from its own closed trades in one query (`BotRepository.GetGateEvidenceAsync`) and
+marked AVAILABLE / NOT AVAILABLE in the brief:
+
+| ground | condition |
+|---|---|
+| this cell is losing | same strategy + side + entry path, last 20 closed, needs n≥5, mean R < 0 |
+| trend against the entry | 4-hour move beyond ±2.0% against the proposed side |
+| one event twice | same `entry_path` fired inside 120 minutes |
+| concentration | a position already open on this side **across every strategy** |
+
+That last one is the concentration question nothing was asking: `max_open_per_side` is
+scoped **per strategy**, so CANDLE_REVERSAL and XVENUE_FLOW can each hold a LONG and both
+checks pass.
+
+Each ground reduces to a threshold, and a threshold belongs in `RiskEngine`. What the model
+is asked for is the **combination** — the prompt says one available ground is usually not
+enough and two or more usually is. If any single ground turns out to be decisive alone,
+move it into code and take it out of the brief, or this becomes a 35-second inference call
+performing an `if`.
+
+**It has never refused, so there is no evidence it refuses well.** The first audit of it,
+on five trades, scored the live gate at −3.00R against +1.00R for approving everything.
+H17 carries the decision rule; judge it there, not here.
+
+Retrieval of similar past signals was broken in the same way and fixed alongside: its
+distance summed four quantities that are **constant** for both surviving rules, so it
+returned the five most recent signals wearing similarity's label — and it did not filter by
+strategy, so a price rule was shown a flow rule's outcomes as precedent.
 
 ## Risk engine
 
@@ -213,13 +267,35 @@ TP 0.3% / SL 5.0%  →  0.02:1 after fees, breakeven win rate 98.1%
 The bot refuses to start on the second. That is not decoration: it was the shipped
 default, and it needed one loss to undo 52 wins.
 
-Note that this validates the `bot_config` TP/SL pair, which **XVENUE_FLOW does not use** —
-it derives geometry from ATR per trade and checks it against `MinRewardRisk` at decision
-time. The startup figure is therefore about a configuration the active strategy overrides.
+It used to validate the `bot_config` TP/SL pair, which neither strategy uses — certifying
+a 2.00%/1.50% setup while every position ran a 2.00% stop against a 4.00% target. Each
+strategy now states the geometry it will actually place (`ITradingStrategy.DescribeRisk`)
+and is judged on that, so the startup line is about the configuration that runs:
+
+```
+XVENUE_FLOW: target 6.67% / stop 2.00% → 3.13:1, breakeven win rate 24.2%
+```
+
+**6.67%, not the 4.00% stored on the row.** `use_dynamic_tp_sl` scales both barriers by
+`1 + 10 × excursion` (capped at 2), so the target *retreats* as price advances and the two
+only meet where `x = t / (1 − 10t)`. That is why **no trade has ever exited on TP**;
+`dynamic_stop_price` / `dynamic_target_price` exist so the live barrier is one `SELECT`
+away. They are write-only — feeding them back into their own input compounds the barrier
+past +116% in five minutes.
 
 Sizing is fixed-fractional: `notional = capital × risk_pct / stop_pct`, then capped by
-`Okx__MaxOrderNotionalUsd`. **While that ceiling binds, `risk_pct_per_trade` has no
-effect** and every order is exactly the ceiling; the log says so with both figures.
+`Okx__MaxOrderNotionalUsd`. At the current settings the two agree exactly, so the ceiling
+never binds:
+
+```
+capital $100 × risk 0.60% / stop 2.00%  =  $30.00 notional
+                                        =  $10 margin at 3x
+                                        =  $0.60 at risk per trade
+```
+
+After the 0.01 lot grid that is 0.26 contracts ≈ $29.05. **If the ceiling ever does bind,
+`risk_pct_per_trade` stops meaning anything** and every order is exactly the ceiling; the
+log says so with both figures.
 
 Circuit breakers stop trading on the daily loss limit, a consecutive-loss streak, or
 realised drawdown. A breach writes `enabled = false` **to the database** — a breaker that a
@@ -356,9 +432,24 @@ entries fill, and filled 9.2 bps better than the signal price. Exchange-side OCO
 fires. Per-trade geometry, gate verdict and effective risk persist on the row. Three venues
 have ingested without a gap in `flow_bars_15m`.
 
-**Not established: whether any entry rule here covers its execution cost.** Ten paper
-trades since the 2026-09-08 reset total +$0.21 on $30 of capital, five wins and five
-losses. That is noise at that count, in both directions.
+**Not established: whether any entry rule here covers its execution cost.** As of
+2026-09-19, **45 closed trades at +0.003R mean, +0.149R total, and the account is net
+negative at −$0.05.** Two trades carry +5.117R of that, so the other 43 come to −4.97R.
+
+The exit breakdown is the thing to read before touching anything:
+
+    OFI_REVERSAL   30  +4.647 R      the only exit producing positive R
+    FLOW_REVERSAL   2  +0.101 R
+    TIMEOUT         3  -0.424 R
+    SL              6  -6.615 R      all of the damage
+    TP              0       —        has never fired
+
+Three levers have now been measured on the deployed exit set and none is where the problem
+is. Stop width: 2.00% is the best of six, 1.0% the worst — narrowing it takes stop-outs
+from 12 to 29 and OFI exits from 51 to 30, destroying the exit that earns. Entry timing:
+no pullback depth improves anything, because waiting shrinks losers and winners by the same
+factor and skips winners 11:1. Dynamic barriers: indistinguishable on XVENUE_FLOW,
+mildly better on CANDLE_REVERSAL.
 
 ### The one thing that must be read before any live-money discussion
 
@@ -373,8 +464,8 @@ The predecessor rule, CandleReversal, was measured across the two trending stret
     SIDEWAYS  (everything else)                       +6.44
 
 Zero wins in 26 trades on the fading side of both trends. Chop earned +6.44R; trends lost
-45.68R. FlowRatio replaced it and enters on the opposite sign, which should help, but it
-has three closed trades — it has not been observed in a trend at all.
+45.68R. FlowRatio enters on the opposite sign, which should help, but it has 28 closed trades at
+-0.123R and has still not been observed in a sustained trend.
 
 Six detector families were then tried to tell trend from chop and five failed, for a reason
 that is arithmetic rather than bad luck: a 13% move over two days is 0.068% of drift per
@@ -391,11 +482,18 @@ unless it holds across a **plateau** of adjacent settings, in **both halves** of
 and **after discarding its single best trade** — the last because two separate "findings"
 turned out to be one flash crash each.
 
-Two things have ever cleared all three: the 2.00% stop floor, and the declined RSI filter.
+Three things have ever cleared all three: the 2.00% stop floor, the declined RSI filter,
+and — negatively — the finding that entry timing is not a lever, which failed at every
+pullback depth tried.
 
 `HYPOTHESES.md` records every parameter changed without proof, with its decision rule fixed
-in advance, including one — H10, the flow exit — that was **shipped against its own
-evidence** on an explicit decision. Read the decision rule before reading the result.
+in advance. Read the decision rule before reading the result.
+
+One correction worth carrying: H10, the OFI reversal exit, was long described as "shipped
+against its own evidence". That label came from a measurement taken **without the OFI exit
+in the loop**, which is the exact error `measure-the-deployed-exit` warns about. On the
+configuration that actually runs it is the only exit producing positive R. The same applies
+to `use_dynamic_tp_sl`. Neither is an open question.
 
 ## Operating the bot
 
@@ -469,3 +567,11 @@ reachable from outside — use an SSH tunnel rather than opening it.
 the OKX app as one 0.16 position at the weighted average entry. Both views are correct and
 per-trade reduce-only OCOs sum correctly, but the OKX app cannot show you the split —
 `bot_trades` is where the individual positions live.
+
+**`sql/023` does not describe the running configuration.** It is the only record of
+`bot_config` in the repo and it seeds `{XVENUE_FLOW}` alone, `use_dynamic_tp_sl FALSE`,
+`allow_entry_without_gate FALSE`, `max_entries_per_day 4`, capital 60 and risk 0.01.
+Production runs both strategies, dynamic barriers ON, the gate fallback ON, 20 entries a
+day, capital 100 and risk 0.006. **A fresh database comes up as a different bot, silently,
+and no migration records the live values.** Read `bot_config` before believing any
+configuration statement — including the ones in this file.
