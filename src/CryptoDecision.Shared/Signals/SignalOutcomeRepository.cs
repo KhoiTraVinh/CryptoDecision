@@ -381,25 +381,45 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
     /// most useful thing the neighbourhood has to say — if eleven of twelve similar
     /// setups lost, the gate should see eleven losses.
     /// </summary>
+    /// <summary>
+    /// THE STRATEGY IS PART OF THE FILTER, and the distance is measured on quantities
+    /// that vary. Neither was true until 2026-09-19, and between them they made this
+    /// method return something other than what it claims.
+    ///
+    /// The old distance summed four terms — |z|, the venue agreement ratio, dispersion
+    /// and stop width. Measured on the production table: CANDLE_REVERSAL has exactly ONE
+    /// distinct value on all four, and XVENUE_FLOW has one on the first three and two on
+    /// the fourth. Both surviving rules leave z, agreement and dispersion structurally
+    /// zero because neither computes them. So the distance was a constant, and
+    /// `ORDER BY distance, signal_at DESC` degenerated to "the five most recent signals
+    /// on this side" — recency wearing similarity's label.
+    ///
+    /// Without the strategy filter it was worse than that: a CANDLE_REVERSAL candidate
+    /// was shown XVENUE_FLOW outcomes and told they were similar setups. Two rules that
+    /// read different inputs and enter on opposite signs do not have a shared
+    /// neighbourhood.
+    ///
+    /// What is left that genuinely varies is ATR at signal time and, for the flow rule,
+    /// the imbalance itself. That is a thinner key than the original claimed to be, and
+    /// it is the honest one.
+    /// </summary>
     public async Task<IReadOnlyList<SimilarCase>> FindSimilarAsync(
-        string symbol, string side, double aggregateZ, int agreeingVenues,
-        int participatingVenues, double dispersionBps, decimal stopPct,
-        DateTime asOfUtc, int k = 5, CancellationToken ct = default)
+        string symbol, string side, string strategy, double atrPct, double aggregateOfi,
+        decimal stopPct, DateTime asOfUtc, int k = 5, CancellationToken ct = default)
     {
         const string sql = """
             SELECT signal_at, side, aggregate_z, agreeing_venues, participating_venues,
                    dispersion_bps, stop_pct, outcome, outcome_r, minutes_to_outcome,
                    gate_decision,
                    sqrt(
-                       pow((abs(aggregate_z) - @absZ) / 1.0, 2) +
-                       pow((agreeing_venues::float / NULLIF(participating_venues, 0)
-                            - @agreeRatio) / 0.33, 2) +
-                       pow((COALESCE(dispersion_bps, 0) - @disp) / 5.0, 2) +
+                       pow((COALESCE(atr_pct, 0) - @atr) / 0.15, 2) +
+                       pow((abs(COALESCE(aggregate_ofi, 0)) - @absOfi) / 0.10, 2) +
                        pow((stop_pct - @stopPct) / 0.004, 2)
                    ) AS distance
             FROM signal_outcomes
             WHERE symbol = @symbol
               AND side = @side
+              AND strategy = @strategy
               AND outcome IN ('WIN', 'LOSS', 'TIMEOUT')
               -- Resolved strictly before the signal being judged. Both halves are
               -- needed: labeled_at guards against reading a row the labeler wrote
@@ -416,10 +436,9 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
         await using var cmd  = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("symbol",     symbol);
         cmd.Parameters.AddWithValue("side",       side);
-        cmd.Parameters.AddWithValue("absZ",       Math.Abs(aggregateZ));
-        cmd.Parameters.AddWithValue("agreeRatio",
-            participatingVenues > 0 ? (double)agreeingVenues / participatingVenues : 0.0);
-        cmd.Parameters.AddWithValue("disp",       (decimal)dispersionBps);
+        cmd.Parameters.AddWithValue("strategy",   strategy);
+        cmd.Parameters.AddWithValue("atr",        (decimal)atrPct);
+        cmd.Parameters.AddWithValue("absOfi",     (decimal)Math.Abs(aggregateOfi));
         cmd.Parameters.AddWithValue("stopPct",    stopPct);
         cmd.Parameters.AddWithValue("asOf",       asOfUtc);
         cmd.Parameters.AddWithValue("k",          k);

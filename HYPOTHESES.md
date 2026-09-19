@@ -1617,3 +1617,163 @@ trades taken under a geometry nobody chose.
 ### Result
 
 _Open (removal in force)._
+
+---
+
+## H17 — Give the gate grounds it can actually reach
+
+### Why
+
+The gate approved **45 of 45** candidates and refused none, across two strategies and
+eleven days. That was read as the model rubber-stamping. It was not.
+
+The prompt offers exactly four grounds for skipping and states that a ground whose
+condition is unmet "does not exist for this trade". Measured on production, all four were
+unreachable by construction:
+
+| ground | condition | reality |
+|---|---|---|
+| thin evidence | `excluded venues > 0` | neither surviving rule scores venues — brief prints `n/a` |
+| late entry | dispersion >= 80% of ceiling | `MaxDispersionBps = 0`, so brief prints "NOT available" |
+| losing day | today's loss >= half the limit | half is **$2.25**; worst day ever is **$0.65** |
+| concentration | open positions >= 2 | `max_open_per_side=1` is checked **before** the gate |
+
+The model said so itself on every call: "is not subject to any grounds for skipping",
+"is not flagged by any of the grounds", "there are no grounds for skipping". It was
+reporting the arithmetic correctly. A larger model or a tool loop would have changed
+nothing.
+
+A second defect, found in the same audit: `FindSimilarAsync` ranked neighbours on |z|,
+venue-agreement ratio, dispersion and stop width. CANDLE_REVERSAL has **one distinct
+value on all four** and XVENUE_FLOW has one on three of them, because neither rule
+computes z, agreement or dispersion. The distance was a constant, so the query returned
+the five most recent signals on that side and called them similar — and it did not filter
+by strategy, so a price rule was shown a flow rule's outcomes as precedent.
+
+### The change
+
+Four new grounds, each computed from this account's own closed trades in one query
+(`BotRepository.GetGateEvidenceAsync`), each marked AVAILABLE / NOT AVAILABLE in the brief:
+
+- **this cell is losing** — same strategy, side and entry path, last 20 closed, needs n>=5
+- **trend against the entry** — 4-hour move beyond +/-2.0% against the proposed side
+- **one event twice** — same entry path fired inside 120 minutes
+- **concentration** — a position already open on this side **across every strategy**
+  (`max_open_per_side` is per-strategy, so two rules can both hold a LONG and neither
+  limit sees it)
+
+Dispersion, excluded venues, today's P&L and the per-rule position count move to a
+CONTEXT block, explicitly not grounds. `ContradictsBrief` is updated to the new four.
+Retrieval is filtered by strategy and keyed on ATR and |OFI|, the only two quantities
+that vary.
+
+Verified against production at the moment of the change:
+
+    candidate                          cell n  wins  mean R   ground?
+    CANDLE_REVERSAL LONG                  16    10   +0.290   no
+    CANDLE_REVERSAL SHORT                  1     0   -1.049   no (below n=5)
+    XVENUE_FLOW LONG via RATIO             9     2   -0.248   YES
+    XVENUE_FLOW SHORT via HIGH_VOLUME      3     1   -0.349   no (below n=5)
+
+### What is deliberately NOT being claimed
+
+Each ground reduces to a threshold, and a threshold belongs in `RiskEngine`. What the
+model is asked for is the combination — several marginal readings together — and that is
+the only part an `if` cannot do. If any single ground turns out to be decisive on its
+own, move it into the deterministic layer and take it out of the brief.
+
+The gate has never once refused, so there is no evidence it refuses **well**. The first
+audit of it, on five trades, had the live gate at **-3.00R** against **+1.00R** for
+approving everything. This change makes refusal possible; it does not make it correct.
+
+### Decision rule, fixed in advance
+
+Judged on signals recorded **after** this ships, at 40 gated signals or 21 days,
+whichever comes first.
+
+- **Keep if** the gate refuses between 5% and 40% of candidates, AND the refused set has
+  a lower mean R (by `signal_outcomes.outcome_r`) than the approved set.
+- **Revert if** it refuses nothing, or refuses more than 40%, or the refused set's mean R
+  is **higher** than the approved set's — the last being the case where it is removing
+  the winners.
+- **A refusal citing a ground the brief marked NOT AVAILABLE is a defect, not a result.**
+  `ContradictsBrief` logs these at Warning; if more than 10% of refusals are flagged,
+  revert regardless of the R comparison.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is trades not taken, and 45 approvals of
+evidence nobody could act on being replaced by refusals nobody can yet judge.
+
+### Result
+
+_Open._
+
+---
+
+## H18 — Restore the ratio path (operator override of H16's own condition)
+
+### The change
+
+`FlowStrategy:Signal:RatioMinimum` 99.0 -> 2.1. Nothing else in the rule moves. Shipped in
+the same commit as H17, deliberately — see attribution below.
+
+### H16's restore condition was measured, and it is NOT met
+
+H16 fixed the condition in advance: restore only if the 12-hour move distribution returns
+to the first half's shape — **median |move| above 1.5%** and **at least 12% of windows
+reaching 4%** — over a trailing 14 days. Measured 2026-09-19 on hourly windows over
+`klines_1m` (the median reproduces H16's published 1.577% for the first half exactly,
+which is what makes the trailing figure trustworthy):
+
+    window                       n     median |12h move|    reaches 4% (two-sided)
+    1st half (H16: 1.577%)      260         1.577%                 30.0%
+    2nd half (H16: 1.149%)      360         1.161%                 13.3%
+    trailing 14 days            324         1.161%                 14.5%
+
+The trailing window is indistinguishable from the second half — the one in which the rule
+lost 4.477R. **Both legs fail**: 1.161% is below the 1.5% median bar, and the two-sided
+14.5% corresponds to roughly 7% one-sided, below the 12% bar.
+
+**This restore is therefore an operator override, taken with the numbers above in front
+of them, not a condition being satisfied.** Recorded here so that nobody later reads the
+restore as evidence the market had turned.
+
+H16's second clause — "if it is restored, turn `use_dynamic_tp_sl` off first" — is also
+not being honoured, and there is a measurement for that one: replaying all 41 XVENUE_FLOW
+signals with the deployed exit set gives **-0.159R** mean with dynamic and **-0.158R**
+without. For this rule the switch is indistinguishable, so the clause is being set aside
+on evidence rather than ignored. It remains true that the rule has never run the geometry
+H9 measured.
+
+### Two changes at once, and why they are still attributable
+
+`HYPOTHESES.md` requires one live change at a time. This breaks that rule, and the
+mitigation is that the two are separable **in the data**: gate verdicts are recorded per
+strategy in `signal_outcomes`, so "what did H17 refuse" and "how did the restored ratio
+path do" are different queries. If gate refusals turn out to be concentrated on
+XVENUE_FLOW RATIO — which the cell base rate above makes likely — then H18's population
+is whatever H17 lets through, and **H18 cannot be judged on its own**. Say that then
+rather than pooling.
+
+### Decision rule, fixed in advance
+
+Judged on RATIO trades opened after this ships, at 20 trades or 28 days.
+
+- **Keep if** mean R over those is positive, positive in both halves, and positive after
+  discarding the single best trade.
+- **Turn it off again if** mean R is negative, or if fewer than 10 trades have been taken
+  by the 28-day mark — in which case record it as inconclusive rather than refuted, the
+  same way H9 was.
+- **Do not re-tune `RatioMinimum` or `RatioMinVolumeUsd` inside the window.** That is a
+  different claim and it restarts the count.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is the sample: the ratio path fires ~2x a
+day and will be most of the trade stream again, so a repeat of the -4.477R spends four
+weeks of observations that H11 and H13 also need.
+
+### Result
+
+_Open._

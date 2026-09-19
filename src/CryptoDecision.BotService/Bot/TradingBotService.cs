@@ -503,6 +503,43 @@ public sealed class TradingBotService(
             ? Math.Min(sizing.NotionalUsd, okxOptions.MaxOrderNotionalUsd)
             : sizing.NotionalUsd;
 
+        // ── What this account's own history says about this exact candidate ──
+        //
+        // The gate approved 45 of 45 and refused none, because all four of its grounds
+        // were unreachable: dispersion has no ceiling configured, neither surviving rule
+        // scores venues, the daily-loss ground needs $2.25 against a worst day of $0.65,
+        // and the concentration ground needs two open positions while the per-side limit
+        // is checked before the gate is called. The model reported exactly that on every
+        // call — "is not subject to any grounds for skipping" — so the defect was the
+        // ground list, not the model.
+        //
+        // Failure is not allowed to make the gate stricter: GateEvidence.Unknown marks
+        // every ground unavailable, so a database hiccup leaves the gate exactly as
+        // permissive as it was rather than turning into a refusal.
+        GateEvidence evidence;
+        try
+        {
+            evidence = await repo.GetGateEvidenceAsync(
+                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE",
+                strategyName, decision.Side, decision.Flow?.EntryPath, ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("[Gate] Could not read the account's own record: {Err}. " +
+                           "Reviewing without it, which leaves every ground unavailable.", ex.Message);
+            evidence = GateEvidence.Unknown;
+        }
+
+        // Counted across EVERY strategy, which is the number no limit in this loop
+        // holds. max_open_per_side is scoped to the proposing strategy, so
+        // CANDLE_REVERSAL and XVENUE_FLOW can each open a LONG on the same instrument
+        // and both per-side checks pass. That is the concentration question worth
+        // putting to the gate, and the old brief asked a different one that could never
+        // be true.
+        var openSameSide = state.GetOpenTrades()
+            .Count(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase)
+                     && string.Equals(t.Side,   decision.Side, StringComparison.OrdinalIgnoreCase));
+
         var candidate = new EntryCandidate(
             Symbol:        opts.Symbol,
             Side:          decision.Side,
@@ -512,6 +549,9 @@ public sealed class TradingBotService(
             NotionalUsd:   briefNotional,
             OpenPositions: openPositions,
             TodayPnlUsd:   todayPnl,
+            Evidence:      evidence,
+            Strategy:      strategyName,
+            OpenSameSide:  openSameSide,
 
             // The four thresholds the gate is allowed to refuse against, carried in so
             // the brief can state each value next to the limit it was judged by. The

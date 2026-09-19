@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Agent;
@@ -14,12 +15,24 @@ namespace CryptoDecision.BotService.Agent;
 /// size from the position sizer. The gate is handed a finished proposal and asked one
 /// question.
 ///
-/// The four threshold fields are not decoration. Each corresponds to one of the four
-/// grounds the gate is allowed to refuse on, and each was added after the model cited
-/// that ground against a number that did not support it — refusing on "dispersion is
-/// wide" at 2.8 bps against a 25 bps ceiling it had already passed. A value without
-/// its scale is not evidence, and the model was being handed values without scales.
+/// The threshold fields are not decoration. Each corresponds to one of the grounds the
+/// gate is allowed to refuse on, and each was added after the model cited that ground
+/// against a number that did not support it — refusing on "dispersion is wide" at 2.8 bps
+/// against a 25 bps ceiling it had already passed. A value without its scale is not
+/// evidence, and the model was being handed values without scales.
 /// </summary>
+/// <param name="Evidence">
+/// What this account's own history says about this exact candidate. Added 2026-09-19,
+/// because the four original grounds were all unreachable and the gate had therefore
+/// approved 45 of 45 — see <see cref="GateEvidence"/>.
+/// </param>
+/// <param name="OpenSameSide">
+/// Positions already open on this side in this instrument, counted across EVERY
+/// strategy. Not the same number as <paramref name="OpenPositions"/>, which is scoped to
+/// the proposing strategy: max_open_per_side is enforced per strategy, so
+/// CANDLE_REVERSAL and XVENUE_FLOW can each hold a LONG and neither limit notices. That
+/// is the concentration question worth asking, and nothing was asking it.
+/// </param>
 public sealed record EntryCandidate(
     string        Symbol,
     string        Side,
@@ -29,6 +42,9 @@ public sealed record EntryCandidate(
     decimal       NotionalUsd,
     int           OpenPositions,
     decimal       TodayPnlUsd,
+    GateEvidence  Evidence,
+    string        Strategy            = "",
+    int           OpenSameSide        = 0,
     decimal       CapitalUsd          = 0m,
     decimal       DailyLossLimitPct   = 0m,
     double        MaxDispersionBps    = 0.0,
@@ -165,25 +181,33 @@ public sealed class AiEntryGate(
         trade, however plausible the sentence sounds.
 
         THE ONLY GROUNDS FOR SKIPPING
-        - Thin evidence: the brief shows EXCLUDED VENUES greater than zero AND
-          agreement at the bare minimum. A venue that participated and did not reach
-          the threshold was NOT excluded — it was counted, it disagreed, and the
-          aggregate already reflects that. When excluded is 0 this ground is
-          unavailable.
-        - Late entry: the brief shows dispersion at 80% or more of its ceiling. Below
-          that the market is not dislocated and the entry is not late. Dispersion at a
-          fifth of the ceiling is a narrow market, and calling it wide is refusing on
-          a number that says the opposite.
-        - Adding to a losing day: today's realised loss is at least half the daily loss
-          limit shown. A loss smaller than that is a normal outcome of trading, not a
-          reason to stop.
-        - Concentration: OPEN POSITIONS in the brief is 2 or more. You are not asked
-          at all while the position limit is reached, so this is normally 0 and this
-          ground is normally unavailable.
+        Each is marked AVAILABLE or NOT AVAILABLE in the brief, computed from this
+        account's own closed trades. Read the marker; do not decide for yourself whether
+        a condition is met.
+        - This setup is losing: the brief marks THIS CELL as losing — the same rule, the
+          same direction, the same entry path, over its last trades. This is the
+          strongest ground you have, because it is this exact trade's own track record.
+          It needs at least 5 closed trades to be available at all.
+        - Trend against the entry: the brief marks the 4-hour move as running against the
+          direction proposed. This rule enters on a short-horizon pattern and has no view
+          on the larger move; entering a LONG into a sustained fall is buying a knife.
+        - One event twice: the brief shows the same entry path already fired within the
+          last 2 hours. A second entry on the same print is not a second opportunity, it
+          is the same one at a worse price, and the position limits do not catch it
+          because the first trade may already have closed.
+        - Concentration: the brief shows a position ALREADY OPEN on this side, counted
+          across every strategy. The per-strategy limits do not see this, so it is
+          genuinely yours to weigh.
 
-        Approve when the evidence is coherent and the trade is proportionate. A clean
-        setup deserves approval — being reflexively cautious is not the same as being
-        careful, and skipping every trade makes you useless rather than safe.
+        HOW TO WEIGH THEM
+        A ground being available does not mean you must skip. One marginal reading is
+        usually not enough; two or more pointing the same way usually is. That judgement
+        — several weak signals together — is the only thing you are here for, because
+        anything decided by a single threshold is already decided in code before you are
+        asked.
+
+        Approve when the evidence is coherent and the trade is proportionate. Do not skip
+        because nothing looks exciting: with no ground available, approve.
 
         SIMILAR PAST SIGNALS
         The brief may list the closest past setups and what the market did to them.
@@ -194,8 +218,13 @@ public sealed class AiEntryGate(
         CALIBRATION
         You are not being asked to predict the market. The system's edge, if it has
         one, is statistical and plays out over many trades. Your job is to catch the
-        individual case that is obviously worse than the average one. Expect to
-        approve most proposals.
+        individual case that is obviously worse than the average one.
+
+        Most candidates should be approved, because most of them will have no ground
+        available. But a gate that has never once skipped is not being careful, it is
+        being ornamental — and this one approved 45 of 45 before the grounds above were
+        made reachable. When two grounds are marked AVAILABLE, skipping is the expected
+        answer, not a bold one.
 
         OUTPUT
         Reply with a single JSON object and nothing else:
@@ -283,10 +312,11 @@ public sealed class AiEntryGate(
             return await outcomes.FindSimilarAsync(
                 symbol:              c.Symbol,
                 side:                c.Side,
-                aggregateZ:          c.Flow.AggregateZ,
-                agreeingVenues:      c.Flow.AgreeingVenues,
-                participatingVenues: c.Flow.ParticipatingVenues,
-                dispersionBps:       c.Flow.DispersionBps,
+                // Scoped to the rule that proposed this. Without it a price rule was
+                // shown a flow rule's outcomes and told they were similar setups.
+                strategy:            c.Strategy,
+                atrPct:              c.Geometry.AtrPctUsed,
+                aggregateOfi:        c.Flow.AggregateOfi,
                 stopPct:             c.Geometry.StopPct,
                 asOfUtc:             DateTime.UtcNow,
                 k:                   retrieval.Examples,
@@ -355,6 +385,17 @@ public sealed class AiEntryGate(
             ? $"{flow.DispersionBps / c.MaxDispersionBps:P0} of the {c.MaxDispersionBps:F1} bps ceiling"
             : "no ceiling configured";
 
+        var e = c.Evidence;
+
+        // The cell's own record, named so the model cannot mistake it for the strategy's.
+        // "CANDLE_REVERSAL SHORT" and "CANDLE_REVERSAL LONG" are different trades and the
+        // first has one observation against the second's twenty-nine.
+        var cell = e.CellTrades == 0
+            ? "no closed trades yet"
+            : $"{c.Strategy} {c.Side}" +
+              $"{(string.IsNullOrEmpty(flow.EntryPath) ? "" : $" via {flow.EntryPath}")}: " +
+              $"{e.CellTrades} closed, {e.CellWins} won, mean R {e.CellMeanR:+0.000;-0.000}";
+
         var lossLimitUsd = c.CapitalUsd * c.DailyLossLimitPct;
         var lossShare    = lossLimitUsd > 0
             ? $"{Math.Max(0m, -c.TodayPnlUsd) / lossLimitUsd:P0} of the ${lossLimitUsd:F2} daily loss limit"
@@ -373,7 +414,9 @@ public sealed class AiEntryGate(
 
             EVIDENCE — {(scoresVenues
                 ? "cross-venue aggressive order flow"
-                : "aggregate aggressive order flow (this rule does not score venues)")}
+                : flow.ParticipatingVenues == 0
+                    ? "price only (this rule reads no order flow at all)"
+                    : "aggregate aggressive order flow (this rule does not score venues)")}
             {(scoresVenues
                 ? $"  aggregate z {flow.AggregateZ:+0.00;-0.00}, OFI {flow.AggregateOfi:+0.000;-0.000}\n" +
                   $"  {flow.AgreeingVenues} of {flow.ParticipatingVenues} participating venues agree\n" +
@@ -385,33 +428,59 @@ public sealed class AiEntryGate(
                 // it is not evidence at all -- it is the shape of a record that was never
                 // filled in. What decided this entry is the imbalance and the notional,
                 // so that is what the brief states.
-                : $"  imbalance {(1.0 + Math.Abs(flow.AggregateOfi)) / (1.0 - Math.Abs(flow.AggregateOfi)):F2}:1 " +
-                  $"{(flow.AggregateOfi > 0 ? "buy" : "sell")}-dominated " +
-                  $"(OFI {flow.AggregateOfi:+0.000;-0.000}) across {flow.ParticipatingVenues} venue(s)\n" +
-                  $"  entry path: {(string.IsNullOrEmpty(flow.EntryPath) ? "n/a" : flow.EntryPath)}\n" +
-                  "  z, venue agreement and dispersion are NOT computed by this rule. They are\n" +
-                  "  absent, not zero, and are not grounds for anything.")}
+                // A rule that reads no flow at all reports ParticipatingVenues 0, and
+                // running the imbalance arithmetic on it produced "1.00:1 sell-dominated
+                // (OFI +0.000) across 0 venue(s)" — a sentence with a direction, a ratio
+                // and a venue count in it, every one of them invented from a record that
+                // was never filled in. CANDLE_REVERSAL reads price and nothing else, so
+                // what it says about price is the whole of its evidence.
+                : flow.ParticipatingVenues == 0
+                    ? $"  {flow.Reason}\n" +
+                      "  This rule reads PRICE ONLY. Order flow, z, venue agreement and\n" +
+                      "  dispersion are not consulted — absent, not zero — and are not grounds\n" +
+                      "  for anything."
+                    : $"  imbalance {(1.0 + Math.Abs(flow.AggregateOfi)) / (1.0 - Math.Abs(flow.AggregateOfi)):F2}:1 " +
+                      $"{(flow.AggregateOfi > 0 ? "buy" : "sell")}-dominated " +
+                      $"(OFI {flow.AggregateOfi:+0.000;-0.000}) across {flow.ParticipatingVenues} venue(s)\n" +
+                      $"  entry path: {(string.IsNullOrEmpty(flow.EntryPath) ? "n/a" : flow.EntryPath)}\n" +
+                      "  z, venue agreement and dispersion are NOT computed by this rule. They are\n" +
+                      "  absent, not zero, and are not grounds for anything.")}
 
-            CHECKS ALREADY PASSED IN CODE, with the threshold each was judged against
+            THE FOUR GROUNDS, EACH MARKED FROM THIS ACCOUNT'S OWN CLOSED TRADES
+              this cell         {cell}
+                                {(e.CellTrades < GateEvidence.MinCellTrades
+                                    ? $"only {e.CellTrades} closed trade(s) — too few to read, so " +
+                                      "'this setup is losing' is NOT AVAILABLE as a ground"
+                                    : e.CellIsLosing
+                                        ? "mean R is NEGATIVE over this cell's own record — " +
+                                          "'this setup is losing' is AVAILABLE as a ground"
+                                        : "mean R is positive — 'this setup is losing' is NOT AVAILABLE")}
+              4-hour move       {e.Move4hPct,6:+0.00;-0.00}%   (12-hour {e.Move12hPct:+0.00;-0.00}%)
+                                {(e.TrendAgainst(c.Side)
+                                    ? $"the market has moved {e.Move4hPct:+0.00;-0.00}% against a {c.Side} " +
+                                      $"over four hours, past the {GateEvidence.TrendPct:F1}% that counts as " +
+                                      "a trend — 'trend against the entry' is AVAILABLE as a ground"
+                                    : $"inside the {GateEvidence.TrendPct:F1}% that counts as a trend, or " +
+                                      "running with this side — 'trend against the entry' is NOT AVAILABLE")}
+              same path fired   {(e.MinutesSinceSamePath < 0 ? "  never" : $"{e.MinutesSinceSamePath,6:F0} min ago")}
+                                {(e.ClusteredPath
+                                    ? $"inside the {GateEvidence.ClusterMinutes:F0} min that makes this one " +
+                                      "event twice — 'one event twice' is AVAILABLE as a ground"
+                                    : "no recent entry on this path — 'one event twice' is NOT AVAILABLE")}
+              open on this side {c.OpenSameSide,6}       (across ALL strategies, not just this one)
+                                {(c.OpenSameSide >= 1
+                                    ? "already exposed in this direction — 'concentration' is AVAILABLE " +
+                                      "as a ground"
+                                    : "nothing open on this side — 'concentration' is NOT AVAILABLE")}
+
+            CONTEXT, NOT GROUNDS — already checked in code, never a reason to skip
               dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
-                                {(c.MaxDispersionBps <= 0
-                                    ? "no dispersion limit is in force — 'late entry' is NOT available as a ground"
-                                    : flow.DispersionBps >= 0.8 * c.MaxDispersionBps
-                                        ? "AT OR NEAR THE CEILING — 'late entry' is available as a ground"
-                                        : "well inside the ceiling — 'late entry' is NOT available as a ground")}
-              excluded venues   {(scoresVenues ? excluded.ToString() : "n/a"),6}       — {(!scoresVenues
-                                    ? "this rule reads the AGGREGATE and does not score venues " +
-                                      "individually, so there is no excluded count and 'thin " +
-                                      "evidence' is NOT available as a ground"
-                                    : excluded > 0
-                                        ? "above zero — 'thin evidence' is available as a ground"
-                                        : "zero — 'thin evidence' is NOT available as a ground")}
-              open positions    {c.OpenPositions,6}       — limit {c.MaxOpenPositions}; {(c.OpenPositions >= 2
-                                    ? "'concentration' is available as a ground"
-                                    : "below 2, so 'concentration' is NOT available as a ground")}
-              today's P&L       ${c.TodayPnlUsd,6:F2}   — {lossShare}; {(lossLimitUsd > 0 && -c.TodayPnlUsd >= lossLimitUsd / 2
-                                    ? "'losing day' is available as a ground"
-                                    : "'losing day' is NOT available as a ground")}
+              excluded venues   {(scoresVenues ? excluded.ToString() : "n/a"),6}       — {(scoresVenues
+                                    ? "venues the scorer measured and rejected"
+                                    : "this rule reads the AGGREGATE and does not score venues at all")}
+              today's P&L       ${c.TodayPnlUsd,6:F2}   — {lossShare}
+              open, this rule   {c.OpenPositions,6}       — limit {c.MaxOpenPositions}
+              {c.Strategy} overall: {e.RuleTrades} closed, {e.RuleWins} won, mean R {e.RuleMeanR:+0.000;-0.000}
 
             PER VENUE
             {venues}
@@ -555,14 +624,40 @@ public sealed class AiEntryGate(
                 return $"it cites excluded venues, and the brief showed {excluded} excluded.";
         }
 
-        if ((text.Contains("already open") || text.Contains("positions are open")) && c.OpenPositions < 2)
-            return $"it cites open positions, and the brief showed {c.OpenPositions}.";
+        if ((text.Contains("already open") || text.Contains("positions are open")) && c.OpenSameSide < 1)
+            return $"it cites open positions, and the brief showed {c.OpenSameSide} on this side.";
 
-        if (text.Contains("dispersion") && c.MaxDispersionBps > 0
-            && c.Flow.DispersionBps < 0.8 * c.MaxDispersionBps)
-            return $"it calls dispersion wide at {c.Flow.DispersionBps:F1} bps, " +
-                   $"which is {c.Flow.DispersionBps / c.MaxDispersionBps:P0} of the " +
-                   $"{c.MaxDispersionBps:F1} bps ceiling the scorer already enforced.";
+        // Dispersion is no longer a ground at all, so citing it is a fabricated premise
+        // whatever the number says — not merely a misread of the scale.
+        if (text.Contains("dispersion"))
+            return "it cites dispersion, which is listed under CONTEXT and is not a ground " +
+                   "for skipping under any value.";
+
+        var e = c.Evidence;
+
+        // The three new grounds, checked the same way and for the same reason: each
+        // reduces to a comparison the brief already printed, so a reason that asserts
+        // the opposite is asserting something the model was shown to be false.
+        if ((text.Contains("losing") || text.Contains("base rate") || text.Contains("track record"))
+            && !e.CellIsLosing)
+            return e.CellTrades < GateEvidence.MinCellTrades
+                ? $"it cites this setup's record, and the brief showed only {e.CellTrades} closed " +
+                  $"trade(s) — below the {GateEvidence.MinCellTrades} needed for that ground to exist."
+                : $"it cites this setup as losing, and the brief showed mean R " +
+                  $"{e.CellMeanR:+0.000;-0.000} over {e.CellTrades} trades.";
+
+        if (text.Contains("trend") && !e.TrendAgainst(c.Side))
+            return $"it cites the trend, and the brief showed a 4-hour move of " +
+                   $"{e.Move4hPct:+0.00;-0.00}% — inside the {GateEvidence.TrendPct:F1}% that " +
+                   $"counts as one, or running with the {c.Side}.";
+
+        if ((text.Contains("recent entry") || text.Contains("same path") || text.Contains("twice"))
+            && !e.ClusteredPath)
+            return e.MinutesSinceSamePath < 0
+                ? "it cites a recent entry on this path, and the brief showed none in 24 hours."
+                : $"it cites a recent entry on this path, and the brief showed the last one " +
+                  $"{e.MinutesSinceSamePath:F0} min ago — past the " +
+                  $"{GateEvidence.ClusterMinutes:F0} min window.";
 
         return null;
     }

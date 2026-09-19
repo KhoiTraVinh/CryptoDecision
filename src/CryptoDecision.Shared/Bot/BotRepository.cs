@@ -3,6 +3,67 @@ using NpgsqlTypes;
 
 namespace CryptoDecision.Shared.Bot;
 
+/// <summary>
+/// What this account's own history says about a candidate, at the moment it is proposed.
+///
+/// Every field is something the entry gate is permitted to refuse against, and every one
+/// of them can actually occur — which is the whole point, and was not true of the four
+/// grounds this replaces. See <see cref="BotRepository.GetGateEvidenceAsync"/>.
+/// </summary>
+/// <param name="CellTrades">Closed trades in this exact strategy + side + entry path, most recent first.</param>
+/// <param name="CellMeanR">Mean R over those. The narrowest honest base rate for this candidate.</param>
+/// <param name="RuleTrades">Closed trades for the whole strategy, for when the cell is too thin to read.</param>
+/// <param name="MinutesSinceSamePath">
+/// Since the last entry through this same path, or -1 for none in 24 hours. Four
+/// HIGH_VOLUME entries fired inside 90 minutes on 2026-09-18 and lost 1.499R between
+/// them; the per-path position cap bounds CONCURRENT positions and did not see it.
+/// </param>
+/// <param name="Move4hPct">SOL's move over the last four hours, in percent. Signed.</param>
+/// <param name="Move12hPct">The same over twelve, which is also the maximum hold.</param>
+public sealed record GateEvidence(
+    int     CellTrades,
+    int     CellWins,
+    decimal CellMeanR,
+    int     RuleTrades,
+    int     RuleWins,
+    decimal RuleMeanR,
+    double  MinutesSinceSamePath,
+    decimal Move4hPct,
+    decimal Move12hPct)
+{
+    /// <summary>
+    /// Nothing known. Every threshold below reads this as "ground unavailable", so a
+    /// failed evidence query makes the gate no stricter than it was — it must never
+    /// turn a database hiccup into a refusal.
+    /// </summary>
+    public static readonly GateEvidence Unknown = new(0, 0, 0m, 0, 0, 0m, -1d, 0m, 0m);
+
+    /// <summary>
+    /// Below this the cell's mean R is an anecdote. Five is not a sample either; it is
+    /// the point at which a run of losses stops being one bad afternoon.
+    /// </summary>
+    public const int MinCellTrades = 5;
+
+    /// <summary>
+    /// Percent move over four hours that counts as a trend rather than noise. SOL's
+    /// median 15-minute true range is 1.07%, so 2% over four hours is a directional
+    /// market rather than ordinary movement.
+    /// </summary>
+    public const decimal TrendPct = 2.0m;
+
+    /// <summary>Minutes within which a second entry on the same path is one event twice.</summary>
+    public const double ClusterMinutes = 120d;
+
+    public bool CellIsLosing  => CellTrades >= MinCellTrades && CellMeanR < 0m;
+    public bool ClusteredPath => MinutesSinceSamePath >= 0d && MinutesSinceSamePath < ClusterMinutes;
+
+    /// <summary>True when the last four hours ran against the side being proposed.</summary>
+    public bool TrendAgainst(string side) =>
+        string.Equals(side, "SHORT", StringComparison.OrdinalIgnoreCase)
+            ? Move4hPct >=  TrendPct
+            : Move4hPct <= -TrendPct;
+}
+
 /// <summary>Persists paper/real trades to the bot_trades table.</summary>
 public sealed class BotRepository(NpgsqlDataSource dataSource)
 {
@@ -351,6 +412,140 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("symbol", symbol ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("mode",   mode   ?? (object)DBNull.Value);
         return (decimal)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The account's own recent history, as the four numbers the entry gate is allowed
+    /// to refuse against.
+    ///
+    /// Why this exists
+    /// ---------------
+    /// The gate approved 45 of 45 candidates and refused none, and the cause was not the
+    /// model: every one of the four grounds the prompt offered it was unreachable by
+    /// construction. Dispersion needed a ceiling, and MaxDispersionBps is 0. Thin
+    /// evidence needed an excluded venue, and neither surviving rule scores venues at
+    /// all. A losing day needed half the daily limit — $2.25 — against a worst observed
+    /// day of $0.65. Concentration needed two open positions, and the per-side limit is
+    /// checked before the gate is ever called. The model said so in its own words on
+    /// every single call: "is not subject to any grounds for skipping".
+    ///
+    /// So the fix is not a better prompt or a bigger model. It is grounds that a real
+    /// candidate can actually meet. These four can:
+    ///
+    ///   • this exact cell — strategy, side and entry path — is losing on its own record
+    ///   • the market is trending against the direction being proposed
+    ///   • the same entry path already fired recently, so this is one event twice
+    ///   • something is already open on this side, across every strategy
+    ///
+    /// Each is a number this account produced. None of them was available to the gate
+    /// before.
+    ///
+    /// Why the model and not an `if`
+    /// -----------------------------
+    /// Any one of these reduces to a threshold, and a threshold belongs in RiskEngine
+    /// where it is deterministic and free. What is handed to the model is deliberately
+    /// weaker: the brief states which grounds are AVAILABLE, not which ones bind. Three
+    /// marginal readings together may be worth refusing on and one alone may not, and
+    /// that combination is the only thing here a language model can do that an `if`
+    /// cannot. If a single one of these ever turns out to be decisive on its own, move
+    /// it into the deterministic layer and take it out of the brief.
+    ///
+    /// One query, four scalar sub-selects. The gate costs 34 seconds of inference
+    /// against a 75-second timeout, so the budget for gathering its evidence is a single
+    /// round trip.
+    /// </summary>
+    /// <param name="entryPath">
+    /// Null is a value, not a wildcard: CANDLE_REVERSAL writes no path and its rows
+    /// carry NULL, so the cell for it is "rows whose path is also NULL". Matched with
+    /// IS NOT DISTINCT FROM for exactly that reason.
+    /// </param>
+    /// <param name="lookback">
+    /// Closed trades in the cell to average over. 20 rather than all of history because
+    /// the question is "is this cell losing NOW" — a rule that was fixed a week ago
+    /// should not keep being refused for what it did before.
+    /// </param>
+    public async Task<GateEvidence> GetGateEvidenceAsync(
+        string symbol, string mode, string strategy, string side,
+        string? entryPath, int lookback = 20, CancellationToken ct = default)
+    {
+        // R is recomputed here rather than stored, the same way every analysis of this
+        // table does it: pnl_pct over the stop distance the trade was actually sized
+        // against. Rows with no stop are excluded rather than counted as zero.
+        const string sql = """
+            WITH scoped AS (
+                SELECT strategy, side, entry_path, opened_at, closed_at, pnl_usd,
+                       pnl_pct / NULLIF(ABS(entry_price - stop_price) / entry_price, 0) AS r
+                FROM bot_trades
+                WHERE symbol = @symbol AND mode = @mode
+                  AND status IN ('CLOSED','STOPPED')
+                  AND stop_price IS NOT NULL AND entry_price > 0
+            ),
+            cell AS (
+                SELECT COUNT(*) n,
+                       COUNT(*) FILTER (WHERE r > 0) wins,
+                       COALESCE(AVG(r), 0) mean_r
+                FROM (SELECT r FROM scoped
+                       WHERE strategy = @strategy AND side = @side
+                         AND COALESCE(entry_path, '') = COALESCE(@path::text, '')
+                       ORDER BY closed_at DESC LIMIT @lookback) c
+            ),
+            rule AS (
+                SELECT COUNT(*) n,
+                       COUNT(*) FILTER (WHERE r > 0) wins,
+                       COALESCE(AVG(r), 0) mean_r
+                FROM (SELECT r FROM scoped
+                       WHERE strategy = @strategy
+                       ORDER BY closed_at DESC LIMIT @lookback) s
+            ),
+            samepath AS (
+                SELECT COALESCE(
+                    MIN(EXTRACT(epoch FROM (now() - opened_at)) / 60.0), -1) mins
+                FROM bot_trades
+                WHERE symbol = @symbol AND mode = @mode AND strategy = @strategy
+                  AND COALESCE(entry_path, '') = COALESCE(@path::text, '')
+                  AND opened_at > now() - interval '24 hours'
+            ),
+            px AS (
+                SELECT
+                  (SELECT close_price FROM klines_1m
+                    WHERE symbol = @symbol ORDER BY open_time DESC LIMIT 1) AS now_px,
+                  (SELECT close_price FROM klines_1m
+                    WHERE symbol = @symbol AND open_time <= now() - interval '4 hours'
+                    ORDER BY open_time DESC LIMIT 1) AS px4,
+                  (SELECT close_price FROM klines_1m
+                    WHERE symbol = @symbol AND open_time <= now() - interval '12 hours'
+                    ORDER BY open_time DESC LIMIT 1) AS px12
+            )
+            SELECT cell.n, cell.wins, cell.mean_r,
+                   rule.n, rule.wins, rule.mean_r,
+                   samepath.mins,
+                   CASE WHEN px.px4  > 0 THEN (px.now_px - px.px4)  / px.px4  * 100 ELSE 0 END,
+                   CASE WHEN px.px12 > 0 THEN (px.now_px - px.px12) / px.px12 * 100 ELSE 0 END
+            FROM cell, rule, samepath, px
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("symbol",   symbol);
+        cmd.Parameters.AddWithValue("mode",     mode);
+        cmd.Parameters.AddWithValue("strategy", strategy);
+        cmd.Parameters.AddWithValue("side",     side);
+        cmd.Parameters.AddWithValue("path",     (object?)entryPath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("lookback", lookback);
+
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return GateEvidence.Unknown;
+
+        return new GateEvidence(
+            CellTrades:       (int)r.GetInt64(0),
+            CellWins:         (int)r.GetInt64(1),
+            CellMeanR:        r.IsDBNull(2) ? 0m : r.GetDecimal(2),
+            RuleTrades:       (int)r.GetInt64(3),
+            RuleWins:         (int)r.GetInt64(4),
+            RuleMeanR:        r.IsDBNull(5) ? 0m : r.GetDecimal(5),
+            MinutesSinceSamePath: r.IsDBNull(6) ? -1d : (double)r.GetDecimal(6),
+            Move4hPct:        r.IsDBNull(7) ? 0m : r.GetDecimal(7),
+            Move12hPct:       r.IsDBNull(8) ? 0m : r.GetDecimal(8));
     }
 
     // ── Mapper ────────────────────────────────────────────────────────────────
