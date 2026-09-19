@@ -108,7 +108,8 @@ public sealed class CrossVenueFlowStrategy(
                 ? $"; OR >= ${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY ratio, " +
                   "which waives the ratio test entirely (H11)"
                 : "") +
-            ". PRICE IS NOT READ, so every price and z threshold is inert.",
+            ". " + DescribeShortGate(tuning.Signal) +
+            " PRICE IS NOT READ, so every price and z threshold is inert.",
 
         FlowEntryMode.CandleReversal =>
             $"LONG when price has fallen at least {tuning.Signal.ReversalDropPct:F2}% over " +
@@ -128,6 +129,29 @@ public sealed class CrossVenueFlowStrategy(
              "CandleReversal have scorers in this build, and the evaluator will refuse " +
              "rather than score. Fix the config; do not trust anything below this line.",
     };
+
+    /// <summary>
+    /// The SHORT side's own thresholds, stated at startup rather than left to be inferred.
+    ///
+    /// It says UNREACHABLE out loud when the required |OFI| is at or above 0.59, because
+    /// that is this market's all-time maximum over 30 days — 1,250 sell-dominated buckets,
+    /// one of which reached 0.590. A threshold nobody can reach and a threshold nobody
+    /// meant to set look identical in a config file, which is the same reason the ratio
+    /// path announces itself when RatioMinimum is out of reach.
+    /// </summary>
+    private static string DescribeShortGate(FlowSignalOptions s)
+    {
+        var impliedRatio = (1.0 + s.ShortMinOfi) / (1.0 - s.ShortMinOfi);
+
+        var gate = $"SHORT additionally requires sell >= {s.ShortRatioMinimum:F2}x buy AND " +
+                   $"|OFI| >= {s.ShortMinOfi:F2} (= {impliedRatio:F2}x), on BOTH paths — the " +
+                   "high-volume waiver waives the ratio test for longs only (H20).";
+
+        return s.ShortMinOfi >= 0.59
+            ? gate + " AT THIS |OFI| THE SHORT SIDE IS UNREACHABLE: no bucket in 30 days " +
+                     "cleared it, the observed maximum being 0.590. Expect LONG-ONLY behaviour."
+            : gate;
+    }
 
     /// <summary>
     /// Where the target really sits once <c>use_dynamic_tp_sl</c> is on.

@@ -2011,3 +2011,91 @@ happens to contain roughly half the trade stream.
 ### Result
 
 _Open._
+
+---
+
+## H20 — Hold the SHORT side to a higher bar than the LONG side
+
+- **Opened** 2026-09-20
+- **Change** `FlowSignalOptions.ShortRatioMinimum` 3.0 and `ShortMinOfi` 0.60, applied to
+  XVENUE_FLOW only, on **both** entry paths. The long side is untouched at 2.1x / $3M, and
+  the $20M waiver still waives the ratio test — for longs.
+- **Purpose** Operator decision to stop a side that has never produced a winner.
+
+### What was measured, 2026-09-19
+
+Every closed XVENUE_FLOW trade, split by side:
+
+    side    n   wins   win%    pnl_usd   mean_R   total_R   hold
+    LONG   21      9   42.9%   -0.0827   -0.003    -0.063   2.98h
+    SHORT   7      1   14.3%   -0.5074   -0.483    -3.383   3.44h
+
+The long side is flat. The whole of this strategy's loss is the short side. At signal
+level, which includes signals that never became trades, it is worse: **10 short signals,
+0 WIN, 7 LOSS, 3 TIMEOUT, -0.760 mean R, -7.596 total R.** Not one has ever resolved as a
+win. Account-wide across both strategies the split is LONG 37 trades +4.581R against
+SHORT 8 trades -4.432R.
+
+Price rose after entry on 6 of the 7 shorts. Three of the seven came through the
+HIGH_VOLUME waiver and two of those were the worst trades in the set, which is why this
+gate sits before the waiver rather than inside the ratio path.
+
+### Why this is weak evidence, stated before the result
+
+SOL rose **7.4%** across the sample, 103.37 to 111.06, with a single **+10.90%** day on
+2026-09-18 — and three of the seven shorts sit on that day. Shorting a one-way market
+loses whatever the rule is. Excluding 09-18 leaves 4 trades at -0.62R: same sign, n=4, no
+evidence at all. The defect this most likely measures is that the rule has **no trend
+filter**, which is the same thing CandleReversal shows from the other side (0 wins in 26
+trades across both trending periods). A trend filter would address both; this addresses
+one side of one rule.
+
+### The thresholds are one number, and it is out of reach
+
+`ratio = (1+|ofi|)/(1-|ofi|)`, so 3.0x **is** |ofi| 0.500 and |ofi| 0.60 **is** 4.0x. The
+OFI leg is therefore strictly the stricter of the two and the ratio leg can never be the
+condition that binds at these values. Both are checked and carry separate abstain codes
+(`SHORT_RATIO_TOO_LOW`, `SHORT_OFI_TOO_LOW`) so SQL can say which one bound if either
+moves.
+
+Measured over 30 days to 2026-09-19 on `flow_bars_15m`:
+
+    sell-dominated buckets                    1250
+      past the $3M floor                       738
+      clearing the old 2.1x                     29
+      clearing 3.0x                              1
+      clearing |ofi| 0.60                        0
+    all-time maximum                 ratio 3.88 / |ofi| 0.590
+
+**So this does not make shorts rare, it stops them.** Same mechanism as H16 — a threshold
+out of reach rather than a flag — and the startup banner says so out loud rather than
+leaving a reader to work it out. Expect LONG-ONLY behaviour from XVENUE_FLOW.
+
+### Decision rule, fixed in advance
+
+Judge on data collected after this deploy, at **20 closed XVENUE_FLOW trades** or
+**14 days**, whichever comes first.
+
+- **Keep** if XVENUE_FLOW's mean R over the window is above its pre-change long-only
+  figure of -0.003R, and the long side's signal count has not fallen — this change must
+  not touch longs, so a drop in long signals means it leaked.
+- **Reject and restore 2.1x symmetric** if mean R over the window is below -0.003R, i.e.
+  removing shorts made the strategy worse, or if SOL falls more than 5% over the window
+  and the missed shorts would have been the only thing working.
+- **Reject regardless of R** if any LONG behaviour changed: `SHORT_RATIO_TOO_LOW` or
+  `SHORT_OFI_TOO_LOW` appearing on a buy-dominated bucket is a bug, not a result.
+- **Do not move 0.60 down inside the window** to "get some shorts back". If the intent
+  becomes long-only, say so by setting it there and closing this entry, rather than
+  discovering a value that admits exactly the trades that would have worked.
+
+A trend filter, which is the thing actually indicated, is a separate hypothesis and must
+not be opened while this one is running.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is the short side of one rule in a market
+that may turn down, and roughly 1 signal per 30 days by the measurement above.
+
+### Result
+
+_Open._

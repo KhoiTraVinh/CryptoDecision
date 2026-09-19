@@ -343,7 +343,52 @@ public sealed record FlowSignalOptions(
     /// 0.020R at five — against a measured edge of 0.379R. Three minutes buys a settled
     /// number for 4% of the edge.
     /// </summary>
-    int     RatioSettleMinutes            = 3)
+    int     RatioSettleMinutes            = 3,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: how far SELL volume must outweigh buy
+    /// before a SHORT is allowed. Applies to BOTH entry paths, including the high-volume
+    /// waiver — a waived ratio test waives it for longs only.
+    ///
+    /// Asymmetric on purpose. Measured on production 2026-09-19: XVENUE_FLOW's long side
+    /// is roughly flat over 21 closed trades (-0.063R total) while its short side is 1 win
+    /// in 7 for -3.383R, and at signal level the short side is 0 wins in 10 for -7.596R.
+    /// Not one short signal has ever resolved as a win.
+    ///
+    /// THE SAMPLE IS CONFOUNDED AND THE NUMBER IS THE OPERATOR'S. SOL rose 7.4% across
+    /// the sample with a single +10.9% day on 2026-09-18, and three of the seven shorts
+    /// sit on that day. Shorting a one-way market loses whatever the rule is. Excluding
+    /// that day leaves 4 trades at -0.62R, which is the same sign and no evidence at all.
+    /// The honest reading is that this rule has no trend filter, which is the same defect
+    /// CandleReversal shows from the other side — see HYPOTHESES.md H20.
+    /// </summary>
+    decimal ShortRatioMinimum             = 3.0m,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: minimum |OFI| before a SHORT is allowed.
+    /// Also applies to both paths.
+    ///
+    /// THIS IS THE SAME NUMBER AS <see cref="ShortRatioMinimum"/>, EXPRESSED DIFFERENTLY,
+    /// AND IT IS THE STRICTER OF THE TWO. Since
+    ///
+    ///     ratio = (1 + |ofi|) / (1 - |ofi|)      =>      |ofi| = (ratio - 1)/(ratio + 1)
+    ///
+    /// a 3.0x ratio is |ofi| 0.500 and |ofi| 0.60 is a 4.0x ratio. So at these values the
+    /// ratio test above can never be the condition that binds; it is kept because the two
+    /// are separate knobs and lowering this one hands the decision back to it.
+    ///
+    /// **0.60 IS ABOVE ANYTHING THIS MARKET HAS PRODUCED.** Over 30 days to 2026-09-19:
+    /// 1,250 sell-dominated buckets, 738 of them past the $3M floor, of which 29 cleared
+    /// the old 2.1x, exactly 1 cleared 3.0x, and NONE cleared |ofi| 0.60. The all-time
+    /// maximum is ratio 3.88 / |ofi| 0.590 — one bucket, just under this floor.
+    ///
+    /// So this does not make shorts rare, it stops them, by the same mechanism H16 used
+    /// to stop the ratio path: a threshold out of reach rather than a flag. That is the
+    /// operator's stated intent and it is recorded as H20 with a decision rule fixed in
+    /// advance. DescribeRule says it out loud at startup rather than leaving a reader to
+    /// work out that the short side is unreachable.
+    /// </summary>
+    double  ShortMinOfi                   = 0.60)
 {
     /// <summary>
     /// How many closed buckets to load before scoring.
@@ -764,6 +809,42 @@ public static class CrossVenueFlowScorer
                 ofi, 0.0, 0, venues, 0.0);
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
+
+        // ── The short side has to clear a higher bar ──────────────────────────
+        //
+        // Placed BEFORE the high-volume waiver, deliberately, so there is exactly one
+        // short gate rather than one per path. Three of the seven shorts on record came
+        // through the waiver and two of those were the worst trades in the set, so a gate
+        // that the waiver could walk around would leave most of the measured damage in
+        // place. The waiver still waives the ratio test — for longs.
+        //
+        // Both conditions are checked and reported separately even though ShortMinOfi is
+        // the stricter of the two at the shipped values (0.60 |ofi| = 4.0x, against a 3.0x
+        // ratio floor). Separate abstain codes mean SQL can say which one bound, which
+        // matters the moment either is moved. See the options for the measurement and for
+        // the fact that 0.60 sits above this market's all-time maximum of 0.590.
+        if (ofi < 0.0)
+        {
+            if (ratio < (double)options.ShortRatioMinimum)
+                return FlowVerdict.Abstain(
+                    "SHORT_RATIO_TOO_LOW",
+                    $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 sell-dominated on " +
+                    $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
+                    $"{options.ShortRatioMinimum:F2}:1 the SHORT side requires. The long side " +
+                    $"needs only {options.RatioMinimum:F2}:1 — shorts are held to more because " +
+                    "this rule has never produced a winning one.",
+                    ofi, 0.0, 0, venues, 0.0);
+
+            if (Math.Abs(ofi) < options.ShortMinOfi)
+                return FlowVerdict.Abstain(
+                    "SHORT_OFI_TOO_LOW",
+                    $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 sell-dominated " +
+                    $"(OFI {ofi:+0.000;-0.000}) on ${bucket.VolumeUsd / 1_000_000m:F2}M, under " +
+                    $"the {options.ShortMinOfi:F2} |OFI| the SHORT side requires — that is a " +
+                    $"{(1.0 + options.ShortMinOfi) / (1.0 - options.ShortMinOfi):F2}:1 ratio, " +
+                    "above anything measured in 30 days of this market.",
+                    ofi, 0.0, 0, venues, 0.0);
+        }
 
 
         // ── The news-print exception ──────────────────────────────────────────

@@ -91,6 +91,16 @@ entry paths and `bot_trades.entry_path` records which one fired:
                  -> the ratio test is WAIVED, entry takes whichever side traded more,
                     however narrow the lead
 
+    SHORT gate   applies to BOTH paths, ahead of the waiver (H20, 2026-09-20)
+                 sell >= ShortRatioMinimum x buy (3.0x) AND |OFI| >= ShortMinOfi (0.60)
+                 The two are the same number -- 0.60 |OFI| IS 4.0x -- so the OFI leg is
+                 the one that binds, and it sits ABOVE this market's all-time maximum of
+                 0.590. In 30 days, 0 of 738 qualifying sell-dominated buckets cleared
+                 it. XVENUE_FLOW is effectively LONG-ONLY; the startup banner says so.
+                 Why: 7 closed shorts at -3.383R against a flat long side, and 0 wins in
+                 10 short signals ever. The sample is confounded by a 7.4% rally -- see
+                 H20, which records that and the decision rule.
+
 The waiver exists to catch a news print, where a stampede has size on both sides and never
 produces a 2.1:1 lean — measured, ratio falls as volume rises, and only 1 of the 42 buckets
 over $20M also cleared 2.1:1. It is **H11, shipped against its own first measurement**;
