@@ -68,9 +68,13 @@ public interface IOrderEngine
 /// <summary>
 /// Paper trading engine — simulates fills without placing any order.
 ///
-/// Fills are assumed to happen at the requested price with no slippage and a flat
-/// fee. That is optimistic by construction, so paper results are an upper bound on
-/// what the same configuration would have done live, not a forecast of it.
+/// Fills are taken from the REAL top of book and charged the real per-leg fees: the
+/// entry rests on its own side like the live post-only order, the exit crosses like the
+/// live OCO. Sizing, the per-order ceiling, the stop geometry, the leverage and the
+/// margin mode all come from the same places the live engine reads them.
+///
+/// It is still an upper bound, and FillPriceAsync says exactly where: the resting entry
+/// is assumed to fill, and it does not always.
 /// </summary>
 public sealed class PaperOrderEngine(
     BotRepository      repo,
@@ -80,33 +84,94 @@ public sealed class PaperOrderEngine(
     // deployment risk appetite rather than of OKX, but OkxOptions is where it lives
     // today and one copy beats two that drift.
     CryptoDecision.BotService.Exchanges.OkxOptions okxOptions,
+    // Read-only, for the real top of book. A simulated fill at the last traded price is
+    // a fill at a price nobody was offering: the entry rests on the bid and the exit
+    // crosses to it, so paper was collecting half the spread on both legs instead of
+    // paying it on one. See FillPriceAsync.
+    CryptoDecision.BotService.Exchanges.OkxTradingClient trading,
+    CryptoDecision.BotService.Exchanges.OkxInstrumentCache instruments,
     ILogger<PaperOrderEngine> log) : IOrderEngine
 {
-    // Per leg, as a fraction of notional. 0.035% in and 0.035% out is ~7 bps round
-    // trip, which is what this bot ACTUALLY PAID over eight live OKX trades:
+    // Charged per leg, and the two legs are NOT the same rate. OkxOrderEngine rests a
+    // post-only entry (maker, 2 bps) and exits through the OCO (taker, 5 bps). Paper split
+    // the 7 bps round trip evenly at 3.5 bps a side, which gives the right total and the
+    // wrong number on every individual leg — so a paper row and a live row could not be
+    // compared leg by leg against the account bills. The 7 bps total is what this bot
+    // ACTUALLY PAID over eight live OKX trades held under six hours: -6.93 to -7.11 bps,
+    // measured as (exchange realised P&L - price-derived P&L) over notional.
     //
-    //     held <6h   -6.93, -6.94, -6.95, -6.96, -7.07, -7.11 bps
+    // WHAT PAPER STILL DOES NOT MODEL, after the spread was added in FillPriceAsync:
     //
-    // measured as (exchange realised P&L - price-derived P&L) over notional, so it
-    // includes the maker rebate on entry and the taker fee on exit.
+    //   • The post-only entry can fail to fill. The live order rests for about a minute
+    //     and is abandoned if price never comes back. Measured on 68 recorded signals,
+    //     that drops 29% of them — and the dropped ones are the BETTER half, +0.014R
+    //     against -0.023R at a 60% win rate against 44%, because a trade that runs in
+    //     your favour immediately never gives back. Paper fills all of them. This is now
+    //     the largest remaining gap and it flatters paper in the opposite direction to
+    //     what you would guess: live takes fewer trades AND worse ones.
+    //   • Slippage past the stop. Cost 3.9R on paper trade 47 when SOL fell 2.6% inside
+    //     one minute.
     //
-    // Was 0.001 (20 bps round trip), described as "Binance spot without the BNB
-    // discount" — a venue and product this bot has not traded since it moved to OKX
-    // perpetual swaps with post-only entries. That figure was 3x reality, and on the
-    // tight stops this strategy places it was not a rounding error: at a 0.6% stop,
-    // 13 bps of phantom cost is 0.22R on every single trade. Across the first 28
-    // paper trades it manufactured 5.7R of losses that were never paid.
-    //
-    // What this still does NOT model, and both flatter a long hold:
-    //   • funding, which settles every 8h on OKX and cost 56 bps on the one live
-    //     trade that ran the full 12 hours — 9x the rate the backtester assumes
-    //   • slippage past the stop, which cost 3.9R on paper trade 47 when SOL fell
-    //     2.6% inside one minute
-    // Neither bites at the ~2h median hold, and both would if the horizon grew.
-    // Per leg, so two legs come to TradingCosts.PostOnlyRoundTrip — maker in, taker
-    // out, which is what OkxOrderEngine actually does. Derived rather than written as
-    // 0.00035m so it cannot drift away from the live engine's cost model.
-    private const decimal FeeRate = TradingCosts.PostOnlyRoundTrip / 2m;
+    // Funding is NOT on this list any more. Measured 2026-09-19 over the last 90 payments
+    // on SOL-USDT-SWAP: mean 0.25 bps per 8 hours, range -1.15 to +1.00. At the ~4-hour
+    // mean hold that is under a basis point. The "56 bps on a 12-hour hold" this comment
+    // used to carry was an all-in figure for one trade, not a funding rate.
+    private const decimal EntryFeeRate = TradingCosts.OkxMakerFeeRate;
+    private const decimal ExitFeeRate  = TradingCosts.OkxTakerFeeRate;
+
+    /// <summary>
+    /// Where a simulated order actually fills, from the real top of book.
+    ///
+    /// Paper filled at the price the strategy was scored on — the last trade — on both
+    /// legs. That is not a price anybody was offering, and the error is one-directional:
+    /// the live entry rests on the bid and the live exit crosses the spread to reach it,
+    /// so the simulation was collecting half the spread twice instead of paying it once.
+    /// On SOL the spread is usually one tick, which is under a basis point, but the
+    /// measured edge here is single-digit basis points too.
+    ///
+    /// <paramref name="maker"/> true models the resting entry: a buy sits on the bid, a
+    /// sell on the ask. False models the exit crossing: a closing sell hits the bid, a
+    /// closing buy lifts the ask.
+    ///
+    /// Falls back to the passed price, loudly, whenever the venue cannot be reached or
+    /// returns a one-sided book. A simulation must never be blocked by a network call —
+    /// but it must also not pretend the fallback did not happen, because that is how a
+    /// paper series silently becomes a mixture of two cost models.
+    /// </summary>
+    private async Task<decimal> FillPriceAsync(
+        string symbol, string side, bool maker, decimal fallback, CancellationToken ct)
+    {
+        try
+        {
+            var instrument = await instruments.GetSwapAsync(symbol, ct);
+            var quote      = await trading.GetQuoteAsync(instrument.InstId, ct);
+
+            if (quote?.Bid is not { } bid || quote.Ask is not { } ask || bid <= 0m || ask <= bid)
+            {
+                log.LogWarning(
+                    "[PaperBot] No usable two-sided quote for {Symbol} (bid={Bid}, ask={Ask}); " +
+                    "filling at {Price} instead. This row carries no spread cost and is not " +
+                    "comparable with the others.",
+                    symbol, quote?.BidRaw ?? "none", quote?.AskRaw ?? "none", fallback);
+                return fallback;
+            }
+
+            var isBuy = side is "LONG" or "BUY";
+
+            // maker: rest on your own side and wait to be hit.
+            // taker: cross to the other side and pay for immediacy.
+            return maker
+                ? (isBuy ? bid : ask)
+                : (isBuy ? ask : bid);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning(
+                "[PaperBot] Could not read the book for {Symbol} ({Err}); filling at {Price}. " +
+                "This row carries no spread cost.", symbol, ex.Message, fallback);
+            return fallback;
+        }
+    }
 
     /// <summary>Simulation can honour any configuration, so it never refuses.</summary>
     public string? DescribeRefusal(BotOptions opts) => null;
@@ -151,6 +216,9 @@ public sealed class PaperOrderEngine(
                 "so this simulated fill matches what the live engine would have placed.",
                 sized.AskedNotionalUsd, okxOptions.MaxOrderNotionalUsd);
 
+        // The entry rests, like the live one does, so it fills on its own side of the book.
+        price = await FillPriceAsync(symbol, side, maker: true, price, ct);
+
         var qty = Math.Round(notional / price, 6);
 
         // Notional is what the position is worth, and the fee is a cost beside it — not
@@ -159,7 +227,7 @@ public sealed class PaperOrderEngine(
         // became the denominator of pnl_pct. OkxOrderEngine records the filled notional
         // and carries the fee separately; the two modes now agree.
         var filledNotional = Math.Round(qty * price, 4);
-        var entryFee       = Math.Round(filledNotional * FeeRate, 8);
+        var entryFee       = Math.Round(filledNotional * EntryFeeRate, 8);
 
         if (useAiSizing && size.ConfidenceScalar != 1.0m)
             log.LogInformation(
@@ -193,6 +261,14 @@ public sealed class PaperOrderEngine(
             // The venue whose prices drove this simulated fill, so a paper row can
             // still be compared against the live rows it was meant to predict.
             Exchange    = state.Options.Exchange,
+
+            // Recorded because the live engine records them, and a paper row missing them
+            // cannot be compared with a live one on margin or on risk. Paper does not
+            // borrow anything, but the position it is standing in for does: at 3x a $30
+            // notional is $10 of margin, and that is the number an operator is sizing the
+            // account against.
+            Leverage    = okxOptions.Leverage,
+            MarginMode  = okxOptions.MarginMode,
 
             // Same levels the live engine would arm at the exchange. Carried here so a
             // paper run exits where a live run would — otherwise the simulation being
@@ -237,7 +313,17 @@ public sealed class PaperOrderEngine(
     {
         // Charged on the value being closed, not on the entry notional: that is what a
         // percentage fee is, and it is what the exchange bills.
-        var exitFee = Math.Round(trade.Quantity * exitPrice * FeeRate, 8);
+        // The exit CROSSES the spread, the same way the live OCO does.
+        //
+        // The side passed is the side of the CLOSING order, not of the position: closing
+        // a LONG is a sell and has to hit the bid, closing a SHORT is a buy and has to
+        // lift the ask. Passing trade.Side here instead resolves a long exit to the ask,
+        // which is the better price rather than the one being paid — an error that would
+        // have flattered every single paper exit by the width of the spread.
+        var closingSide = trade.Side == "SHORT" ? "BUY" : "SELL";
+        exitPrice = await FillPriceAsync(trade.Symbol, closingSide, maker: false, exitPrice, ct);
+
+        var exitFee = Math.Round(trade.Quantity * exitPrice * ExitFeeRate, 8);
 
         var rawPnl = trade.Side == "SHORT"
             ? (trade.EntryPrice - exitPrice) * trade.Quantity
