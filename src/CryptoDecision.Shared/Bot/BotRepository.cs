@@ -97,9 +97,12 @@ public sealed record GateEvidence(
     public bool CellIsLosing => (CellTrades    >= MinCellTrades && CellMeanR    < 0m)
                              || (SessionTrades >= MinCellTrades && SessionMeanR < 0m);
 
-    /// <summary>Which of the two slices is actually carrying the ground, for the brief.</summary>
-    public bool CellSliceIsLosing    => CellTrades    >= MinCellTrades && CellMeanR    < 0m;
-    public bool SessionSliceIsLosing => SessionTrades >= MinCellTrades && SessionMeanR < 0m;
+    // Two per-slice properties stood here for one commit — CellSliceIsLosing and
+    // SessionSliceIsLosing, added "so the brief can say which slice is carrying the
+    // ground" and then never called, because the brief prints all three slices with their
+    // counts and lets the reader see it. Dead on arrival, in the same commit that added
+    // them. If a caller ever does need one slice's verdict on its own, write it then.
+
     public bool ClusteredPath => MinutesSinceSamePath >= 0d && MinutesSinceSamePath < ClusterMinutes;
 
     /// <summary>True when the last four hours ran against the side being proposed.</summary>
