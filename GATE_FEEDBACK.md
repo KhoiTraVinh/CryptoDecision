@@ -4,6 +4,14 @@ How the entry gate's decisions get measured, and what may be changed on the stre
 of that measurement. Companion to `HYPOTHESES.md`, which governs parameter changes
 made without proof; this file governs the machinery that produces the proof.
 
+
+> **Status 2026-09-19 (commit e3ba35e).** Section 1's audit has been superseded twice over:
+> the gate went on to approve **45 of 45** and refuse nothing, and the root cause was that
+> all four skip grounds were arithmetically unreachable, not that the model was lax. H17
+> replaced them with four grounds computed from this account's own closed trades — which is
+> section 5's proposal, landed. Sections 3 and 4 remain design only. Read section 1 as the
+> history of how the gate got here, not as its current behaviour.
+
 ---
 
 ## 1. The audit that started this

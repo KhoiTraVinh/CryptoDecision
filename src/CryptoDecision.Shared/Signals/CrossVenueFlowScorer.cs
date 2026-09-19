@@ -128,11 +128,17 @@ public enum FlowEntryMode
 /// gate refused eight entries in one day on that ground at 2.8-13.2 bps.
 /// </param>
 public sealed record FlowSignalOptions(
-    // 0 disables the check. Kept identical to appsettings'
-    // FlowStrategy:Signal:MaxDispersionBps — the backtester takes this default rather
-    // than a CLI flag, so a change made only in appsettings would leave the tool
-    // measuring a strategy the bot is not running, which is the drift that has
-    // already cost this repository three parameters.
+    // 0 disables the check, and it IS 0 — so nothing reads this as a ceiling anywhere.
+    //
+    // NO SCORER CONSUMES IT. ScoreFlowRatio and ScoreReversal both leave
+    // FlowVerdict.DispersionBps at 0, and the dispersion check the two deleted modes
+    // performed went with them. The value survives only as CONTEXT in the gate brief,
+    // where it is explicitly labelled "not a ground" — see AiEntryGate. It is left in
+    // place rather than deleted because removing it would edit the gate's prompt while
+    // H17 is being measured on that prompt; remove it once H17 closes.
+    //
+    // The comment here used to say "the backtester takes this default rather than a CLI
+    // flag". There has been no backtester since 2026-09-11.
     double  MaxDispersionBps              = 0.0,
 
     /// <summary>
@@ -541,8 +547,7 @@ public static class CrossVenueFlowScorer
         // live bar is what turned a +0.17 OFI into -0.081 an hour earlier in this same
         // session, and price is no different: the 16:30 bar on 2026-09-08 showed +0.92%
         // at minute ten and closed at +0.48%.
-        var openBar = new DateTime(
-            nowUtc.Ticks - nowUtc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+        var openBar = Buckets.OpenBucketUtc(nowUtc);
 
         var closed = Volatility.Resample(candles, 15).Where(c => c.OpenTime < openBar).ToList();
 
@@ -667,8 +672,7 @@ public static class CrossVenueFlowScorer
     {
         if (count <= 0 || barsByVenue.Count == 0) return [];
 
-        var openBar = new DateTime(
-            nowUtc.Ticks - nowUtc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+        var openBar = Buckets.OpenBucketUtc(nowUtc);
 
         var byBucket = new Dictionary<DateTime, (decimal Buy, decimal Sell)>();
 
@@ -717,41 +721,16 @@ public static class CrossVenueFlowScorer
     /// about 3%. An average of zero says nothing about a tail, and nobody had measured
     /// the tail separately.
     ///
-    /// Measured over 1,562 production buckets, entering at the close of the qualifying
-    /// bucket, stop 2.00%, target 4.00%, 12-hour cap, timeouts priced at the exit rather
-    /// than at zero:
+    /// **H9 carries the measurement.** Over 1,562 production buckets: ratios 1.8 / 2.1 / 2.5
+    /// are all positive on every column, and 2.1 sits in the middle of that plateau rather
+    /// than at its argmax. The $3M volume floor is a separate finding, not a refinement of
+    /// the ratio — below it a 2:1 imbalance is what thin trading looks like, and the floor
+    /// removes 50 of 93 signals and every failing column. Hold time is a plateau too, with
+    /// the shipped 720 minutes at its peak.
     ///
-    ///     ratio    n     mean R   less top 1   1st half   2nd half
-    ///      1.8    200    +0.043     +0.034      +0.045     +0.042
-    ///      2.1     92    +0.185     +0.166      +0.457     +0.083
-    ///      2.5     31    +0.278     +0.225      +0.380     +0.258
-    ///      3.0     12    +0.027     -0.140      +0.011     +0.034
-    ///
-    /// Three adjacent ratios positive on every column. 2.1 is the operator's choice and
-    /// sits in the middle of that plateau rather than at its argmax.
-    ///
-    /// The volume floor is a separate finding, not a refinement of the ratio. At a fixed
-    /// 2.1 ratio, split by the bucket's total notional:
-    ///
-    ///     total      n    mean R   less top 1   1st half   2nd half
-    ///     under $3M  50   +0.025     -0.012      -0.082     +0.048
-    ///     $3-6M      30   +0.383     +0.332      +0.521     +0.303
-    ///     $6-12M     10   +0.212     +0.030      +1.143     -0.408
-    ///     over $12M   2   +1.065        —           —          —
-    ///
-    /// Below $3M a 2:1 imbalance is what thin trading looks like, and it carries
-    /// nothing. The floor is doing real work: it removes 50 of 93 signals and every one
-    /// of the failing columns.
-    ///
-    /// Hold time, at ratio 2.1 with the volume floor, is a plateau rather than a peak:
-    /// +0.032 / +0.082 / +0.273 / +0.346 / +0.379 / +0.330 at 1, 2, 4, 6, 12 and 24
-    /// hours, all positive in both halves and after discarding the largest winner. The
-    /// shipped MaxHoldMinutes of 720 is the peak, and the rule is not sensitive to it.
-    ///
-    /// NOT PROVEN. 43 signals over the whole sample once the volume floor applies, the
-    /// second half is much weaker than the first (+0.137 against +0.751), and it is the
-    /// same 19-day window that roughly eighty configurations have now been measured
-    /// against. H9 in HYPOTHESES.md carries the decision rule.
+    /// NOT PROVEN, and the sample is thin: 43 signals once the volume floor applies, second
+    /// half much weaker than the first. Switched OFF as H16 on 2026-09-18 after 12 traded
+    /// signals at -4.477R, and back ON as H18 on 2026-09-19 by operator override.
     /// </summary>
     public static FlowVerdict ScoreFlowRatio(
         IReadOnlyDictionary<string, IReadOnlyList<FlowBar>> barsByVenue,

@@ -117,9 +117,8 @@ public sealed class CrossVenueFlowStrategy(
                 ? ", long only"
                 : $"; SHORT when it has risen {tuning.Signal.ReversalRisePct:F2}% over " +
                   $"{tuning.Signal.ReversalBarsShort} bar(s)") +
-            ". PRICE ONLY — no order flow is read, so every flow threshold (EnterZ, " +
-            "MinAbsOfi, VenueAgreementZ, SufficientVenue) is inert and signal_outcomes " +
-            "records AggregateZ = 0 meaning 'not measured'.",
+            ". PRICE ONLY — no order flow is read. signal_outcomes records " +
+            "AggregateZ = 0 meaning 'not measured', not 'measured as nothing'.",
 
         // No catch-all that describes a real rule. An unrecognised mode says so, rather
         // than borrowing the nearest description -- which is the defect this method was
@@ -701,44 +700,18 @@ public sealed class CrossVenueFlowStrategy(
         // imbalance of those sums, and close when it points against the trade. Ten
         // buckets is 150 minutes.
         //
-        // SHIPPED WITH NEGATIVE EVIDENCE, on the operator's decision after the numbers
-        // below were put in front of them twice. Recorded here rather than in a commit
-        // message alone, because the next person to read this file should not have to
-        // reconstruct whether it was ever tested.
+        // THIS IS THE ONLY EXIT THAT EARNS. Over the 40 trades since the 2% stop floor
+        // shipped: OFI_REVERSAL 30 exits +4.647R, SL 6 exits -6.615R, TIMEOUT 3 exits
+        // -0.424R, TP zero. Measured 2026-09-19.
         //
-        // Measured on 42 FlowRatio signals over the production window, this rule
-        // against no rule at all:
+        // The pre-launch sweep called this "shipped with negative evidence" and that
+        // label was wrong — it compared windows against a no-rule baseline on 42 signals
+        // before the stop floor existed, and the configuration it measured is not the one
+        // that runs. H10, H14 and H15 in HYPOTHESES.md carry those tables in full.
         //
-        //     window    mean R with rule      (no rule: +0.379)
-        //      8 bars        +0.391
-        //     10 bars        +0.410   <- shipped
-        //     12 bars        +0.340
-        //     15 bars        +0.318
-        //     20 bars        +0.346
-        //     30 bars        +0.338
-        //
-        // The chosen cell is the best of six and beats the baseline by 0.031R. It is
-        // not a plateau: 10 and 12 bars are thirty minutes apart and differ by 0.070R,
-        // which is more than the gap to the baseline. A parameter whose neighbours
-        // disagree by more than its claimed effect is measuring noise.
-        //
-        // The operator's argument for it was slot turnover, which is a real mechanism
-        // this file's earlier measurements had missed: a shorter hold frees the single
-        // per-side slot sooner and lets more signals through. Measured with the slot
-        // limit applied, it does exactly that and still loses:
-        //
-        //     with rule      27 trades taken, 15 blocked, total +9.29R
-        //     without        24 trades taken, 18 blocked, total +10.22R
-        //
-        // Three extra trades worth about +1.0R against 0.082R lost on each of the
-        // other twenty-four. Net -0.93R, which is itself inside the noise of a
-        // 27-trade sample — the honest summary is not that this rule hurts but that it
-        // has never shown a sign of helping, on three independent measures.
-        //
-        // The mechanism that argues against it is the hold-time curve: +0.032 at one
-        // hour, +0.082 at two, +0.273 at four, +0.379 at twelve. This strategy earns by
-        // holding. Any rule that ends the hold early is working against its own source
-        // of return.
+        // Do not propose removing it. Narrowing the stop is the same mistake from the
+        // other side: at a 1% stop the replay takes OFI exits from 51 to 30 and stop-outs
+        // from 12 to 29, because positions get swept out before the flow can turn.
         //
         // Set UseFlowOfiExit false to remove it.
         if (tuning.UseFlowOfiExit)
@@ -1001,39 +974,17 @@ public sealed class FlowStrategyOptions
     /// 0.020 because SOL's median 15-minute true range is 1.07% and the fee floor put
     /// every stop at 0.40%, well inside it. That is not a stop, it is a guarantee of
     /// being stopped: 87 of 115 long signals were closed by ordinary movement rather
-    /// than by being wrong, and every trade this bot has taken carries stop_pct of
-    /// exactly 0.400 — the range low the geometry claims to use has never once been
-    /// reached before the floor bound.
+    /// than by being wrong.
     ///
-    /// Measured over the 19-day production window under the shipped rules, total P&amp;L
-    /// as a percent of notional, with the three checks this file applies to everything:
+    /// **H8 carries the seven-width sweep** that chose it: 1.60 / 2.00 / 2.40 pass all
+    /// three checks and nothing narrower passes any two, which is a plateau rather than
+    /// a peak. Position size falls as the stop widens (notional = capital x risk / stop),
+    /// so risk per trade is unchanged and only the notional moves.
     ///
-    ///     stop     total    less the biggest trade    1st half    2nd half
-    ///     0.40%    + 1.07        - 5.59                + 5.28      - 4.21
-    ///     0.60%    + 0.26        - 6.40                + 0.61      - 0.35
-    ///     0.80%    - 5.60        -12.26                - 4.58      - 1.03
-    ///     1.20%    + 4.57        - 2.09                - 1.05      + 5.62
-    ///     1.60%    +12.15        + 5.49                + 4.15      + 8.00
-    ///     2.00%    +15.94        + 9.28                + 2.92      +13.02
-    ///     2.40%    +10.35        + 3.69                + 1.63      + 8.72
-    ///
-    /// 1.60, 2.00 and 2.40 all pass all three; nothing narrower passes any two. Three
-    /// adjacent widths agreeing is a plateau rather than a peak, which is the whole
-    /// reason to believe it — every other parameter swept in this session produced a
-    /// good cell sitting alone between bad ones.
-    ///
-    /// Position size falls as the stop widens, since notional = capital x risk / stop,
-    /// so the risk per trade is unchanged and only the notional moves. In money at a
-    /// constant risk fraction the sample returns roughly 3.5x what the 0.40% floor did.
-    ///
-    /// The count falls with it: 134 signals become 102, because a wider stop pushes
-    /// more setups under MinRewardRisk. That is the intended trade.
-    ///
-    /// NOT PROVEN. One 19-day window, and roughly fifty configurations were measured
-    /// against it in the session that produced this. What separates it from the other
-    /// forty-nine is that the mechanism was written down in this repository before it
-    /// was measured — see the stop-geometry note — and that it holds across a plateau
-    /// rather than at a point. H8 in HYPOTHESES.md carries the decision rule.
+    /// Re-measured 2026-09-19 on 68 signals with the deployed exit set, and it holds:
+    /// 2.00% is the best cell, 1.0% and 1.2% the worst. The mechanism is that a narrow
+    /// stop destroys the OFI exit — at 1% the replay takes stop-outs from 12 to 29 and
+    /// OFI exits from 51 to 30, sweeping positions out before the flow can turn.
     ///
     /// The literal moved to <see cref="FlowGeometryDefaults.MinStopPct"/> so the
     /// backtester can reach it. It could not before, and did not apply any floor at
@@ -1046,40 +997,25 @@ public sealed class FlowStrategyOptions
     /// <see cref="FlowOfiBars"/> closed buckets turns against it, after having
     /// favoured it earlier in the hold.
     ///
-    /// Shipped with negative evidence on the operator's decision — the full table is in
-    /// CrossVenueFlowStrategy where the rule is applied, and H10 in HYPOTHESES.md
-    /// carries the decision rule. Summary: best of six windows, beats no-rule by 0.031R,
-    /// neighbouring windows disagree by more than that, and with the position limit
-    /// applied it takes three more trades and finishes 0.93R behind.
+    /// **This is the only exit that earns** — 30 of the last 40 closures, +4.647R, against
+    /// the stop's -6.615R over 6 and a take-profit that has never fired. The pre-launch
+    /// sweep called it negative; it measured a configuration that does not run. H10, H14
+    /// and H15 carry those tables. Do not propose removing it.
     /// </summary>
     public bool UseFlowOfiExit { get; set; } = true;
 
     /// <summary>
     /// Closed 15-minute buckets summed for that imbalance. 10 = 150 minutes.
     ///
-    /// The operator's choice, argued from slot turnover: a shorter hold frees the one
-    /// per-side slot sooner. The mechanism is real and was missing from earlier
-    /// measurements here; the magnitude was then measured and does not pay.
+    /// **XVENUE_FLOW runs 15, set in appsettings (H15).** The default here stays at 10 so
+    /// the change lives in one configuration section and DipStrategy keeps the value it was
+    /// running under — the two rules are genuinely on different windows, not drifting.
     ///
-    /// SET TO 15 FOR XVENUE_FLOW ON 2026-09-18, in appsettings. The default here stays
-    /// at 10 so the change lives in one configuration section and DipStrategy keeps the
-    /// value it was running under.
-    ///
-    /// Why, from production: of the first nine RATIO trades, EIGHT closed on this exit and
-    /// one on the stop. Mean hold 3.83h, longest 7.94h — not one reached the 12-hour cap.
-    /// The rule measures +0.382R on a 12-hour hold against +0.120R at 2.5 hours, so it has
-    /// been running nearer the low end of its own curve, and max_hold_minutes has never
-    /// had the chance to apply. Widening the window is the narrowest lever on that: the
-    /// entry, the barriers and the cap are all untouched.
-    ///
-    /// NOT MEASURED. 20 was never swept — the 8/10/12-bar plateau under H10 does not reach
-    /// it, and neighbouring values there disagreed by more than the effect claimed. A wider
-    /// window also holds losers longer, not only winners; that the first effect dominates
-    /// is the claim under test, not an established fact. Registered as H14 with a decision
-    /// rule fixed in advance.
-    ///
-    /// It costs H9 its sample: the nine RATIO trades already closed exited under a
-    /// different rule and cannot be pooled with what follows.
+    /// The reasoning, from production: trades were closing on this exit at a mean hold of
+    /// 3.83h and never reaching the 12-hour cap, while the rule measures better the longer
+    /// it holds. Widening the window is the narrowest lever on that — entry, barriers and
+    /// cap are all untouched. H14 (20 buckets) was abandoned after 3 trades and superseded
+    /// by H15; both entries carry the numbers and the decision rules.
     /// </summary>
     public int FlowOfiBars { get; set; } = 10;
 }

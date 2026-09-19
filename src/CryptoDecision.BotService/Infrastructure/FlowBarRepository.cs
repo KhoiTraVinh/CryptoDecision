@@ -96,7 +96,7 @@ public sealed class FlowBarRepository(NpgsqlDataSource dataSource) : IFlowBarRep
         // The bucket in progress is excluded here, in SQL, rather than trimmed after
         // the fact. Doing it in the query is what makes the row limit mean "N usable
         // buckets" — trimming afterwards would have silently returned N-1.
-        var openBucket = FloorTo15Minutes(DateTime.UtcNow);
+        var openBucket = Buckets.FloorUtc(DateTime.UtcNow);
 
         var byVenue = new Dictionary<string, List<FlowBar>>(StringComparer.OrdinalIgnoreCase);
         DateTime? latest = null;
@@ -175,9 +175,4 @@ public sealed class FlowBarRepository(NpgsqlDataSource dataSource) : IFlowBarRep
         return candles;
     }
 
-    internal static DateTime FloorTo15Minutes(DateTime utc)
-    {
-        var quarter = TimeSpan.FromMinutes(15).Ticks;
-        return new DateTime(utc.Ticks - utc.Ticks % quarter, DateTimeKind.Utc);
-    }
 }

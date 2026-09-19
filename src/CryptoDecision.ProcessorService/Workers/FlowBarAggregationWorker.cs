@@ -151,6 +151,18 @@ public sealed class FlowBarAggregationWorker(
     /// the following hours, and the same imbalance measured on an arbitrary offset
     /// does not. Ticks arithmetic rather than minute subtraction so seconds and
     /// sub-second precision are dropped too.
+    ///
+    /// DELIBERATELY A SECOND COPY. The identical function lives in
+    /// <c>CryptoDecision.Shared.Signals.Buckets.FloorUtc</c>, where four other copies were
+    /// consolidated on 2026-09-19. This one stays because ProcessorService has no project
+    /// reference to Shared, and adding one — pulling in the bot models, RiskEngine and the
+    /// scorer — to share two lines of tick arithmetic is not a trade worth making.
+    ///
+    /// **This is the dangerous copy, so it is the one to check first.** It defines the
+    /// boundary the buckets are WRITTEN on; Buckets.FloorUtc defines the boundary they are
+    /// READ on. Every other pair of copies could only disagree about interpretation. If
+    /// these two ever disagree, the aggregation and every consumer of it are on different
+    /// grids and nothing will say so. Change one, change the other.
     /// </summary>
     internal static DateTime FloorTo15Minutes(DateTime utc)
     {

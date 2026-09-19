@@ -71,7 +71,7 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
     /// same decision" would let a signal be recorded twice and gated once.
     /// </summary>
     public static DateTime BucketOf(DateTime utc) =>
-        new(utc.Ticks - utc.Ticks % TimeSpan.FromMinutes(15).Ticks, DateTimeKind.Utc);
+        Buckets.FloorUtc(utc);
 
     // ── Write path (BotService) ───────────────────────────────────────────────
 

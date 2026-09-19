@@ -66,26 +66,15 @@ builder.Services.AddSingleton<ITradingStrategy, CrossVenueFlowStrategy>();
 // 15-minute bars, short after it has risen ReversalRisePct over ReversalBarsShort. Price
 // only — no order flow is read.
 //
-// SHIPPED AGAINST THE MEASUREMENT, on the operator's decision, in paper mode. Measured
-// on 1,770 buckets from 2026-08-21 to 09-11 with the deployed exit set (stop 2%, target
-// 4%, the 10-bucket OFI reversal, 12-hour cap, costs 7 bps plus funding):
+// H13 carries the pre-launch measurement, which was negative in every configuration and
+// failed all three checks four times over. It has since been the majority of the trade
+// stream and is the only rule currently in positive R: 17 closed at +0.211 mean as of
+// 2026-09-19 — though two trades from one rally carry it, and it drops to -0.102 without
+// them. See also the FATAL IN A TREND note: 0 wins in 26 trades across both trending
+// periods, by buying falling knives.
 //
-//     config                     n    meanR   1st half  2nd half  less top 1
-//     fixed, no OFI exit       159   -0.057    -0.078    -0.031     -0.070
-//     fixed, with OFI exit     159   -0.039    -0.051    -0.024     -0.052
-//     dynamic, with OFI exit   159   -0.005    -0.006    -0.005     -0.026
-//     long only, with OFI      138   -0.063    -0.080    -0.044     -0.078
-//
-// Negative overall, negative in BOTH halves, and negative after discarding the best
-// trade — in every configuration. It fails all three of this repository's checks four
-// times over. The long side, which is the dip-buying half, is the losing half at -0.063;
-// the short side is mildly positive on 21 observations. See H13 in HYPOTHESES.md, which
-// carries the decision rule, and the FATAL IN A TREND note: this is the rule that took
-// 0 wins in 26 trades across both trending periods, by buying falling knives.
-//
-// It also fires about 7.6 times a day against FlowRatio's 2, so once enabled it is the
-// majority of the trade stream. Remove it from bot_config.active_strategies to stop it;
-// nothing here needs redeploying.
+// It fires ~7.6 times a day against FlowRatio's 2. Remove it from
+// bot_config.active_strategies to stop it; nothing here needs redeploying.
 builder.Services.AddSingleton<ITradingStrategy>(sp =>
 {
     var options = new FlowStrategyOptions
