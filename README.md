@@ -394,21 +394,23 @@ unhealthy".
 |---|---|
 | `trades` | RANGE-partitioned by `trade_time`, one partition per day, 7-day retention |
 | `flow_bars_15m` | Per-venue 15-minute taker buckets — the strategy's only input |
-| `klines_1m` | 1-minute OHLCV; feeds ATR and the backtester |
+| `klines_1m` | 1-minute OHLCV; feeds the ATR reading the stop is scaled from |
 | `bot_config` | Singleton row: commands, heartbeat, and the current verdict |
 | `bot_trades` | Trade history with realised P&L, per-trade stop/target/ATR/gate verdict |
 | `bot_trades_archive` | Trades from retired strategies, kept out of the active series |
 | `daily_feature_table` | return_24h, volatility, volume_change, whale_count, vwap |
-| `prediction_table` | Empty. Its writer is deleted and so is the API that read it |
 
 `is_whale` is a generated column, `quote_qty > 100000`. On SOL that fires rarely — 116 of
 2.41 M trades in a recent 24 hours, largest single trade $488,913 — so treat it as an
 outlier marker, not a routine signal. The same threshold was calibrated for BTC and
 contributed nothing to the retired MOMENTUM score while appearing to carry 15% of it.
 
-`v_flow_signal_readiness` answers "can the strategy score yet". Use it rather than
-`v_flow_bar_coverage`, which measures from the first bucket ever written and is dragged
-down by historical gaps.
+`v_flow_signal_readiness` answers "can the strategy score yet", and `scripts/health.sh`
+reads it. It is the only diagnostic view left: `v_flow_bar_coverage`, `v_whale_summary` and
+`v_partition_sizes` were dropped in sql/038 along with `prediction_table`, `price_alerts`,
+`alert_notifications`, `app_users` and `gate_tuning_log` — every one of them empty, unread
+by code and unread by the scripts. `v_flow_bar_coverage` measured from the first bucket
+ever written and was dragged down by historical gaps, which is why readiness replaced it.
 
 ## Arming
 

@@ -129,6 +129,14 @@ reads that table to change behaviour, and nothing writes to it automatically. Th
 `sample_size >= 200` CHECK constraint means a proposal from a small sample cannot even
 be recorded, let alone applied.
 
+**The table itself was dropped in sql/038 on 2026-09-20**, having never held a row. This
+document is a design, not a description of something that runs, and a table nothing writes
+is not a record — it is a schema object that makes an unbuilt feature look half-built.
+Recreate it in the same migration that first writes to it; the DDL is in the history of
+`sql/029_signal_outcomes.sql`. Everything below still describes what would have to be true
+before any of this is worth building. `EnterZ` and `MinAgreeingVenues` above are also gone:
+the ZScore rule that read them was deleted on 2026-09-18.
+
 ---
 
 ## 4. Prompt refinement (design only — not implemented)
