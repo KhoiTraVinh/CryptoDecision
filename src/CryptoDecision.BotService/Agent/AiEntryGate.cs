@@ -343,41 +343,11 @@ public sealed class AiEntryGate(
     /// the scorer's own ceiling is 25 bps and anything above it never reaches the
     /// model. A number with no scale invites the model to supply one from nowhere.
     /// </summary>
-    /// <summary>
-    /// Venues the scorer measured and then rejected, or null when this rule does not
-    /// score venues at all.
-    ///
-    /// One method, because there were two copies of this subtraction and only one of
-    /// them got fixed. Both read <c>Votes.Count - ParticipatingVenues</c>, which is
-    /// correct for a rule that scores venues individually and nonsense for one that does
-    /// not: FlowRatio reads the aggregate, returns no votes, and reports all three venues
-    /// as participating, so the subtraction came out at MINUS THREE. <see cref="Describe"/>
-    /// was corrected and <see cref="ContradictsBrief"/> was not, which left the
-    /// fabricated-premise detector permanently off for the only rule that trades.
-    ///
-    /// Null rather than zero is the distinction that matters. "No venue was excluded"
-    /// and "exclusion is not a thing this rule can express" are different facts, and
-    /// collapsing them is what let a model reason about venue quality on a rule that
-    /// never measured it.
-    /// </summary>
-    private static int? ExcludedVenues(FlowVerdict flow) =>
-        flow.Votes.Count > 0 ? flow.Votes.Count - flow.ParticipatingVenues : null;
-
     private static string Describe(EntryCandidate c, IReadOnlyList<SimilarCase> examples)
     {
         var flow = c.Flow;
 
-        var venues = string.Join("\n", flow.Votes.Select(v => v.Participated
-            ? $"  {v.Exchange,-8} z={v.Z,+6:F2}  OFI {v.Ofi,+6:F3} (its median {v.OfiMedian,+6:F3})  " +
-              $"${v.VolumeUsd,14:N0}  {v.TradeCount,7:N0} prints  " +
-              $"concentration {v.Concentration:P1}{(v.Agreed ? "   <-- agrees" : "")}"
-            : $"  {v.Exchange,-8} EXCLUDED: {v.ExclusionReason}"));
-
         var g = c.Geometry;
-
-        var excludedOrNull = ExcludedVenues(flow);
-        var scoresVenues   = excludedOrNull is not null;
-        var excluded       = excludedOrNull ?? 0;
 
         // Each of these is one of the four grounds for refusing, rendered so the
         // condition attached to that ground can be evaluated by reading one line.
@@ -412,29 +382,23 @@ public sealed class AiEntryGate(
                 never a reason to skip; breakeven win rate {1m / (1m + g.RewardRisk):P1})
               stop basis: {g.Basis}, from ATR {g.AtrPctUsed:F2}% of price
 
-            EVIDENCE — {(scoresVenues
-                ? "cross-venue aggressive order flow"
-                : flow.ParticipatingVenues == 0
-                    ? "price only (this rule reads no order flow at all)"
-                    : "aggregate aggressive order flow (this rule does not score venues)")}
-            {(scoresVenues
-                ? $"  aggregate z {flow.AggregateZ:+0.00;-0.00}, OFI {flow.AggregateOfi:+0.000;-0.000}\n" +
-                  $"  {flow.AgreeingVenues} of {flow.ParticipatingVenues} participating venues agree\n" +
-                  $"  venues that participated but did not reach the threshold: " +
-                  $"{flow.ParticipatingVenues - flow.AgreeingVenues}"
-                // Under FlowRatio the venue fields are structurally zero: it reads one
-                // aggregate bucket and never scores a venue. Printing "z +0.00" and
-                // "0 of 3 venues agree" reads as strong evidence AGAINST the trade, and
-                // it is not evidence at all -- it is the shape of a record that was never
-                // filled in. What decided this entry is the imbalance and the notional,
-                // so that is what the brief states.
+            EVIDENCE — {(flow.ParticipatingVenues == 0
+                ? "price only (this rule reads no order flow at all)"
+                : "aggregate aggressive order flow (this rule does not score venues)")}
+            {(
+                // NEITHER surviving rule scores venues. The per-venue branch that used to
+                // sit here was unreachable: VenueVote was never constructed by anything,
+                // so Votes was always empty, PER VENUE always rendered as a blank section,
+                // and the excluded count was always null. It went with the ZScore rule on
+                // 2026-09-18 and the shape it left behind was deleted on 2026-09-19.
+                //
                 // A rule that reads no flow at all reports ParticipatingVenues 0, and
                 // running the imbalance arithmetic on it produced "1.00:1 sell-dominated
                 // (OFI +0.000) across 0 venue(s)" — a sentence with a direction, a ratio
                 // and a venue count in it, every one of them invented from a record that
                 // was never filled in. CANDLE_REVERSAL reads price and nothing else, so
                 // what it says about price is the whole of its evidence.
-                : flow.ParticipatingVenues == 0
+                flow.ParticipatingVenues == 0
                     ? $"  {flow.Reason}\n" +
                       "  This rule reads PRICE ONLY. Order flow, z, venue agreement and\n" +
                       "  dispersion are not consulted — absent, not zero — and are not grounds\n" +
@@ -475,15 +439,9 @@ public sealed class AiEntryGate(
 
             CONTEXT, NOT GROUNDS — already checked in code, never a reason to skip
               dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
-              excluded venues   {(scoresVenues ? excluded.ToString() : "n/a"),6}       — {(scoresVenues
-                                    ? "venues the scorer measured and rejected"
-                                    : "this rule reads the AGGREGATE and does not score venues at all")}
               today's P&L       ${c.TodayPnlUsd,6:F2}   — {lossShare}
               open, this rule   {c.OpenPositions,6}       — limit {c.MaxOpenPositions}
               {c.Strategy} overall: {e.RuleTrades} closed, {e.RuleWins} won, mean R {e.RuleMeanR:+0.000;-0.000}
-
-            PER VENUE
-            {venues}
 
             ACCOUNT
               capital ${c.CapitalUsd:F2}, open positions {c.OpenPositions} of {c.MaxOpenPositions}
@@ -611,18 +569,14 @@ public sealed class AiEntryGate(
     {
         var text = reason.ToLowerInvariant();
 
+        // Citing an excluded venue is now a fabricated premise unconditionally: no rule in
+        // this build scores venues, so no venue can ever have been excluded. There is no
+        // count to compare against any more, which is a stronger statement than the one
+        // this check used to make.
         if (text.Contains("excluded") || text.Contains("thin data"))
-        {
-            // Null means the rule does not score venues, so citing exclusions against it
-            // is a fabricated premise by construction — a stronger statement than "the
-            // count was zero", and reported as one.
-            if (ExcludedVenues(c.Flow) is not { } excluded)
-                return "it cites excluded venues, and this rule reads the aggregate — it " +
-                       "does not score venues at all, so no venue could have been excluded.";
-
-            if (excluded == 0)
-                return $"it cites excluded venues, and the brief showed {excluded} excluded.";
-        }
+            return "it cites excluded venues, and no rule in this build scores venues at " +
+                   "all — the brief does not contain an excluded count, and none could be " +
+                   "above zero.";
 
         if ((text.Contains("already open") || text.Contains("positions are open")) && c.OpenSameSide < 1)
             return $"it cites open positions, and the brief showed {c.OpenSameSide} on this side.";

@@ -117,9 +117,17 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
             cmd.Parameters.AddWithValue("ofi",      (decimal)flow.AggregateOfi);
             cmd.Parameters.AddWithValue("agree",    (short)flow.AgreeingVenues);
             cmd.Parameters.AddWithValue("part",     (short)flow.ParticipatingVenues);
-            // The count the gate is told, and the one it has twice claimed was above
-            // zero when it was not. Stored so that claim is checkable after the fact.
-            cmd.Parameters.AddWithValue("excluded", (short)(flow.Votes.Count - flow.ParticipatingVenues));
+            // NULL, not 0: no surviving rule scores venues, so nothing was excluded and
+            // nothing counted them either. Those are different facts and a zero collapses
+            // them.
+            //
+            // This wrote `Votes.Count - ParticipatingVenues` until 2026-09-19, and with no
+            // votes and three venues that is 0 - 3 = **-3**. Twenty-five rows on production
+            // carry a negative count of excluded venues, which is not a quantity that can
+            // exist. It is the THIRD place the same subtraction appeared: Describe and
+            // ContradictsBrief were both corrected when the venue-scoring rule was deleted,
+            // and this one was not, because it is a write nobody reads back.
+            cmd.Parameters.AddWithValue("excluded", DBNull.Value);
             cmd.Parameters.AddWithValue("disp",     (decimal)flow.DispersionBps);
             cmd.Parameters.AddWithValue("atr",      (decimal)geo.AtrPctUsed);
             cmd.Parameters.AddWithValue("price",    r.SignalPrice);
@@ -127,13 +135,14 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
             cmd.Parameters.AddWithValue("targetPct", geo.TargetPct);
             cmd.Parameters.AddWithValue("rr",       geo.RewardRisk);
             cmd.Parameters.AddWithValue("conf",     r.Confidence);
+            // Also NULL. This serialised a per-venue breakdown that only the deleted
+            // ZScore rule ever produced; every row written since carries the empty array
+            // `[]`, which reads as "measured, and there was nothing" rather than "this
+            // rule does not measure venues". The column stays for the rows that predate
+            // the deletion.
             cmd.Parameters.Add(new NpgsqlParameter("votes", NpgsqlDbType.Jsonb)
             {
-                Value = JsonSerializer.Serialize(flow.Votes.Select(v => new
-                {
-                    v.Exchange, v.Z, v.Ofi, v.VolumeUsd, v.TradeCount,
-                    v.Concentration, v.Participated, v.Agreed, v.ExclusionReason,
-                })),
+                Value = DBNull.Value,
             });
 
             if (await cmd.ExecuteScalarAsync(ct) is long inserted) return inserted;

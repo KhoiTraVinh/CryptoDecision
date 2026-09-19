@@ -414,19 +414,6 @@ public static class EntryPaths
     public const string HighVolume = "HIGH_VOLUME";
 }
 
-/// <summary>One venue's contribution to a verdict, and whether it counted.</summary>
-public sealed record VenueVote(
-    string  Exchange,
-    double  Ofi,
-    double  OfiMedian,
-    double  Z,
-    decimal VolumeUsd,
-    int     TradeCount,
-    double  Concentration,
-    bool    Participated,
-    bool    Agreed,
-    string  ExclusionReason);
-
 /// <summary>
 /// The scorer's answer for one decision bucket.
 ///
@@ -446,7 +433,6 @@ public sealed record FlowVerdict(
     double   DispersionBps,
     string   AbstainCode,
     string   Reason,
-    IReadOnlyList<VenueVote> Votes,
 
     /// <summary>
     /// Which rule produced an actionable verdict: <see cref="EntryPaths.Ratio"/>,
@@ -465,14 +451,13 @@ public sealed record FlowVerdict(
     public static FlowVerdict Abstain(
         string code,
         string reason,
-        IReadOnlyList<VenueVote>? votes = null,
         double aggregateOfi = 0.0,
         double aggregateZ = 0.0,
         int agreeing = 0,
         int participating = 0,
         double dispersionBps = 0.0)
         => new(false, null, aggregateOfi, aggregateZ, agreeing, participating,
-               dispersionBps, code, reason, votes ?? []);
+               dispersionBps, code, reason);
 }
 
 /// <summary>
@@ -641,8 +626,7 @@ public static class CrossVenueFlowScorer
                   (contested
                      ? $" The {dipBars}-bar window also showed a {dipMovePct:F2}% fall, which the " +
                        "shorter window overrides: the dip has already been bought back."
-                     : ""),
-            Votes:               []);
+                     : ""));
     }
 
     /// <summary>
@@ -755,7 +739,7 @@ public static class CrossVenueFlowScorer
             return FlowVerdict.Abstain(
                 "NO_CLOSED_BUCKET",
                 "flow_bars_15m has no closed bucket for this symbol yet.",
-                [], 0.0, 0.0, 0, venues, 0.0);
+                0.0, 0.0, 0, venues, 0.0);
 
         var bucket = recent[0];
 
@@ -773,7 +757,7 @@ public static class CrossVenueFlowScorer
                 $"The {bucket.Bucket:HH:mm} bucket closed {settled.TotalMinutes:F1} min ago and " +
                 $"the aggregation worker is still folding late trades into it. Waiting for " +
                 $"{options.RatioSettleMinutes} min.",
-                [], bucket.Ofi, 0.0, 0, venues, 0.0);
+                bucket.Ofi, 0.0, 0, venues, 0.0);
 
         if (bucket.VolumeUsd < options.RatioMinVolumeUsd)
             return FlowVerdict.Abstain(
@@ -783,7 +767,7 @@ public static class CrossVenueFlowScorer
                 $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floor. A 2:1 imbalance on thin " +
                 "volume is what thin volume looks like: below the floor those signals measured " +
                 "-0.012 mean R once the largest winner is removed, against +0.332 above it.",
-                [], bucket.Ofi, 0.0, 0, venues, 0.0);
+                bucket.Ofi, 0.0, 0, venues, 0.0);
 
         // ratio = buy/sell, recovered from the imbalance:
         //   ofi = (b-s)/(b+s)  =>  b/s = (1+ofi)/(1-ofi)
@@ -797,7 +781,7 @@ public static class CrossVenueFlowScorer
                 "ONE_SIDED_BUCKET",
                 $"The {bucket.Bucket:HH:mm} bucket has no volume on one side at all, which is a " +
                 "data fault rather than a market state.",
-                [], ofi, 0.0, 0, venues, 0.0);
+                ofi, 0.0, 0, venues, 0.0);
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
 
@@ -831,7 +815,7 @@ public static class CrossVenueFlowScorer
                     $"${largestPrint:N0} print is {concentration:P0} of that side's " +
                     $"${dominant / 1_000_000m:F2}M — over the " +
                     $"{options.RatioMaxConcentration:P0} cap. One order is not a crowd.",
-                    [], ofi, 0.0, 0, venues, 0.0);
+                    ofi, 0.0, 0, venues, 0.0);
         }
 
         // ── The news-print exception ──────────────────────────────────────────
@@ -860,7 +844,7 @@ public static class CrossVenueFlowScorer
                     $"The {bucket.Bucket:HH:mm} bucket traded " +
                     $"${bucket.VolumeUsd / 1_000_000m:F2}M with buy and sell exactly equal, so " +
                     "there is no dominant side to enter with.",
-                    [], ofi, 0.0, 0, venues, 0.0);
+                    ofi, 0.0, 0, venues, 0.0);
 
             return new FlowVerdict(
                 Actionable:          true,
@@ -884,7 +868,6 @@ public static class CrossVenueFlowScorer
                                      // brief" was being handed a claim with no number in it.
                                      $"lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
                                      "Volume is the whole signal here; price is not consulted.",
-                Votes:               [],
                 EntryPath:           EntryPaths.HighVolume);
         }
 
@@ -899,7 +882,7 @@ public static class CrossVenueFlowScorer
                     ? $", and under the ${options.RatioHighVolumeUsd / 1_000_000m:F1}M that " +
                       "would have waived it."
                     : "."),
-                [], ofi, 0.0, 0, venues, 0.0);
+                ofi, 0.0, 0, venues, 0.0);
 
         var side = ofi > 0 ? "LONG" : "SHORT";
 
@@ -918,7 +901,6 @@ public static class CrossVenueFlowScorer
                                  $"past the {options.RatioMinimum:F2}:1 and " +
                                  $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floors. Entering " +
                                  "WITH the dominant side; price is not consulted.",
-            Votes:               [],
             EntryPath:           EntryPaths.Ratio);
     }
 }
