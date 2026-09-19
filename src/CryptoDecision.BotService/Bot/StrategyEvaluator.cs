@@ -137,25 +137,12 @@ public sealed class StrategyEvaluator
                 trade.Id, held.TotalMinutes, opts.MaxHoldMinutes);
         }
 
-        // ── Breakeven stop (universal) ──────────────────────────────────────
-        // Once trade reaches BreakevenTriggerPct profit, treat entry price as floor.
-        // If price retraces back to entry → close at breakeven (risk-free exit).
-        if (opts.UseBreakevenStop && changePct < 0m && trade.PeakPrice.HasValue)
-        {
-            var peakChange = trade.Side == "SHORT"
-                ? -(trade.PeakPrice.Value - trade.EntryPrice) / trade.EntryPrice
-                : (trade.PeakPrice.Value - trade.EntryPrice) / trade.EntryPrice;
-
-            // Peak was above breakeven trigger, but current price reverted to entry
-            if (peakChange >= opts.BreakevenTriggerPct)
-            {
-                _log.LogInformation(
-                    "[Breakeven] Trade {Id} peak was +{Peak:P2} but now {Cur:P2} → closing at breakeven",
-                    trade.Id, peakChange, changePct);
-                return new ExitDecision(true, "BREAKEVEN", currentPrice, changePct);
-            }
-        }
-
+        // The breakeven stop lived here, ahead of the strategy, and was deleted on
+        // 2026-09-19. It closed any trade that reached +0.8% and came back to entry, which
+        // after fees is a small loss; with the trailing stop it truncated nearly every
+        // winner the bot had. It also fired on rules that never asked for it, because it
+        // sat in this universal block rather than in a strategy. HYPOTHESES.md carries the
+        // numbers under "Removed features".
         // ── The position outlived its strategy ────────────────────────────────
         //
         // Returning "do not exit" here used to be silent, and silence is the wrong

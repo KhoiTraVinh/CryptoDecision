@@ -176,39 +176,20 @@ public sealed class CrossVenueFlowStrategy(
         // the basis rather than guessed at.
         var dyn = opts.UseDynamicTpSl;
 
-        if (!tuning.UseRangeGeometry)
-        {
-            var stored    = stopPct * (decimal)tuning.TargetRiskMultiple;
-            var effective = EffectiveTargetPct(stored, dyn);
-
-            return new StrategyRiskProfile(
-                Name, stopPct, effective,
-                $"ATR geometry: stop floored at {stopPct:P2} (fee floor {feeFloor:P2}, noise " +
-                $"floor {tuning.MinStopPct ?? 0m:P2}), target {tuning.TargetRiskMultiple:F2}x " +
-                "the stop. A larger ATR widens both together, so the ratio holds." +
-                (dyn
-                    ? $" use_dynamic_tp_sl is ON, so the {stored:P2} target RETREATS as price " +
-                      $"advances and is only reachable at {effective:P2}; the stop may widen to " +
-                      "2x the same way, measured at 1.04x when stops actually fired."
-                    : ""));
-        }
-
-        // Under range geometry the target is wherever the boundary falls and is not a
-        // configured number at all. The one thing that IS fixed is the worst ratio the
-        // strategy will accept, so that is what gets reported — inverting MinRewardRisk,
-        // which is net of fees: rr = (target - fee) / (stop + fee).
-        var minTarget = tuning.MinRewardRisk * (stopPct + tuning.RoundTripFeeRate)
-                      + tuning.RoundTripFeeRate;
-
-        var minEffective = EffectiveTargetPct(minTarget, dyn);
+        // One geometry now. The range branch that stood beside this went with
+        // ResolveFromRange on 2026-09-19; see HYPOTHESES.md "Removed features".
+        var stored    = stopPct * (decimal)tuning.TargetRiskMultiple;
+        var effective = EffectiveTargetPct(stored, dyn);
 
         return new StrategyRiskProfile(
-            Name, stopPct, minEffective,
-            $"range geometry: stop floored at {stopPct:P2}; the target is the range boundary " +
-            $"and varies, so this is the smallest one MinRewardRisk {tuning.MinRewardRisk:F2}:1 " +
-            "will admit. Real entries are usually wider." +
+            Name, stopPct, effective,
+            $"ATR geometry: stop floored at {stopPct:P2} (fee floor {feeFloor:P2}, noise " +
+            $"floor {tuning.MinStopPct ?? 0m:P2}), target {tuning.TargetRiskMultiple:F2}x " +
+            "the stop. A larger ATR widens both together, so the ratio holds." +
             (dyn
-                ? $" use_dynamic_tp_sl is ON, so that floor is only reachable at {minEffective:P2}."
+                ? $" use_dynamic_tp_sl is ON, so the {stored:P2} target RETREATS as price " +
+                  $"advances and is only reachable at {effective:P2}; the stop may widen to " +
+                  "2x the same way, measured at 1.04x when stops actually fired."
                 : ""));
     }
 
@@ -298,121 +279,34 @@ public sealed class CrossVenueFlowStrategy(
                     "of the wrong width is what this strategy exists to stop doing.");
 
 
-            // ── Entry timing: wait for the move to give some of itself back ────
+            // The entry-pullback wait was deleted on 2026-09-19. It held the entry until
+            // price gave back k x ATR from the signal bucket close, and re-measured on all
+            // 68 recorded signals with the deployed exit set it does not work at any depth:
+            // net total R by k is -0.822 / -1.222 / -0.667 / -3.617 / -1.777 / -0.835, with
+            // H4's shipped 0.75 the WORST of the six. Waiting shrinks losers and winners by
+            // the same factor and skips winners 11:1, because a trade that runs in your
+            // favour immediately never gives back. HYPOTHESES.md, "Removed features".
+
+            // ── Exit levels from measured volatility ──────────────────────────
             //
-            // The signal is late by construction and this is the correction for it.
-            // Aggressive order flow IS what moves price, so by the time an imbalance
-            // is measurable on a closed 15-minute bucket the move has already
-            // happened: aggregate z correlates +0.467 with the PRECEDING hour's
-            // return and -0.116 with the following one, measured over 440 buckets.
-            // Entering at market on that reading buys the top of the move and then
-            // counts the retracement as adverse excursion against the position.
-            //
-            // Measured on the first 28 paper trades, over the 12 hours after entry:
-            //
-            //     entry            median MFE   median MAE   ratio   win at 2R
-            //     at market          2.00 ATR     3.46 ATR    0.58       14.3%
-            //     0.75 ATR pullback  1.96 ATR     2.72 ATR    0.72       27.3%
-            //
-            // The favourable excursion barely moves; the ADVERSE one falls by a
-            // fifth. Waiting does not find better trades, it finds a better price in
-            // the same trade — which is exactly what a late entry costs. This was the
-            // only lever that moved the win rate at all: an 80-cell sweep of stop
-            // width against target multiple left it pinned at 17.9%.
-            //
-            // Stateless on purpose. The reference is the close of the signal bucket's
-            // last minute, which every cycle recomputes identically, so there is no
-            // pending-order state to keep, recover after a restart, or get wrong. The
-            // waiting window is therefore however long the verdict stays actionable
-            // rather than a fixed timer — the signal decides how long it is willing to
-            // wait for its own price, which is a more honest bound than a constant.
-            //
-            // NOT PROVEN. Read off 28 trades, in-sample, one market regime, and the
-            // 27.3% it reaches is still well under the ~42% this geometry needs to
-            // break even. It is registered in HYPOTHESES.md as H4 and is to be judged
-            // on trades taken AFTER it shipped. Set EntryPullbackAtr to 0 to disable.
-            if (tuning.EntryPullbackAtr > 0 && set.LatestBucket is { } signalBucket)
-            {
-                // Last minute of the closed bucket that produced this verdict.
-                var referenceAt = signalBucket.AddMinutes(14);
-                var reference   = candles.LastOrDefault(c => c.OpenTime <= referenceAt)?.Close;
+            // The range geometry that used to sit beside this -- stop at the recent
+            // range low, target at its high -- was deleted on 2026-09-19. It MEASURED
+            // BETTER (mean R +0.107 against +0.015 over 1,486 decision points) and was
+            // still switched off, because FlowRatio enters WITH the dominant side, which
+            // puts price at the edge of its own range and leaves the boundary target
+            // sitting on top of the entry. HYPOTHESES.md carries the table under
+            // "Removed features"; reach for it if an entry rule is ever added that enters
+            // INTO a range rather than out of one.
+            var geometry = VolatilityStops.Resolve(
+                entryPrice:         ctx.CurrentPrice,
+                side:               verdict.Side!,
+                volatility:         volatility,
+                roundTripFeeRate:   tuning.RoundTripFeeRate,
+                stopAtrMultiple:    tuning.StopAtrMultiple,
+                targetRiskMultiple: tuning.TargetRiskMultiple,
+                maxStopPct:         tuning.MaxStopPct,
+                minStopPct:         tuning.MinStopPct);
 
-                if (reference is { } refPrice && refPrice > 0m)
-                {
-                    var isLong  = verdict.Side == "LONG";
-                    var giveBack = (decimal)(tuning.EntryPullbackAtr * volatility.AtrPct) / 100m;
-
-                    var limit = isLong
-                        ? refPrice * (1m - giveBack)
-                        : refPrice * (1m + giveBack);
-
-                    var reached = isLong
-                        ? ctx.CurrentPrice <= limit
-                        : ctx.CurrentPrice >= limit;
-
-                    if (!reached)
-                        return Refuse("AWAITING_PULLBACK",
-                            $"{verdict.Side} is live (z={verdict.AggregateZ:F2}) but price " +
-                            $"{ctx.CurrentPrice:F4} has not given back " +
-                            $"{tuning.EntryPullbackAtr:F2}xATR from the {refPrice:F4} bucket close — " +
-                            $"waiting for {limit:F4}. Entering here would pay for a move that has " +
-                            "already happened.");
-                }
-                // A missing reference candle is not a reason to refuse: the pullback
-                // rule is an improvement on entry timing, not a safety check, and
-                // failing open costs a worse price rather than an unmanaged position.
-            }
-
-            // ── Exit levels: the range's own boundaries, or a multiple of ATR ──
-            //
-            // Range is the default because it measured seven times the mean R of the
-            // ATR pair over 1,486 decision points, and because the ATR pair sat on its
-            // own break-even line — see VolatilityStops.ResolveFromRange for the table.
-            // The lookback is deliberately short: 2 hours beat 4 clearly.
-            StopGeometry geometry;
-
-            if (tuning.UseRangeGeometry)
-            {
-                var since = candles.Count > 0
-                    ? candles[^1].OpenTime.AddMinutes(-tuning.RangeLookbackMinutes)
-                    : DateTime.MinValue;
-
-                var window = candles.Where(c => c.OpenTime >= since).ToList();
-
-                if (window.Count < 2)
-                    return Refuse("NO_RANGE_READ",
-                        $"Only {window.Count} candle(s) in the last " +
-                        $"{tuning.RangeLookbackMinutes} minutes, so the range has no boundaries " +
-                        "to place the stop and target on.");
-
-                geometry = VolatilityStops.ResolveFromRange(
-                    entryPrice:       ctx.CurrentPrice,
-                    side:             verdict.Side!,
-                    rangeHigh:        window.Max(c => c.High),
-                    rangeLow:         window.Min(c => c.Low),
-                    volatility:       volatility,
-                    roundTripFeeRate: tuning.RoundTripFeeRate,
-                    maxStopPct:       tuning.MaxStopPct,
-                    minStopPct:       tuning.MinStopPct);
-
-                // The entry has already broken out of the range it was measured
-                // against. Refusing beats inventing a barrier: a breakout is exactly
-                // when the boundary stops being the level price respects.
-                if (geometry.StopPct <= 0m)
-                    return Refuse("PRICE_OUTSIDE_RANGE", geometry.Basis);
-            }
-            else
-            {
-                geometry = VolatilityStops.Resolve(
-                    entryPrice:         ctx.CurrentPrice,
-                    side:               verdict.Side!,
-                    volatility:         volatility,
-                    roundTripFeeRate:   tuning.RoundTripFeeRate,
-                    stopAtrMultiple:    tuning.StopAtrMultiple,
-                    targetRiskMultiple: tuning.TargetRiskMultiple,
-                    maxStopPct:         tuning.MaxStopPct,
-                    minStopPct:         tuning.MinStopPct);
-            }
 
             // A trade whose reward does not cover its risk after fees is refused here
             // rather than left for the gate. The gate is a judgement call on a
@@ -900,27 +794,7 @@ public sealed class FlowStrategyOptions
     public double StopAtrMultiple    { get; set; } = FlowGeometryDefaults.StopAtrMultiple;
     public double TargetRiskMultiple { get; set; } = FlowGeometryDefaults.TargetRiskMultiple;
 
-    /// <summary>
-    /// Place the stop at the recent range's low and the target at its high, instead of
-    /// at multiples of ATR. See <see cref="VolatilityStops.ResolveFromRange"/> for the
-    /// measurement that chose this, and for why it changes what MinRewardRisk means.
-    ///
-    /// StopAtrMultiple and TargetRiskMultiple are not read while this is on. They are
-    /// left in place so switching back is a config edit.
-    /// </summary>
-    public bool UseRangeGeometry { get; set; } = false;
 
-    /// <summary>
-    /// Minutes of 1-minute candles the range boundaries are taken from.
-    ///
-    /// 120 by measurement, not by preference: at a 2-hour lookback the geometry
-    /// returned mean R +0.107 against +0.030 at 4 hours over the same 1,486 decision
-    /// points. A longer window gives wider, staler boundaries — the levels stop being
-    /// where this market is currently turning.
-    ///
-    /// Must not exceed AtrLookbackMinutes, since the candles come from that fetch.
-    /// </summary>
-    public int RangeLookbackMinutes { get; set; } = 120;
 
     /// <summary>
     /// Round-trip cost assumed when placing the stop and target, as a fraction of
@@ -944,20 +818,6 @@ public sealed class FlowStrategyOptions
     public decimal MinRewardRisk { get; set; } = FlowGeometryDefaults.MinRewardRisk;
 
 
-    /// <summary>
-    /// How far the market must give back, in multiples of ATR, before an actionable
-    /// signal is taken. 0 disables the wait and enters at market as before.
-    ///
-    /// 0.75 was read off the first 28 paper trades and is not a proven value — see
-    /// H4 in HYPOTHESES.md. The reasoning, and the reason it is expressed in ATR
-    /// rather than basis points, is in CrossVenueFlowStrategy where it is applied.
-    ///
-    /// The cost of waiting is signals that never fill: at 0.75 ATR, six of those 28
-    /// never came back and would not have been traded. That is the intended trade —
-    /// the ones it drops are the ones that ran away, which are exactly the entries
-    /// this is meant to stop paying for.
-    /// </summary>
-    public double EntryPullbackAtr { get; set; } = FlowGeometryDefaults.EntryPullbackAtr;
 
     /// <summary>
     /// Optional hard ceiling on the stop distance. Null by default, and that is the

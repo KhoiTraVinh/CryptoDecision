@@ -330,30 +330,6 @@ public sealed record FlowSignalOptions(
     /// </summary>
     decimal RatioHighVolumeUsd            = 20_000_000m,
 
-    /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: reject a bucket when this fraction or
-    /// more of the dominant side's notional came from a single print. 0 disables.
-    ///
-    /// THE GAP THIS CLOSES. `MaxConcentration` (0.35, "one order is not a crowd") lives
-    /// in <see cref="Prepare"/>, and FlowRatio is dispatched before Prepare and never
-    /// calls it — deliberately, because the per-venue quality gates are not what this
-    /// rule was measured with. The side effect was that the concentration guard, which is
-    /// about data quality rather than about venue selection, silently did not apply to
-    /// the rule that actually trades. Observed 2026-09-11: a single $1.04M print on
-    /// BINANCE inside one bucket. On a $3-4M bucket that one order can carry the entire
-    /// 2.1:1 imbalance by itself, and nothing would have rejected it.
-    ///
-    /// DEFAULT 0, WHICH CHANGES NOTHING. Turning it on is an entry-rule change, and H9
-    /// and H11 are both open on the current rule — shipping a silent tightening would
-    /// invalidate the very measurements they exist to collect. This makes the capability
-    /// exist and the gap visible; enabling it wants its own entry in HYPOTHESES.md.
-    ///
-    /// Note the aggregate is across venues while max_buy_usd/max_sell_usd are per venue,
-    /// so this compares the largest single print on any venue against the market-wide
-    /// dominant side. That is the conservative direction: it can only under-report
-    /// concentration, never invent it.
-    /// </summary>
-    double  RatioMaxConcentration         = 0.0,
 
     /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: minutes to wait after a bucket closes
@@ -785,38 +761,6 @@ public static class CrossVenueFlowScorer
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
 
-        // ── One print is not a crowd ──────────────────────────────────────────
-        //
-        // Off unless RatioMaxConcentration is set; see that option for why the default
-        // leaves behaviour unchanged. Applied before both entry paths, because a bucket
-        // whose imbalance is one order is a data-quality problem under either of them —
-        // and the high-volume waiver is if anything more exposed, since it takes whichever
-        // side is heavier however narrow the lead.
-        if (options.RatioMaxConcentration > 0.0)
-        {
-            decimal dominant = 0m, largestPrint = 0m;
-
-            foreach (var bars in barsByVenue.Values)
-                foreach (var bar in bars)
-                {
-                    if (bar.BucketStart != bucket.Bucket) continue;
-
-                    dominant     += ofi > 0 ? bar.BuyVolumeUsd : bar.SellVolumeUsd;
-                    largestPrint  = Math.Max(largestPrint, ofi > 0 ? bar.MaxBuyUsd : bar.MaxSellUsd);
-                }
-
-            var concentration = dominant > 0m ? (double)(largestPrint / dominant) : 0.0;
-
-            if (concentration >= options.RatioMaxConcentration)
-                return FlowVerdict.Abstain(
-                    "PRINT_CONCENTRATION_TOO_HIGH",
-                    $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
-                    $"{(ofi > 0 ? "buy" : "sell")}-dominated, but a single " +
-                    $"${largestPrint:N0} print is {concentration:P0} of that side's " +
-                    $"${dominant / 1_000_000m:F2}M — over the " +
-                    $"{options.RatioMaxConcentration:P0} cap. One order is not a crowd.",
-                    ofi, 0.0, 0, venues, 0.0);
-        }
 
         // ── The news-print exception ──────────────────────────────────────────
         //
@@ -975,19 +919,6 @@ public static class FlowGeometryDefaults
     /// </summary>
     public const decimal MinStopPct = 0.020m;
 
-    /// <summary>
-    /// ATR multiples price must give back before an actionable signal is taken.
-    /// 0 enters at market. See CrossVenueFlowStrategy, where it is applied, and H4 in
-    /// HYPOTHESES.md — it was read off 28 paper trades and is not proven.
-    ///
-    /// 0 because that is what production runs, and it has since this file started
-    /// claiming to be what production runs. The value was 0.75 here while
-    /// appsettings ran 0.0, so every backtest taken without an explicit flag measured
-    /// a pullback rule the bot does not apply — and H4 is registered against trades the
-    /// live path never waited for. The rule stays implemented and one config edit away;
-    /// what is corrected is the claim about which version is deployed.
-    /// </summary>
-    public const double EntryPullbackAtr = 0.0;
 
     /// <summary>
     /// Minimum post-fee reward:risk for a signal to become a trade.

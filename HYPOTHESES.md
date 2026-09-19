@@ -1777,3 +1777,90 @@ weeks of observations that H11 and H13 also need.
 ### Result
 
 _Open._
+
+---
+
+## Removed features and the numbers that outlive them — 2026-09-19
+
+Four config-gated features were deleted on operator instruction. All four were off, so
+nothing about live behaviour changes. What would have been lost with them is the
+measurement each one carries, and the tool that produced most of these numbers — the
+backtester — was deleted on 2026-09-11 and cannot regenerate them. So they are recorded
+here. `git show e22a31a~1` and the commit that follows it have the code.
+
+### 1. Range geometry (`UseRangeGeometry`, `RangeLookbackMinutes`, `VolatilityStops.ResolveFromRange`)
+
+Placed the stop at the recent range's low and the target at its high, instead of at
+multiples of ATR. **It measured better than the ATR geometry that survives it**, on 1,486
+decision points over 18 days of SOL, first touch within 12 hours, stop taken when a single
+minute spans both barriers:
+
+    geometry                    stop%   win%    mean R
+    1.5x ATR, 2:1 target        0.672   33.9%   +0.015
+    range boundary, 2h look     0.79    52.9%   +0.107
+    range boundary, 4h look     1.11    52.2%   +0.030
+
+The ATR pair sits on its own break-even line — 33.9% against the 33.3% a 2:1 needs — which
+is why two weeks of live trading produced 28%. Two hours beat four clearly, so the 120-minute
+lookback was measurement rather than preference.
+
+Reward:risk under it is not a parameter; it falls out of where the entry sits inside the
+range, which makes `MinRewardRisk` a positional filter by the back door:
+
+    position in range   avg R:R   win%    mean R
+    0-25%   (near low)   13.37    14.2%   +0.390
+    25-50%                1.72    38.8%   +0.025
+    50-75%                0.63    68.9%   +0.105
+    75-100% (near high)   0.17    83.0%   -0.033
+
+**Why it was off despite being better:** FlowRatio enters WITH the dominant side, which puts
+price at the edge of its own range, so the boundary target sits almost on top of the entry
+and fails `MinRewardRisk`. The finding is real and the rule it was measured on is not the
+rule that runs. If an entry rule is ever added that enters into a range rather than out of
+one, this is the geometry to reach for.
+
+### 2. Entry pullback (`EntryPullbackAtr`, `AWAITING_PULLBACK`)
+
+Waited for price to give back k×ATR from the signal bucket's close before entering. Shipped
+at 0.75 as H4 off 28 in-sample trades, then set to 0 and never re-enabled.
+
+**Re-measured 2026-09-19 on all 68 resolved signals with the deployed exit set, and it does
+not work at any depth.** Net total R by k: 0 → −0.822, 0.25 → −1.222, 0.5 → −0.667,
+0.75 → −3.617, 1.0 → −1.777, 1.5 → −0.835. No trend, no plateau. H4's shipped 0.75 is the
+**worst** of the six.
+
+The mechanism is why this one is deleted rather than parked. Waiting does help each loser —
+mean R on the k=0 losers goes −0.740 → −0.542 → −0.398 → −0.301 — but it helps the winners
+by the same factor in the opposite direction, +0.760 → +0.465 → +0.368 → +0.294, because a
+pullback shifts *everyone's* entry price by the same fraction rather than selecting better
+trades. And the fills are asymmetric the wrong way: at k=0.75, **11 winners never fill
+against 1 loser**, because a trade that runs in your favour immediately never gives back.
+See the entry-timing note.
+
+### 3. Print concentration (`RatioMaxConcentration`, `PRINT_CONCENTRATION_TOO_HIGH`)
+
+Refused a bucket whose imbalance was one order — largest single print over the dominant
+side's notional, against a configurable cap. **Never enabled and never measured**, so
+nothing is lost but the idea, which is worth keeping: it guarded the HIGH_VOLUME waiver
+specifically, where the dominant side can lead by as little as a tenth of the notional and
+a single print could be most of that lead. `flow_bars_15m.max_buy_usd` / `max_sell_usd` are
+the columns it read, and they are still being written, so it can be rebuilt without a
+schema change.
+
+### 4. Breakeven stop (`UseBreakevenStop`, `BreakevenTriggerPct`)
+
+Moved the stop to entry once the trade had reached `BreakevenTriggerPct` of profit. **Off
+for a measured reason**: it closed any trade that reached +0.8% and came back to entry,
+which after fees is a small loss, and together with the 1.20% trailing stop it truncated
+nearly every winner the bot had — four consecutive live entries stopped out having moved at
+most +0.29% in their favour. It also sat in `StrategyEvaluator`, *before* the strategy's own
+exit logic, so it fired on rules that did not ask for it.
+
+`bot_config.use_breakeven_stop` and `breakeven_trigger_pct` remain as columns and are no
+longer read, joining the other orphaned columns listed under Known constraints in README.
+
+### What was deliberately NOT removed
+
+`MaxDispersionBps` is also a dead knob — no scorer reads it — but it still renders one line
+of CONTEXT in the gate brief, and **H17 is being measured on that prompt**. Remove it when
+H17 closes.

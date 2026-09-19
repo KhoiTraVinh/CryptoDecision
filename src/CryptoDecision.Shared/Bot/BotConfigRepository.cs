@@ -74,8 +74,6 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             MaxHoldMinutes           = r.GetInt32(r.GetOrdinal("max_hold_minutes")),
             DailyLossLimitPct        = r.GetDecimal(r.GetOrdinal("daily_loss_limit_pct")),
             EvalIntervalSeconds      = r.GetInt32(r.GetOrdinal("eval_interval_seconds")),
-            UseBreakevenStop         = r.GetBoolean(r.GetOrdinal("use_breakeven_stop")),
-            BreakevenTriggerPct      = r.GetDecimal(r.GetOrdinal("breakeven_trigger_pct")),
             UseDynamicTpSl           = r.GetBoolean(r.GetOrdinal("use_dynamic_tp_sl")),
             UseAiSizing              = r.GetBoolean(r.GetOrdinal("use_ai_sizing")),
             RequireAiGate            = r.GetBoolean(r.GetOrdinal("require_ai_gate")),

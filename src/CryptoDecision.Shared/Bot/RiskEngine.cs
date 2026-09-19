@@ -262,20 +262,6 @@ public static class RiskEngine
         // movement — is now enforced where it belongs, in VolatilityStops.
 
         // ── Breakeven trigger unreachable before the target ──
-        //
-        // Against the target that actually closes the trade, not the configured one. The
-        // breakeven stop is evaluated on the live position, so comparing it to a
-        // percentage the position does not use would have declared it unreachable, or
-        // reachable, on the wrong number.
-        if (opts.UseBreakevenStop && opts.BreakevenTriggerPct >= profile.TakeProfitPct)
-        {
-            findings.Add(new RiskFinding(
-                RiskSeverity.Warning,
-                "BREAKEVEN_AFTER_TARGET",
-                $"Breakeven arms at {opts.BreakevenTriggerPct:P2} but the trade closes at " +
-                $"{profile.TakeProfitPct:P2}, so it never engages."));
-        }
-
         return new RiskAssessment(profile, findings);
     }
 

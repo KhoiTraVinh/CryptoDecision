@@ -352,29 +352,13 @@ public sealed record BotOptions
     /// <summary>Seconds between evaluation cycles — the granularity of every bot-side exit.</summary>
     public int     EvalIntervalSeconds { get; set; } = 30;
 
-    // ── Breakeven stop ──
-
-    /// <summary>
-    /// Enable breakeven stop. After a trade gains BreakevenTriggerPct, the entry price
-    /// becomes a floor and a retrace back to it closes the position.
-    ///
-    /// FALSE, which is both what production runs and what CrossVenueFlowStrategy's exit
-    /// documentation has said for some time: "there is no trailing stop and no breakeven
-    /// stop here, deliberately... between them they truncated nearly every winner".
-    /// That was only ever true of the strategy's own exit path — the rule itself lives
-    /// in StrategyEvaluator and applies to every strategy before the strategy is
-    /// consulted, so it was one `true` away from coming back regardless of what the
-    /// strategy said. The default said `true`.
-    ///
-    /// That matters beyond tidiness because the bot_config column defaults to true as
-    /// well: a row recreated from the schema re-arms a stop the strategy believes it
-    /// removed, closing any trade that reaches +0.5% and comes back to entry, which
-    /// after fees is a small loss. Nothing announces it.
-    /// </summary>
-    public bool    UseBreakevenStop    { get; set; } = false;
-
-    /// <summary>Profit threshold that activates breakeven. Must sit below TakeProfitPct or it never engages.</summary>
-    public decimal BreakevenTriggerPct { get; set; } = 0.005m;
+    // ── Breakeven stop: REMOVED 2026-09-19 ──
+    //
+    // The rule lived in StrategyEvaluator ahead of every strategy, so it fired on rules
+    // that never asked for it, and the bot_config column still defaults to TRUE -- a row
+    // recreated from the schema would have re-armed a stop the strategy believed it had
+    // removed. use_breakeven_stop and breakeven_trigger_pct are no longer read; the
+    // measurement is in HYPOTHESES.md under "Removed features".
 
     // ── Dynamic TP/SL ──
 
