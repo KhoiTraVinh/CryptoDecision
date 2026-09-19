@@ -5,11 +5,14 @@ of that measurement. Companion to `HYPOTHESES.md`, which governs parameter chang
 made without proof; this file governs the machinery that produces the proof.
 
 
-> **Status 2026-09-19 (commit e3ba35e).** Section 1's audit has been superseded twice over:
+> **Status 2026-09-19 (commit 052ca56).** Section 1's audit has been superseded twice over:
 > the gate went on to approve **45 of 45** and refuse nothing, and the root cause was that
 > all four skip grounds were arithmetically unreachable, not that the model was lax. H17
 > replaced them with four grounds computed from this account's own closed trades — which is
-> section 5's proposal, landed. Sections 3 and 4 remain design only. Read section 1 as the
+> section 5's proposal, landed. H19 then made that ground a TABLE rather than a number:
+> the same history cut three ways — the exact cell, the same rule in the same session of
+> day, and the rule overall — with the ground firing when any slice holding at least five
+> closed trades is negative. Sections 3 and 4 remain design only. Read section 1 as the
 > history of how the gate got here, not as its current behaviour.
 
 ---

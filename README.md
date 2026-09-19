@@ -120,8 +120,8 @@ Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) clo
 images — the dip pays from 0.60% and the rally does not pay until 1.00%.
 
 **It was measured negative in every pre-launch configuration** — −0.039R with ATR
-geometry, −0.068R with the range geometry, negative in both halves and after discarding
-the best trade in all of them — and was enabled anyway as H13. Live it is the only rule in
+geometry, −0.068R with the range geometry that has since been deleted, negative in both
+halves and after discarding the best trade in all of them — and was enabled anyway as H13. Live it is the only rule in
 positive R: **17 closed at +0.211 mean** as of 2026-09-19. Read that with the outlier check
 applied, which is the whole point of the check: two trades from the 2026-09-18 rally carry
 it, and without them the same 17 trades are **−0.102**.
@@ -178,14 +178,30 @@ little, and nobody had measured the tail on its own.
 ### Exits
 
     SL   2.00%   floor, from MinStopPct — the noise floor, not the fee floor
-    TP   4.00%   = 2 x stop (TargetRiskMultiple), from the ATR path
+    TP   4.00%   = 2 x stop (TargetRiskMultiple)   *** has NEVER fired, see below ***
     cap  12 hours
-    OR   the 10-bucket (150 min) aggregate imbalance turns against the position,
-         having favoured it earlier in the hold -> close_reason OFI_REVERSAL
+    OR   the aggregate imbalance over the last N closed buckets turns against the
+         position, having favoured it earlier in the hold -> OFI_REVERSAL
+         N = 15 for XVENUE_FLOW (H15), 10 for CANDLE_REVERSAL
 
-`UseRangeGeometry` is **false** for this mode. Entering with the dominant side puts price at
-the edge of its own range, so a range-boundary target lands almost on the entry and fails
-`MinRewardRisk`: 3 of 92 signals survived it.
+**The OFI reversal is the only exit that earns.** Over the 40 trades since the 2.00% stop
+floor shipped: OFI_REVERSAL 30 exits at **+4.647R**, SL 6 exits at **−6.615R**, TIMEOUT 3 at
+−0.424R, TP **zero**. Every barrier is scaled by `1 + 10 × excursion` capped at 2 while
+`use_dynamic_tp_sl` is on, so the target *retreats* as price advances and the stored 4.00%
+is only reachable at 6.67% — which is why TP has never fired. `dynamic_stop_price` and
+`dynamic_target_price` make the live barrier one `SELECT` away; they are write-only, because
+feeding them back into their own input compounds the barrier past +116% in five minutes.
+
+Neither the OFI exit nor the dynamic barriers are open questions — both are the operator's
+findings from live data, and the "shipped against the evidence" phrasing that used to sit in
+the source came from measurements taken without the OFI exit in the loop.
+
+A **range-boundary geometry** stood beside the ATR one until 2026-09-19 and was deleted with
+the other dormant features. It measured *better* — mean R +0.107 against +0.015 over 1,486
+decision points — and was still off, because entering with the dominant side puts price at
+the edge of its own range and leaves a boundary target sitting on the entry. The tables are
+in `HYPOTHESES.md` under "Removed features"; reach for them if a rule is ever added that
+enters *into* a range.
 
 Two floors sit under the stop and they are separate claims. The **fee** floor
 (`roundTripFeeRate x MinStopAsFeeMultiple`, 0.40%) says a stop must clear the cost of the
@@ -200,8 +216,11 @@ entry before a turn counts. Without that guard it reads a window that mostly pre
 trade — the defect that closed two live positions thirty seconds after opening them on
 2026-09-09.
 
-`bot_config.last_verdict_*` holds the current verdict, written every cycle — the abstention
-log is throttled and once left the state 33 minutes stale during a 2.7% move.
+**`strategy_verdicts`** holds the current verdict for each active strategy, written every
+cycle — the abstention log is throttled and once left the state 33 minutes stale during a
+2.7% move. It replaced `bot_config.last_verdict_*` in `sql/034`, because one row could not
+hold two strategies' verdicts and whichever ran last silently overwrote the other. Those six
+columns still exist and are read by nothing.
 
 ## The LLM gate
 
@@ -229,10 +248,41 @@ marked AVAILABLE / NOT AVAILABLE in the brief:
 
 | ground | condition |
 |---|---|
-| this cell is losing | same strategy + side + entry path, last 20 closed, needs n≥5, mean R < 0 |
+| this setup is losing | **any** slice below with n≥5 and mean R < 0 |
 | trend against the entry | 4-hour move beyond ±2.0% against the proposed side |
 | one event twice | same `entry_path` fired inside 120 minutes |
 | concentration | a position already open on this side **across every strategy** |
+
+**H19 (2026-09-19) made the first ground a table rather than a number.** The gate is shown
+the same account history cut three ways, each with its own count, and the ground fires when
+any slice that has enough trades is negative:
+
+```
+CANDLE_REVERSAL LONG              16 closed,  10 won, mean R +0.290
+CANDLE_REVERSAL in 12-20 UTC       6 closed,   3 won, mean R -0.199
+CANDLE_REVERSAL overall           17 closed,  10 won, mean R +0.211
+```
+
+Those are real production values, and they are the case that justifies the cut: the narrow
+slice says the setup is fine, the session slice says *not in this window*, and before H19
+the gate could only see the first. A slice under 5 trades prints its count and is marked
+"too thin to read" rather than being hidden — "no evidence" and "evidence that says nothing"
+are different, and omitting the thin one invites the model to read the wide slice as the
+narrow one.
+
+The **session** split is 12:00–20:00 UTC against everything else. Replaying all 68 recorded
+signals with the deployed exit set, that window totals **−10.745R over 32 trades** against
++9.923R over 36 outside it, and every threshold from 06:00 to 18:00 splits the same
+direction. Only half of that finding survives the outlier check, and it is the useful half:
+the two largest trades both fall inside the *favourable* window, so "accept the winners"
+halves when they are removed while "refuse the losers" does not move at all. It ships as
+evidence behind a veto and not as a reason to size up. See H19, including why 19 days cannot
+separate "the US session trends" from "these particular 19 days trended during the US
+session".
+
+It is a **base rate and not a rule** on purpose. `if (hour >= 12 && hour < 20) refuse;`
+would freeze one measurement in place forever; a count and a mean drift toward zero on their
+own if the effect was noise, and the ground quietly stops being available.
 
 That last one is the concentration question nothing was asking: `max_open_per_side` is
 scoped **per strategy**, so CANDLE_REVERSAL and XVENUE_FLOW can each hold a LONG and both
@@ -417,10 +467,23 @@ be applied by hand each time:
   does not say which came first, and assuming the favourable one is how a losing policy
   reports a win rate.
 
+- **Model the whole deployed exit set.** Stop, target, the dynamic widening *and* the OFI
+  reversal. The OFI exit closes 30 of the last 40 trades, so a replay without it measures a
+  strategy that does not exist — and that omission is what produced the "shipped against
+  the evidence" label that sat wrongly on two features for weeks.
+- **Validate the replay against reality before believing its output.** Run it at its
+  no-change setting and compare against the real trades. The one written on 2026-09-19
+  reproduced 93% of exit reasons at mean |ΔR| 0.237 and came out slightly *pessimistic*
+  (−0.079R against an actual +0.149R). The deleted backtester never once did this.
+
 Judge a result on three checks before believing it, all in `HYPOTHESES.md`: it holds
 across a plateau of neighbouring parameter values, it holds in both halves of the sample,
 and it survives discarding the single best trade. Almost nothing measured here has passed
 all three.
+
+**And check where the outliers sit.** The session finding in H19 looked like it did two
+things until the two largest trades were located — both inside the favourable window. Half
+the finding evaporated and half did not, and which half was which is the entire result.
 
 ## Status, honestly
 
@@ -444,12 +507,17 @@ The exit breakdown is the thing to read before touching anything:
     SL              6  -6.615 R      all of the damage
     TP              0       —        has never fired
 
-Three levers have now been measured on the deployed exit set and none is where the problem
+Four levers have now been measured on the deployed exit set. Three are not where the problem
 is. Stop width: 2.00% is the best of six, 1.0% the worst — narrowing it takes stop-outs
 from 12 to 29 and OFI exits from 51 to 30, destroying the exit that earns. Entry timing:
 no pullback depth improves anything, because waiting shrinks losers and winners by the same
 factor and skips winners 11:1. Dynamic barriers: indistinguishable on XVENUE_FLOW,
 mildly better on CANDLE_REVERSAL.
+
+The fourth is the only one that separated anything. **Entries between 12:00 and 20:00 UTC
+total −10.745R over 32 trades; everything outside that window totals +9.923R over 36.** The
+refusing half survives the outlier check unchanged while the accepting half halves, so it
+ships as evidence behind the gate veto rather than as a reason to trade more. H19.
 
 ### The one thing that must be read before any live-money discussion
 
@@ -575,3 +643,10 @@ Production runs both strategies, dynamic barriers ON, the gate fallback ON, 20 e
 day, capital 100 and risk 0.006. **A fresh database comes up as a different bot, silently,
 and no migration records the live values.** Read `bot_config` before believing any
 configuration statement — including the ones in this file.
+
+**Sixteen `bot_config` columns are read by nothing.** `grid_step_pct`, `min_ai_confidence`,
+`min_buy_ratio_1h`, `min_momentum_buy_ratio`, `trailing_stop_pct`, `use_trailing_stop`,
+`use_ai_agent`, `use_ai_filter`, `use_breakeven_stop`, `breakeven_trigger_pct` and the six
+`last_verdict_*` columns are all leftovers of features that have been removed. They are
+harmless but misleading: grepping for one of them finds a column and suggests the feature
+still exists. The code that read the last four was deleted on 2026-09-19.
