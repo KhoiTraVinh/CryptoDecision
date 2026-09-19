@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using CryptoDecision.ProcessorService.Models;
 using CryptoDecision.ProcessorService.Telemetry;
-using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 

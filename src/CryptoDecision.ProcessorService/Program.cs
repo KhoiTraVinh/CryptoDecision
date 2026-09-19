@@ -5,7 +5,6 @@ using CryptoDecision.ProcessorService.Models;
 using CryptoDecision.ProcessorService.Persistence;
 using CryptoDecision.ProcessorService.Telemetry;
 using CryptoDecision.ProcessorService.Workers;
-using Microsoft.Extensions.Hosting;
 using Npgsql;
 using Serilog;
 

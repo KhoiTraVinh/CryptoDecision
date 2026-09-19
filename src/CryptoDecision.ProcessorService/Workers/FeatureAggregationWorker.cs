@@ -1,6 +1,5 @@
 using CryptoDecision.ProcessorService.Persistence;
 using CryptoDecision.ProcessorService.Telemetry;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
 

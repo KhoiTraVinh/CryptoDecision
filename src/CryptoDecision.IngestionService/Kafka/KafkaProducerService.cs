@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Confluent.Kafka;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Kafka;

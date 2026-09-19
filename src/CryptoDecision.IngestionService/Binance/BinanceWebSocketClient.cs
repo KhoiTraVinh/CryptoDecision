@@ -2,11 +2,9 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using CryptoDecision.IngestionService.Binance.Models;
 using CryptoDecision.IngestionService.Channels;
-using CryptoDecision.IngestionService.Models;
 using CryptoDecision.IngestionService.Serialization;
 using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.WebSocket;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Binance;

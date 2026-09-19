@@ -284,8 +284,8 @@ public static class VolatilityStops
 
         var stopPct = (decimal)(atrPct * stopAtrMultiple) / 100m;
 
-        // Same two floors as ResolveFromRange, and the same reason for keeping them
-        // apart: fees are a property of the exchange, noise is a property of SOL.
+        // Two floors, deliberately kept apart: fees are a property of the exchange, noise
+        // is a property of SOL, and collapsing them into one number loses which is binding.
         var feeFloor   = roundTripFeeRate * MinStopAsFeeMultiple;
         var noiseFloor = minStopPct ?? 0m;
         var floor      = Math.Max(feeFloor, noiseFloor);

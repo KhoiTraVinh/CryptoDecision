@@ -2,7 +2,6 @@ using CryptoDecision.IngestionService.Bybit;
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.Telemetry;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Workers;

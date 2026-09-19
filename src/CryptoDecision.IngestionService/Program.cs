@@ -8,7 +8,6 @@ using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.OKX;
 using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.Workers;
-using Microsoft.Extensions.Hosting;
 using Serilog;
 
 // Bootstrap Serilog early to capture startup errors

@@ -579,9 +579,10 @@ public sealed class CrossVenueFlowStrategy(
             }
         }
 
-        // Stop before target, matching how the backtester resolves a bar containing
-        // both. Same ordering in both places or the live results cannot be compared
-        // with the simulated ones they were validated on.
+        // Stop before target when a single reading clears both. It is the conservative
+        // resolution -- it books the loss rather than the win on an ambiguous bar -- and
+        // it is the ordering the deleted backtester used, so replayed results stay
+        // comparable with what production actually did.
         var hitStop = isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice;
         if (hitStop) return Exit("SL", currentPrice, changePct, dynamicStop, dynamicTarget);
 
@@ -738,9 +739,9 @@ public sealed class CrossVenueFlowStrategy(
 /// <summary>
 /// Everything <see cref="CrossVenueFlowStrategy"/> can be tuned by, in one object.
 ///
-/// Separate from BotOptions because these are the parameters the backtester sweeps,
-/// and they need to be settable together as a unit that was validated together.
-/// Picking a threshold from one sweep and a stop multiple from another produces a
+/// Separate from BotOptions because these are the parameters a sweep varies together,
+/// and they need to be settable as the unit that was validated together. Picking a
+/// threshold from one measurement and a stop multiple from another produces a
 /// configuration that was never tested.
 /// </summary>
 public sealed class FlowStrategyOptions
@@ -787,7 +788,7 @@ public sealed class FlowStrategyOptions
     /// Measured on real SOL data, per-minute ATR is 0.30% while 15-minute median true
     /// range is 1.07% — so measuring on 1-minute bars would place a 0.45% stop on a
     /// position held for hours inside a window that ranged 15.9%. 15 matches the
-    /// signal grid; the backtester sweeps it once there is enough history to.
+    /// signal grid, and it has never been swept -- the tool that would have is gone.
     /// </summary>
     public int AtrBarMinutes { get; set; } = FlowGeometryDefaults.AtrBarMinutes;
 
@@ -846,9 +847,9 @@ public sealed class FlowStrategyOptions
     /// stop destroys the OFI exit — at 1% the replay takes stop-outs from 12 to 29 and
     /// OFI exits from 51 to 30, sweeping positions out before the flow can turn.
     ///
-    /// The literal moved to <see cref="FlowGeometryDefaults.MinStopPct"/> so the
-    /// backtester can reach it. It could not before, and did not apply any floor at
-    /// all — see that constant.
+    /// The literal lives on <see cref="FlowGeometryDefaults.MinStopPct"/> so anything
+    /// outside BotService can reach it. The backtester could not, and applied no floor
+    /// at all as a result — see that constant.
     /// </summary>
     public decimal? MinStopPct { get; set; } = FlowGeometryDefaults.MinStopPct;
 

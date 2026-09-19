@@ -9,8 +9,9 @@ namespace CryptoDecision.Shared.Bot;
 /// and will drain an account regardless of how good the entry signal is.
 ///
 /// Nothing here reads the database or mutates state, so every rule is directly
-/// testable and the same arithmetic runs in the live bot, the backtester and the
-/// API's config validation.
+/// testable and one copy of the arithmetic serves every caller. That mattered when the
+/// backtester and the API's config validation were separate callers; both are gone, and
+/// the property is worth keeping for the next one.
 /// </summary>
 public static class RiskEngine
 {
@@ -450,8 +451,6 @@ public sealed record RiskAssessment(
     IReadOnlyList<RiskFinding> Findings
 )
 {
-    public bool HasCritical => Findings.Any(f => f.Severity == RiskSeverity.Critical);
-
     public IEnumerable<RiskFinding> Critical => Findings.Where(f => f.Severity == RiskSeverity.Critical);
     public IEnumerable<RiskFinding> Warnings => Findings.Where(f => f.Severity == RiskSeverity.Warning);
 }

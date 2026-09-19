@@ -122,7 +122,7 @@ public sealed class OkxTradingClient(
         var needsPositionSide = config.IsHedgeMode
             && string.Equals(opts.MarginMode, "isolated", StringComparison.OrdinalIgnoreCase);
 
-        var sides = needsPositionSide ? new[] { "long", "short" } : [null];
+        var sides = needsPositionSide ? new string?[] { "long", "short" } : [null];
 
         foreach (var side in sides)
         {

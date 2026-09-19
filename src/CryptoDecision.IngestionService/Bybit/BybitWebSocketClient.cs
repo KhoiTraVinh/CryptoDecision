@@ -6,7 +6,6 @@ using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Configuration;
 using CryptoDecision.IngestionService.Telemetry;
 using CryptoDecision.IngestionService.WebSocket;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Bybit;

@@ -1,7 +1,6 @@
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.Models;
-using Microsoft.Extensions.Logging;
 
 namespace CryptoDecision.IngestionService.Workers;
 

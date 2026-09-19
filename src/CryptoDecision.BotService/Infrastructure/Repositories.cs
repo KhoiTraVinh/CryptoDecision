@@ -1,6 +1,5 @@
 using CryptoDecision.BotService.Domain;
 using Npgsql;
-using NpgsqlTypes;
 
 namespace CryptoDecision.BotService.Infrastructure;
 

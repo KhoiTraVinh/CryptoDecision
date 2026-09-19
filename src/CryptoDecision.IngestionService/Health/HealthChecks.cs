@@ -4,7 +4,6 @@ using System.Text.Json;
 using CryptoDecision.IngestionService.Channels;
 using CryptoDecision.IngestionService.Telemetry;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
-using Microsoft.Extensions.Logging;
 
 namespace CryptoDecision.IngestionService.Health;
 

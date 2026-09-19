@@ -1,6 +1,5 @@
 using System.Net.WebSockets;
 using CryptoDecision.IngestionService.Telemetry;
-using Microsoft.Extensions.Logging;
 
 namespace CryptoDecision.IngestionService.WebSocket;
 

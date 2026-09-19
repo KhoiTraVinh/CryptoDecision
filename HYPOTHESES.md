@@ -1859,11 +1859,58 @@ exit logic, so it fired on rules that did not ask for it.
 `bot_config.use_breakeven_stop` and `breakeven_trigger_pct` remain as columns and are no
 longer read, joining the other orphaned columns listed under Known constraints in README.
 
+### 5. Dead members swept on 2026-09-20 (`TradingCosts` composites and six unread accessors)
+
+Found by counting references to every declared name against a comment-stripped copy of the
+source: a name appearing exactly once is a declaration nobody uses. Nine in C#, all deleted,
+none of them reachable, so live behaviour is unchanged.
+
+  `BotStateService._lastClosedAt` with `SetLastClosedAt` and `LastClosedAt`. **Write-only
+  state**: two call sites stamped it on every close and nothing ever read it back. It is
+  what remains of a post-trade cooldown; the cooldown that runs keys off the last *entry*
+  per strategy, in `_lastEntryAtByStrategy`.
+
+  `RiskAssessment.HasCritical`, `OkxOrderState.IsPartial`, `OkxPosition.UnrealisedPnl` and
+  `OkxPosition.LiquidationPrice` — unread accessors. The last two took their raw JSON
+  fields (`upl`, `liqPx`) with them, since nothing else parsed them. Partial fills are
+  still handled: `OkxOrderEngine` reads `State` and the filled quantity directly.
+
+**The two cost constants are the ones worth keeping numbers for**, because both encode a
+measurement rather than a preference:
+
+  `PostOnlyRoundTrip` = maker + taker = **7 bps**, what the bot actually pays. The engine
+  rests a post-only entry (maker) and exits through the OCO (taker) — maker in, taker out,
+  not taker both ways — and 7 bps matches what short holds cost against the account bills.
+  It excludes funding, which is charged every eight hours against the position and settles
+  in the bills rather than on either order. Funding is lumpy and much larger over a long
+  hold: a measured 12-hour hold cost **63 bps all-in**. Any horizon past a few hours needs
+  it added separately rather than folded into a per-trip figure. Deleted because
+  `PaperOrderEngine` now charges `OkxMakerFeeRate` at open and `OkxTakerFeeRate` at close
+  separately, which is the same 7 bps applied to the right leg at the right moment.
+
+  `BacktestStressRoundTrip` = **21 bps**, a stress level and never a fee estimate. It was
+  the deleted backtester's default cost. The rule it encodes outlives the tool and any
+  replacement measurement should use it: published audits of this class of strategy found
+  policies that looked viable at an optimistic 10 bps and were solidly negative at a
+  realistic 21+, once slippage and adverse selection on the resting order are counted
+  rather than assumed away. **A policy that only survives at 7 bps has not survived —
+  measure at 21 before believing anything.**
+
 ### What was deliberately NOT removed
 
 `MaxDispersionBps` is also a dead knob — no scorer reads it — but it still renders one line
 of CONTEXT in the gate brief, and **H17 is being measured on that prompt**. Remove it when
 H17 closes.
+
+`FlowVerdict.AggregateZ`, `AgreeingVenues` and `DispersionBps` are structurally 0 under both
+surviving rules and are still written to three `signal_outcomes` columns and logged on every
+entry. They are dead *data*, not dead code, and removing them moves a schema the two open
+hypotheses are being measured against. Same deadline as `MaxDispersionBps`.
+
+The confidence path is also dead by construction and must stay: the strategy returns a
+literal `0m`, and `PositionSizer` scales only when `useAiSizing && confidence > 0`, so the
+scalar stays at 1.0 and sizing is purely risk-based. Substituting 1.0 to look neutral would
+multiply every order by 1.5 the moment `use_ai_sizing` was switched on.
 
 ---
 

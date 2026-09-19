@@ -2,8 +2,6 @@ using System.Threading.Channels;
 using CryptoDecision.IngestionService.Kafka;
 using CryptoDecision.IngestionService.Models;
 using CryptoDecision.IngestionService.Telemetry;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.IngestionService.Workers;

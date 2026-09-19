@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text;
 using Confluent.Kafka;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.ProcessorService.Kafka;

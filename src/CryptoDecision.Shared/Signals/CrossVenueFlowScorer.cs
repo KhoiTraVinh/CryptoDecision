@@ -78,11 +78,12 @@ public enum FlowEntryMode
     /// aggregate OFI carries no direction: that figure averages the whole
     /// distribution, and this rule only reads its extreme tail.
     ///
-    /// Wants the ATR geometry, not the range geometry: entering with the dominant side
-    /// puts price at the edge of its own range, so a range-boundary target sits almost
-    /// on top of the entry and fails MinRewardRisk. Set UseRangeGeometry false, which
-    /// with a 2.00% stop floor and TargetRiskMultiple 2.0 gives the 2%/4% pair this
-    /// was measured on.
+    /// Wants the ATR geometry, which since 2026-09-19 is the only one there is. Entering
+    /// with the dominant side puts price at the edge of its own range, so the range
+    /// geometry's boundary target sat almost on top of the entry and failed MinRewardRisk
+    /// — that is why it was deleted despite measuring better on its own terms, and the
+    /// tables are in HYPOTHESES.md under "Removed features". A 2.00% stop floor with
+    /// TargetRiskMultiple 2.0 gives the 2%/4% pair this was measured on.
     /// </summary>
     FlowRatio = 3,
 }
@@ -100,11 +101,12 @@ public enum FlowEntryMode
 /// them used to be a hand-picked literal deployed against real funds without ever
 /// being tested — 62 and 38 for the entry thresholds, 0.15 for the dead zone,
 /// 25/25/20/15/15 for the composite weights. None of those numbers had units and
-/// none had a derivation. The backtester sweeps this record and reports a
-/// coverage-risk curve, so a threshold in production is one that survived a sweep
-/// rather than one that sounded reasonable.
+/// none had a derivation. Binding them as one record is what makes a threshold in
+/// production traceable to the measurement that chose it rather than to something that
+/// sounded reasonable; the sweeps themselves are in HYPOTHESES.md, each with its
+/// decision rule fixed in advance.
 ///
-/// The defaults below are starting points for that sweep, not recommendations.
+/// The defaults below are starting points, not recommendations.
 /// </summary>
 /// <param name="MaxDispersionBps">
 /// Ceiling on cross-venue VWAP dispersion. Wide dispersion means thin books or a
@@ -479,9 +481,11 @@ public static class CrossVenueFlowScorer
     ///
     /// Takes candles rather than flow bars because it reads price and nothing else —
     /// a FlowBar carries VWAP, which is the bucket's average rather than its close, and
-    /// substituting one for the other would not be the rule that was measured. So this
-    /// is called directly by the strategy instead of going through
-    /// <see cref="Score"/>'s dispatch.
+    /// substituting one for the other would not be the rule that was measured. That is
+    /// also why it takes a different argument type from <see cref="ScoreFlowRatio"/>:
+    /// the strategy switches on EntryMode and calls one or the other directly. The
+    /// <c>Score</c> dispatch this used to go through went with the ZScore rule on
+    /// 2026-09-18.
     ///
     /// The verdict it returns is shaped like any other so everything downstream — the
     /// gate brief, signal_outcomes, the geometry — keeps working unchanged. The flow
@@ -897,7 +901,7 @@ public static class FlowGeometryDefaults
     /// Hours a position may be held before it is closed regardless.
     ///
     /// The live cap is <c>bot_config.max_hold_minutes</c>, read by StrategyEvaluator;
-    /// this is the same fact as a constant, and <see cref="BotOptions.MaxHoldMinutes"/>
+    /// this is the same fact as a constant, and <see cref="CryptoDecision.Shared.Bot.BotOptions.MaxHoldMinutes"/>
     /// derives its default from it so the two cannot drift. They did drift — 1440 there
     /// against 12.0 here — for as long as the backtester was the only thing reading this.
     /// </summary>
@@ -908,9 +912,9 @@ public static class FlowGeometryDefaults
     /// the exchange's fees. This is H8, and the full measurement is on
     /// FlowStrategyOptions.MinStopPct, which now reads it from here.
     ///
-    /// It lives in this class for the reason the class exists: the backtester cannot
-    /// see BotService, so a geometry value defined only on FlowStrategyOptions is one
-    /// the validation tool structurally cannot apply. It did not apply this one — the
+    /// It lives in this class for the reason the class exists: nothing outside BotService
+    /// can see FlowStrategyOptions, so a geometry value defined only there is one no other
+    /// caller can structurally apply. The backtester did not apply this one — the
     /// engine simply never passed a minStopPct — so every stop-width result the tool
     /// has produced since H8 shipped was measured on a ~1.6% stop against a deployed
     /// 2.00% one. Of the four drifts this class has now recorded, this is the only one
@@ -933,9 +937,11 @@ public static class FlowGeometryDefaults
     /// rejected for thin reward:risk is one production would have traded. Neither
     /// number binds under the shipped geometry — a 2.00% stop with TargetRiskMultiple
     /// 2.0 clears both at 1.86:1 after fees — so this corrects the record rather than
-    /// any measurement taken so far. It would bind again the moment UseRangeGeometry
-    /// goes back on, where reward:risk falls out of where the entry sits in the range
-    /// and MinRewardRisk becomes a positional filter; see VolatilityStops.ResolveFromRange.
+    /// any measurement taken so far. It would bind again only under a geometry whose
+    /// reward:risk falls out of where the entry sits in a range, which would make
+    /// MinRewardRisk a positional filter rather than a floor. The range geometry that did
+    /// that was deleted on 2026-09-19; HYPOTHESES.md, "Removed features", carries the
+    /// reward:risk-by-range-position table under it.
     /// </summary>
     public const decimal MinRewardRisk = 0.5m;
 }

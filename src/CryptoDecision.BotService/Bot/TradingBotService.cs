@@ -1,6 +1,5 @@
 using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Agent;
-using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.BotService.Strategies;
 using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
@@ -299,7 +298,6 @@ public sealed class TradingBotService(
                 }
 
                 state.RemoveOpenTrade(trade.Id);
-                state.SetLastClosedAt(DateTime.UtcNow);
                 state.RecordClose(settled.PnlUsd ?? 0m);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -866,7 +864,6 @@ public sealed class TradingBotService(
                     if (closed.Status == "CLOSED" || closed.Status == "STOPPED")
                     {
                         state.RemoveOpenTrade(trade.Id);
-                        state.SetLastClosedAt(DateTime.UtcNow);
                         state.RecordClose(closed.PnlUsd ?? 0m);
                     }
                 }

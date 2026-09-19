@@ -150,8 +150,6 @@ public sealed record OkxPosition(
     [property: JsonPropertyName("posSide")] string? PosSide,
     [property: JsonPropertyName("pos")]     string? PosRaw,
     [property: JsonPropertyName("avgPx")]   string? AvgPxRaw,
-    [property: JsonPropertyName("upl")]     string? UplRaw,
-    [property: JsonPropertyName("liqPx")]   string? LiqPxRaw,
     [property: JsonPropertyName("lever")]   string? LeverRaw
 )
 {
@@ -160,9 +158,6 @@ public sealed record OkxPosition(
     /// <summary>Absolute contract count.</summary>
     public decimal AbsContracts => Math.Abs(Contracts);
     public decimal? AveragePrice => OkxNum.ParseOrNull(AvgPxRaw);
-    public decimal? UnrealisedPnl => OkxNum.ParseOrNull(UplRaw);
-    /// <summary>Estimated liquidation price, when OKX reports one.</summary>
-    public decimal? LiquidationPrice => OkxNum.ParseOrNull(LiqPxRaw);
     public bool IsFlat => AbsContracts <= 0m;
 }
 
@@ -215,7 +210,6 @@ public sealed record OkxOrderDetail(
 
     public bool IsFilled    => string.Equals(State, "filled",   StringComparison.OrdinalIgnoreCase);
     public bool IsCanceled  => string.Equals(State, "canceled", StringComparison.OrdinalIgnoreCase);
-    public bool IsPartial   => string.Equals(State, "partially_filled", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>True once the order can no longer change: filled, or cancelled.</summary>
     public bool IsTerminal  => IsFilled || IsCanceled;

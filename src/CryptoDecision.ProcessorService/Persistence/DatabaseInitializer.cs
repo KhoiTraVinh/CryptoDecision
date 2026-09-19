@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace CryptoDecision.ProcessorService.Persistence;

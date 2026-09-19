@@ -13,7 +13,6 @@ public sealed class BotStateService
     private bool             _isRunning    = false;
     private List<BotTrade>   _openTrades   = new();
     private DateTime?        _lastEvalAt   = null;
-    private DateTime?        _lastClosedAt = null;
     private DateTime?        _runningSince = null;
     private Dictionary<string, DateTime> _lastEntryAtByStrategy = new();
 
@@ -150,9 +149,6 @@ public sealed class BotStateService
     }
 
     public DateTime? LastEvalAt { get { lock (_lock) return _lastEvalAt; } }
-
-    public void SetLastClosedAt(DateTime? dt) { lock (_lock) _lastClosedAt = dt; }
-    public DateTime? LastClosedAt { get { lock (_lock) return _lastClosedAt; } }
 
     public void SetLastEntryAt(string strategy, DateTime dt) 
     { 

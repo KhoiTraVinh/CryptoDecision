@@ -1,6 +1,5 @@
 using CryptoDecision.IngestionService.Binance;
 using CryptoDecision.IngestionService.Channels;
-using Microsoft.Extensions.Logging;
 
 namespace CryptoDecision.IngestionService.Workers;
 

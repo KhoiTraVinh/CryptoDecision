@@ -2,7 +2,6 @@ using System.Diagnostics;
 using CryptoDecision.ProcessorService.Kafka;
 using CryptoDecision.ProcessorService.Models;
 using CryptoDecision.ProcessorService.Persistence;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CryptoDecision.ProcessorService.Workers;

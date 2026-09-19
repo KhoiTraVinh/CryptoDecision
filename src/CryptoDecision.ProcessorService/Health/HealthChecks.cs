@@ -2,7 +2,6 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
-using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace CryptoDecision.ProcessorService.Health;
