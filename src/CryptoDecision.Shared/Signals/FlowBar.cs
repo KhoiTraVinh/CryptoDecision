@@ -76,29 +76,15 @@ public sealed record VenueWindow(
         }
     }
 
-    /// <summary>
-    /// Share of the dominant side's volume contributed by its single largest print.
-    ///
-    /// This is the guard that the old whale threshold was trying and failing to be.
-    /// A window whose imbalance is one order is not a crowd leaning one way, it is
-    /// one participant, and it reverts as soon as they are done. Observed live: a
-    /// single whale buy moved the old composite from 52.6 to 60.9 — most of the way
-    /// to a real-money entry — while the flow underneath was leaning *sell*.
-    ///
-    /// Measured against the dominant side rather than the total because that is the
-    /// side making the claim. Returns 0 for an empty window.
-    /// </summary>
-    public double Concentration
-    {
-        get
-        {
-            var (sideVolume, sideMax) = BuyVolumeUsd >= SellVolumeUsd
-                ? (BuyVolumeUsd, MaxBuyUsd)
-                : (SellVolumeUsd, MaxSellUsd);
-
-            return sideVolume > 0m ? (double)(sideMax / sideVolume) : 0.0;
-        }
-    }
+    // FlowBar.Concentration lived here and was deleted on 2026-09-19 with the last thing
+    // that read it — the RatioMaxConcentration guard in ScoreFlowRatio, which was never
+    // enabled. It returned the dominant side's largest single print over that side's
+    // volume: the guard against "one participant, not a crowd".
+    //
+    // MaxBuyUsd and MaxSellUsd are deliberately KEPT. They are real columns on
+    // flow_bars_15m, still written by the aggregation worker and still merged by Sum and
+    // Merge below, so the guard can be rebuilt without a schema change. See
+    // HYPOTHESES.md, "Removed features".
 
     /// <summary>Sum a contiguous run of one venue's buckets into a single window.</summary>
     /// <remarks>

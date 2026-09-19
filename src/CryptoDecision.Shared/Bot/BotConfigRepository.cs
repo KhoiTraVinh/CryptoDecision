@@ -29,8 +29,6 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    capital_usd, max_open_trades_per_strategy, position_pct,
                    take_profit_pct, stop_loss_pct, cooldown_seconds, max_hold_minutes,
                    daily_loss_limit_pct, eval_interval_seconds,
-                   COALESCE(use_breakeven_stop, TRUE) AS use_breakeven_stop,
-                   COALESCE(breakeven_trigger_pct, 0.005) AS breakeven_trigger_pct,
                    COALESCE(use_dynamic_tp_sl, FALSE) AS use_dynamic_tp_sl,
                    COALESCE(use_ai_sizing, FALSE) AS use_ai_sizing,
                    COALESCE(require_ai_gate, TRUE) AS require_ai_gate,
