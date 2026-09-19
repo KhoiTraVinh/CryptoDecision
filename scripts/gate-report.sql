@@ -75,20 +75,19 @@ ORDER BY signals DESC;
 \echo ''
 \echo '════════ 3. Refusals on a premise the brief contradicted ════════'
 \echo '-- Not a judgement call and not a sample-size question: the gate asserted'
-\echo '-- something the brief it was handed says is false. Excluded venues above zero'
-\echo '-- when zero were excluded; positions already open when none were; dispersion'
-\echo '-- "wide" at a fraction of the ceiling the scorer already enforced.'
+\echo '-- something the brief it was handed says is false. Excluded venues cited when no'
+\echo '-- rule in this build scores venues at all; positions already open when none were;'
+\echo '-- this setup losing when every slice with enough trades is positive.'
 \echo '-- Any row here is a defect regardless of how the trade would have gone.'
 SELECT
     signal_at,
+    strategy,
     side,
-    aggregate_z,
-    agreeing_venues || '/' || participating_venues AS agreement,
-    excluded_venues,
-    dispersion_bps,
+    ROUND(aggregate_ofi, 3)                  AS ofi,
+    ROUND(atr_pct, 2)                        AS atr_pct,
     outcome,
     outcome_r,
-    LEFT(gate_reason, 90) AS reason
+    LEFT(gate_reason, 90)                    AS reason
 FROM signal_outcomes
 WHERE gate_decision = 'REFUSED'
   AND gate_premise_contradicted(gate_reason, excluded_venues, bot_trade_id)
@@ -100,14 +99,18 @@ LIMIT 40;
 \echo '-- The weekly review list: refusals that would have won big, and approvals that'
 \echo '-- lost. Read with the features next to them — the point is to find what the'
 \echo '-- gate could have seen and did not, not to relitigate individual trades.'
-(SELECT 'SKIPPED_BUT_WON' AS kind, signal_at, side, aggregate_z, dispersion_bps,
-        agreeing_venues, outcome_r, LEFT(gate_reason, 70) AS reason
+(SELECT 'SKIPPED_BUT_WON' AS kind, signal_at, strategy, side,
+        ROUND(aggregate_ofi,3) AS ofi,
+        EXTRACT(hour FROM signal_at AT TIME ZONE 'UTC')::int AS utc_hour,
+        outcome_r, LEFT(gate_reason, 70) AS reason
  FROM signal_outcomes
  WHERE gate_decision = 'REFUSED' AND outcome = 'WIN'
  ORDER BY outcome_r DESC LIMIT 10)
 UNION ALL
-(SELECT 'APPROVED_AND_LOST', signal_at, side, aggregate_z, dispersion_bps,
-        agreeing_venues, outcome_r, LEFT(gate_reason, 70)
+(SELECT 'APPROVED_AND_LOST', signal_at, strategy, side,
+        ROUND(aggregate_ofi,3),
+        EXTRACT(hour FROM signal_at AT TIME ZONE 'UTC')::int,
+        outcome_r, LEFT(gate_reason, 70)
  FROM signal_outcomes
  WHERE gate_decision IN ('APPROVED', 'APPROVED_DEGRADED') AND outcome = 'LOSS'
  ORDER BY outcome_r ASC LIMIT 10)
@@ -130,20 +133,35 @@ SELECT
 FROM signal_outcomes;
 
 \echo ''
-\echo '════════ 6. Dispersion, the gate''s most-used reason, against outcomes ════════'
-\echo '-- Buckets the feature the gate refuses on most often. If "late entry" carries'
-\echo '-- information, the higher buckets should show a worse win rate. If they do not,'
-\echo '-- the ceiling in FlowSignalOptions is the only dispersion check worth having.'
+\echo '════════ 6. Session, the cut the gate is now shown ════════'
+\echo '-- This section used to bucket DISPERSION, which was the gate''s most-used refusal'
+\echo '-- reason. Neither surviving rule computes dispersion -- the column is 0 on every'
+\echo '-- row -- so it bucketed a constant and reported one line. It was replaced on'
+\echo '-- 2026-09-19 with the split H19 actually gives the gate.'
+\echo '--'
+\echo '-- READ THIS BEFORE READING THE TABLE. outcome_r is the LABELLER''s number: first'
+\echo '-- touch of the stored stop or target within the horizon, with NO OFI exit. The'
+\echo '-- deployed exit set closes 30 of the last 40 trades on the OFI reversal, so this'
+\echo '-- column prices a strategy that does not run, and it does not agree with the'
+\echo '-- replay H19 was decided on. As of 2026-09-19 the two disagree in SIGN for'
+\echo '-- XVENUE_FLOW: this table makes Asia/EU the worse session, the deployed-exit'
+\echo '-- replay makes it the better one. CANDLE_REVERSAL agrees in both.'
+\echo '--'
+\echo '-- That is the third time in this repository that dropping the OFI exit from a'
+\echo '-- measurement reversed a conclusion. Use this section to watch the split move,'
+\echo '-- not to decide H19 -- H19 is judged on a replay that models every deployed exit.'
 SELECT
-    width_bucket(dispersion_bps, 0, 25, 5) AS bucket,
-    MIN(dispersion_bps) || '-' || MAX(dispersion_bps) || ' bps' AS range,
-    COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS','TIMEOUT')) AS decided,
+    CASE WHEN EXTRACT(hour FROM signal_at AT TIME ZONE 'UTC') BETWEEN 12 AND 19
+         THEN '12-20 UTC (US)' ELSE '20-12 UTC (Asia/EU)' END           AS session,
+    strategy,
+    COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS','TIMEOUT'))         AS decided,
     ROUND(100.0 * COUNT(*) FILTER (WHERE outcome = 'WIN')
           / NULLIF(COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS')), 0), 1) AS win_rate_pct,
+    ROUND(SUM(outcome_r) FILTER (WHERE outcome IN ('WIN','LOSS','TIMEOUT')), 2) AS total_r,
     ROUND(AVG(outcome_r) FILTER (WHERE outcome IN ('WIN','LOSS','TIMEOUT')), 3) AS avg_r
 FROM signal_outcomes
-WHERE dispersion_bps IS NOT NULL
-GROUP BY 1 ORDER BY 1;
+GROUP BY 1, 2
+ORDER BY 2, 1;
 
 \echo ''
 \echo '-- Reminder: if section 0 said INSUFFICIENT, everything above is one regime.'
