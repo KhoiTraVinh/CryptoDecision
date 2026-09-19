@@ -644,9 +644,16 @@ day, capital 100 and risk 0.006. **A fresh database comes up as a different bot,
 and no migration records the live values.** Read `bot_config` before believing any
 configuration statement — including the ones in this file.
 
-**Sixteen `bot_config` columns are read by nothing.** `grid_step_pct`, `min_ai_confidence`,
-`min_buy_ratio_1h`, `min_momentum_buy_ratio`, `trailing_stop_pct`, `use_trailing_stop`,
-`use_ai_agent`, `use_ai_filter`, `use_breakeven_stop`, `breakeven_trigger_pct` and the six
-`last_verdict_*` columns are all leftovers of features that have been removed. They are
-harmless but misleading: grepping for one of them finds a column and suggests the feature
-still exists. The code that read the last four was deleted on 2026-09-19.
+**`sql/*.sql` cannot build a database from empty.** 006 runs `ALTER TABLE bot_trades` and
+008 is what creates `bot_trades`, so applying the set in filename order stops at 006. This
+is exactly what `migrate.sh` exists to prevent -- its own header says a new instance would
+otherwise "boot with a schema missing flow_bars_15m" -- and it does not currently deliver
+it. Not fixed by renumbering, because the checksum ledger forbids editing applied files;
+it needs a new migration that creates the table if absent, or a documented bootstrap step.
+Found 2026-09-19 while testing sql/036 against a throwaway postgres:16.
+
+**Sixteen orphaned `bot_config` columns were dropped in `sql/036`**, after the two scripts
+that still read `last_verdict_*` as a fallback were changed to read `strategy_verdicts`
+directly. Left in place, that fallback would have done more than stop working: health.sh
+would error on the missing columns, get an empty result, and skip the branch that prints
+the LIVE per-strategy verdicts.

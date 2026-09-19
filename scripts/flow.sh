@@ -95,14 +95,12 @@ WHERE c.id = 1 ORDER BY v.strategy;
 SQL
     dim "a strategy marked idle is registered but not in active_strategies -- its verdict is stale"
 else
-    warn_line="  strategy_verdicts is missing -- apply sql/034. Falling back to bot_config."
+    # No fallback to bot_config.last_verdict_*. sql/036 drops those columns, and the bot
+    # stopped writing them at sql/034 anyway -- so the "fallback" could only ever have
+    # printed a frozen code with a plausible-looking age beside it, which is worse than
+    # printing nothing.
+    warn_line="  strategy_verdicts is missing -- apply sql/034 and restart the bot."
     printf '\033[33m%s\033[0m\n' "$warn_line"
-    $PSQLT <<SQL
-SELECT coalesce(last_verdict_code,'(none)') AS code,
-       coalesce(date_trunc('second', now()-last_verdict_at)::text,'never') AS age,
-       left(coalesce(last_verdict_detail,''),96) AS detail
-FROM bot_config WHERE id=1;
-SQL
 fi
 row=$($PSQL <<SQL
 SELECT enabled, (SELECT count(*) FROM bot_trades WHERE status='OPEN') FROM bot_config WHERE id=1;

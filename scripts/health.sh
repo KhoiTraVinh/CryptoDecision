@@ -216,50 +216,43 @@ title "5b. The strategy's verdict right now"
 # Read from bot_config, not from the log. The log is throttled to a code change
 # and then every 120th repeat, so during a move its newest line can be an hour
 # old -- SOL fell 2.7% while the freshest line said z=+0.50.
-v=$($PSQL -c "SELECT COALESCE(last_verdict_code,'-'), COALESCE(last_verdict_z::TEXT,'-'), COALESCE(last_verdict_agree::TEXT,'-'), COALESCE(last_verdict_venues::TEXT,'-'), COALESCE(EXTRACT(EPOCH FROM now()-last_verdict_at)::INT::TEXT,'-'), COALESCE(last_verdict_detail,'-') FROM bot_config WHERE id = 1;" 2>/dev/null)
-if [ -z "$v" ] || [ "${v%%|*}" = "-" ]; then
-    warn "no verdict recorded yet -- needs sql/026 applied and the bot restarted"
+# strategy_verdicts is the only source now. bot_config.last_verdict_* was the fallback
+# and those six columns are dropped in sql/036 -- they stopped being written when the
+# per-strategy table took over in sql/034, so the fallback could only ever have shown a
+# frozen value. Leaving the old SELECT in would have been worse than useless after the
+# drop: it errors, $v comes back empty, and the branch that prints the LIVE verdicts is
+# skipped entirely. A dead fallback that disables the live path is not a safety net.
+#
+# Read from the table, not from the log: the log is throttled to a code change and then
+# every 120th repeat, so during a move its newest line can be an hour old -- SOL fell
+# 2.7% while the freshest line said z=+0.50.
+#
+# z and the venue tally are not printed. They are the deleted ZScore rule's statistics;
+# neither surviving rule computes either, so they were three dead zeroes sitting next to
+# a verdict code that is live. The detail string carries what actually decided it.
+if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" != "t" ]; then
+    warn "strategy_verdicts missing -- apply sql/034 and restart the bot"
 else
-    IFS='|' read -r vcode vz vagree vvenues vage vdetail <<<"$v"
-    # Superseded by strategy_verdicts: bot_config holds ONE verdict written from inside
-    # the per-strategy loop, so with two strategies it shows whichever ran last. Prefer
-    # the per-strategy table when it exists, and say so when it does not.
-    if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" = "t" ]; then
-        while IFS='|' read -r sv_strat sv_code sv_age sv_detail; do
-            [ -z "$sv_strat" ] && continue
-            ok "$sv_strat  $sv_code  (${sv_age}s ago)"
-            printf '        %s\n' "$sv_detail"
-        done < <($PSQL -c "SELECT strategy, code, round(extract(epoch FROM now()-updated_at))::int, left(detail,150) FROM strategy_verdicts ORDER BY strategy")
-    else
-        warn "strategy_verdicts missing -- apply sql/034; the line below is bot_config's single verdict"
-    # z and the venue tally are NOT printed any more. They are the ZScore rule's
-    # statistics, and FlowRatio does not compute either -- it reads one closed bucket
-    # and never calls Prepare, so the scorer writes 0.0000 and 0/0 every time. Showing
-    # them put three dead zeroes on the line an operator reads first, next to a verdict
-    # code that is live. The detail string below carries what actually decided it: the
-    # bucket, its imbalance and its notional. They stay in the SELECT so that switching
-    # EntryMode back to ZScore is a one-line change here.
-        ok "$vcode  (${vage}s ago)"
-        printf '        %s\n' "$vdetail"
-    fi
+    rows=0
+    while IFS='|' read -r sv_strat sv_code sv_age sv_detail; do
+        [ -z "$sv_strat" ] && continue
+        rows=$((rows + 1))
+        ok "$sv_strat  $sv_code  (${sv_age}s ago)"
+        printf '        %s\n' "$sv_detail"
+    done < <($PSQL -c "SELECT strategy, code, round(extract(epoch FROM now()-updated_at))::int, left(detail,150) FROM strategy_verdicts ORDER BY strategy")
 
-    # Staleness is measured against the FRESHEST per-strategy verdict, not against
-    # bot_config.last_verdict_at.
+    [ "$rows" -eq 0 ] && warn "no verdict recorded yet -- the bot has not completed a cycle since sql/034"
+
+    # Staleness is measured against the FRESHEST per-strategy row.
     #
-    # That column stopped being written when strategy_verdicts took over, so it freezes
-    # at whatever the last single-strategy build left and its age grows without bound --
-    # which made this check FAIL on a perfectly healthy bot within six minutes of the
-    # deploy that fixed the thing it was checking. A monitor reading a field nobody
-    # writes any more is the same defect as a monitor reporting a retired rule, and this
-    # session has now produced both.
-    #
-    # The freshest row is the right reference: every active strategy is written in the
-    # same cycle, so if ANY of them is current then the loop is reaching the strategies.
-    # A single strategy lagging is a different fault and shows up as its own row above.
-    if [ "$($PSQL -c "SELECT to_regclass('public.strategy_verdicts') IS NOT NULL")" = "t" ]; then
-        fresh=$($PSQL -c "SELECT COALESCE(MIN(EXTRACT(EPOCH FROM now()-updated_at))::INT, 99999) FROM strategy_verdicts")
-        vage=${fresh:-$vage}
-    fi
+    # Every active strategy is written in the same cycle, so if ANY of them is current
+    # then the loop is reaching the strategies; a single strategy lagging is a different
+    # fault and shows up as its own row above. Measuring against bot_config.last_verdict_at
+    # instead made this check FAIL on a perfectly healthy bot within six minutes of the
+    # deploy that fixed the thing it was checking, because that column had stopped being
+    # written. A monitor reading a field nobody writes any more is the same defect as a
+    # monitor reporting a retired rule.
+    vage=$($PSQL -c "SELECT COALESCE(MIN(EXTRACT(EPOCH FROM now()-updated_at))::INT, 99999) FROM strategy_verdicts")
 
     # A stale verdict is only a fault when the strategy SHOULD be evaluating.
     # With a position open and max_open_trades_per_strategy reached, the loop
