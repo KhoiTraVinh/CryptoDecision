@@ -1864,3 +1864,103 @@ longer read, joining the other orphaned columns listed under Known constraints i
 `MaxDispersionBps` is also a dead knob — no scorer reads it — but it still renders one line
 of CONTEXT in the gate brief, and **H17 is being measured on that prompt**. Remove it when
 H17 closes.
+
+---
+
+## H19 — Give the gate the session-conditional base rate
+
+### The change
+
+`GetGateEvidenceAsync` gains a third slice beside the cell and the rule overall: the same
+strategy's closed trades **in the same session of day**, split at 12:00–20:00 UTC. Ground
+one, "this setup is losing", becomes available when ANY slice with at least 5 closed
+trades has a negative mean R, and the brief prints all three with their counts so the
+model can see which slice is carrying it and how thin it is.
+
+No new kind of evidence and no new ground — the same account history, cut one more way.
+
+### Why this cut and not another
+
+Asked to find data that separates winners from losers, which is a request to fit the known
+outcome, so the features were chosen by mechanism first and then measured. Four were tried.
+**Range position failed**: the favourable side gives mean +0.079 but only +0.008 after
+discarding the best trade, with a negative first half. Session passed, and passed the part
+that matters:
+
+    khung UTC    n    mean R    win
+    00-04        9    +0.622    67%
+    04-08        4    -0.475    25%
+    08-12       12    +0.510    67%
+    12-16       23    -0.309    35%
+    16-20        9    -0.404    44%
+    20-24       11    +0.010    55%
+
+Every threshold from 06:00 to 18:00 splits dương-below / âm-above, so it is a plateau
+rather than one lucky cut. Refusing 12:00–20:00 over the 68 replayed signals: 36 kept at
+**+9.923R**, 32 refused at **−10.745R**, against −0.822R for taking everything.
+
+**The decisive check is the outlier one, and only half the finding survives it.** The two
+largest trades (+2.83R, +2.80R) both fall at 11:00 UTC, inside the favourable window:
+
+                        full sample    less the two
+    kept   (hour <13)     +0.351          +0.146     <- halves
+    refused(hour >=13)    -0.237          -0.237     <- unchanged
+
+So "accept the winners" rests on two trades and, split by rule, on n=8. **"Refuse the
+losers" does not move.** Split by rule, hours ≥13 is negative for both: CANDLE_REVERSAL
+−0.270 on 17, XVENUE_FLOW −0.214 on 25. That asymmetry is why this ships as evidence
+behind a veto rather than as a reason to size up, and it happens to suit a gate that can
+only ever say no.
+
+Mechanism, which was written down before the split was measured: 12:00–20:00 UTC is the
+European afternoon and the US session, where macro news and institutional flow produce the
+sustained directional moves that both of these short-horizon rules die in. See the FATAL
+IN A TREND note.
+
+### Why a base rate and not a rule
+
+`if (hour >= 12 && hour < 20) refuse;` would encode today's measurement permanently. The
+slice is presented as a **count and a mean** instead, so if the effect is noise the number
+drifts toward zero, the ground stops being available, and nothing needs to be noticed and
+removed. A hard threshold has no such property.
+
+Cost: each cell is cut in two, so a session slice needs longer to reach 5 trades. Until it
+does it is printed as "too thin to read" and the ground is not available from it — failing
+toward the permissive side, which is the direction this gate should fail in.
+
+### The caveat that cannot be measured away
+
+**19 days cannot separate "the US session trends" from "these particular 19 days trended
+during the US session".** The boundary also came out of a threshold scan, which is worth
+saying plainly. What makes it different in kind from the five regime detectors that failed
+(see the regime-detection note) is that a calendar feature has no estimation error, is
+known before the trade rather than inferred from price at a timescale 10x shorter than the
+regime, and cannot be tuned into existence the way a z-score threshold can. Different in
+kind is not the same as correct.
+
+### Decision rule, fixed in advance
+
+Judged on signals recorded **after** this ships, at 30 gated signals in the 12:00–20:00
+window or 28 days, whichever comes first.
+
+- **Keep if** the session slice is still negative on the new data AND the gate's refusals
+  in that window have a lower mean R than its approvals there.
+- **Revert if** the session slice turns positive on the new data, or if refusals in that
+  window have a HIGHER mean R than approvals — the case where it is removing winners.
+- **Do not re-cut the session boundary inside the window.** Moving 12:00 to 13:00 because
+  the first ten trades suggest it is the whole failure mode this file exists to prevent.
+
+### Interaction with H17
+
+This edits the prompt H17 is being measured on, so **H17's count restarts from this
+deploy**. That is a real cost and it is being paid deliberately: H17 has not produced a
+single gated signal yet, so there is nothing to lose but the clock.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is entries not taken in the session that
+happens to contain roughly half the trade stream.
+
+### Result
+
+_Open._

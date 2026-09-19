@@ -20,10 +20,27 @@ namespace CryptoDecision.Shared.Bot;
 /// </param>
 /// <param name="Move4hPct">SOL's move over the last four hours, in percent. Signed.</param>
 /// <param name="Move12hPct">The same over twelve, which is also the maximum hold.</param>
+/// <param name="SessionTrades">
+/// Closed trades for this strategy inside the SAME session of day as now. The session
+/// split is <see cref="IsUsSession"/>.
+///
+/// Measured 2026-09-19 on all 68 recorded signals replayed with the deployed exit set:
+/// entries between 12:00 and 20:00 UTC total **-10.745R over 32 trades** while everything
+/// outside that window totals +9.923R over 36. Every threshold from 06:00 to 18:00 splits
+/// the same way, so it is a plateau rather than one lucky cut — and unlike the positive
+/// half, **the negative half does not move when the two largest winners are removed**
+/// (-0.336 mean either way). The mechanism is the one the FATAL IN A TREND note already
+/// names: 12:00-20:00 UTC is the European afternoon and the US session, where macro news
+/// and institutional flow produce the sustained moves that both of these short-horizon
+/// rules die in.
+/// </param>
 public sealed record GateEvidence(
     int     CellTrades,
     int     CellWins,
     decimal CellMeanR,
+    int     SessionTrades,
+    int     SessionWins,
+    decimal SessionMeanR,
     int     RuleTrades,
     int     RuleWins,
     decimal RuleMeanR,
@@ -36,7 +53,21 @@ public sealed record GateEvidence(
     /// failed evidence query makes the gate no stricter than it was — it must never
     /// turn a database hiccup into a refusal.
     /// </summary>
-    public static readonly GateEvidence Unknown = new(0, 0, 0m, 0, 0, 0m, -1d, 0m, 0m);
+    public static readonly GateEvidence Unknown = new(0, 0, 0m, 0, 0, 0m, 0, 0, 0m, -1d, 0m, 0m);
+
+    /// <summary>
+    /// Whether a UTC instant falls in the session that measured negative.
+    ///
+    /// 12:00-20:00 came out of a threshold scan, which is worth saying plainly rather than
+    /// presenting it as chosen from theory — but it is not a fitted boundary in the way a
+    /// tuned z-score is. It has no estimation error, it is known before the trade rather
+    /// than inferred from price, every neighbouring cut from 06:00 to 18:00 splits the same
+    /// direction, and it coincides with the conventional crypto "US session" window.
+    ///
+    /// The honest caveat stays: 19 days cannot separate "the US session trends" from "these
+    /// particular 19 days trended during the US session". That is what H19 is for.
+    /// </summary>
+    public static bool IsUsSession(DateTime utc) => utc.Hour is >= 12 and < 20;
 
     /// <summary>
     /// Below this the cell's mean R is an anecdote. Five is not a sample either; it is
@@ -54,7 +85,21 @@ public sealed record GateEvidence(
     /// <summary>Minutes within which a second entry on the same path is one event twice.</summary>
     public const double ClusterMinutes = 120d;
 
-    public bool CellIsLosing  => CellTrades >= MinCellTrades && CellMeanR < 0m;
+    /// <summary>
+    /// The cell's own record is losing, OR this session is. Either slice reaching
+    /// <see cref="MinCellTrades"/> and coming out negative makes the ground available.
+    ///
+    /// Two slices rather than one because they fail at different times and the gate
+    /// should see whichever has evidence: the cell is the narrowest read but takes
+    /// longest to fill, and the session slice fills faster because it ignores side and
+    /// entry path. Both are the account's own closed trades, so neither is a forecast.
+    /// </summary>
+    public bool CellIsLosing => (CellTrades    >= MinCellTrades && CellMeanR    < 0m)
+                             || (SessionTrades >= MinCellTrades && SessionMeanR < 0m);
+
+    /// <summary>Which of the two slices is actually carrying the ground, for the brief.</summary>
+    public bool CellSliceIsLosing    => CellTrades    >= MinCellTrades && CellMeanR    < 0m;
+    public bool SessionSliceIsLosing => SessionTrades >= MinCellTrades && SessionMeanR < 0m;
     public bool ClusteredPath => MinutesSinceSamePath >= 0d && MinutesSinceSamePath < ClusterMinutes;
 
     /// <summary>True when the last four hours ran against the side being proposed.</summary>
@@ -489,6 +534,19 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                          AND COALESCE(entry_path, '') = COALESCE(@path::text, '')
                        ORDER BY closed_at DESC LIMIT @lookback) c
             ),
+            sess AS (
+                -- Same strategy, same session of day. Deliberately NOT scoped by side or
+                -- entry path: this slice exists because it fills faster than the cell,
+                -- and narrowing it further would defeat the point of having two.
+                SELECT COUNT(*) n,
+                       COUNT(*) FILTER (WHERE r > 0) wins,
+                       COALESCE(AVG(r), 0) mean_r
+                FROM (SELECT r FROM scoped
+                       WHERE strategy = @strategy
+                         AND (EXTRACT(hour FROM opened_at AT TIME ZONE 'UTC') >= 12
+                          AND EXTRACT(hour FROM opened_at AT TIME ZONE 'UTC') <  20) = @inUs
+                       ORDER BY closed_at DESC LIMIT @lookback) s
+            ),
             rule AS (
                 SELECT COUNT(*) n,
                        COUNT(*) FILTER (WHERE r > 0) wins,
@@ -517,11 +575,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                     ORDER BY open_time DESC LIMIT 1) AS px12
             )
             SELECT cell.n, cell.wins, cell.mean_r,
+                   sess.n, sess.wins, sess.mean_r,
                    rule.n, rule.wins, rule.mean_r,
                    samepath.mins,
                    CASE WHEN px.px4  > 0 THEN (px.now_px - px.px4)  / px.px4  * 100 ELSE 0 END,
                    CASE WHEN px.px12 > 0 THEN (px.now_px - px.px12) / px.px12 * 100 ELSE 0 END
-            FROM cell, rule, samepath, px
+            FROM cell, sess, rule, samepath, px
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
@@ -532,6 +591,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("side",     side);
         cmd.Parameters.AddWithValue("path",     (object?)entryPath ?? DBNull.Value);
         cmd.Parameters.AddWithValue("lookback", lookback);
+        cmd.Parameters.AddWithValue("inUs",     GateEvidence.IsUsSession(DateTime.UtcNow));
 
         await using var r = await cmd.ExecuteReaderAsync(ct);
         if (!await r.ReadAsync(ct)) return GateEvidence.Unknown;
@@ -540,12 +600,15 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
             CellTrades:       (int)r.GetInt64(0),
             CellWins:         (int)r.GetInt64(1),
             CellMeanR:        r.IsDBNull(2) ? 0m : r.GetDecimal(2),
-            RuleTrades:       (int)r.GetInt64(3),
-            RuleWins:         (int)r.GetInt64(4),
-            RuleMeanR:        r.IsDBNull(5) ? 0m : r.GetDecimal(5),
-            MinutesSinceSamePath: r.IsDBNull(6) ? -1d : (double)r.GetDecimal(6),
-            Move4hPct:        r.IsDBNull(7) ? 0m : r.GetDecimal(7),
-            Move12hPct:       r.IsDBNull(8) ? 0m : r.GetDecimal(8));
+            SessionTrades:    (int)r.GetInt64(3),
+            SessionWins:      (int)r.GetInt64(4),
+            SessionMeanR:     r.IsDBNull(5) ? 0m : r.GetDecimal(5),
+            RuleTrades:       (int)r.GetInt64(6),
+            RuleWins:         (int)r.GetInt64(7),
+            RuleMeanR:        r.IsDBNull(8) ? 0m : r.GetDecimal(8),
+            MinutesSinceSamePath: r.IsDBNull(9) ? -1d : (double)r.GetDecimal(9),
+            Move4hPct:        r.IsDBNull(10) ? 0m : r.GetDecimal(10),
+            Move12hPct:       r.IsDBNull(11) ? 0m : r.GetDecimal(11));
     }
 
     // ── Mapper ────────────────────────────────────────────────────────────────

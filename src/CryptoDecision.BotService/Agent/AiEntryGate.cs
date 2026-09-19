@@ -184,10 +184,14 @@ public sealed class AiEntryGate(
         Each is marked AVAILABLE or NOT AVAILABLE in the brief, computed from this
         account's own closed trades. Read the marker; do not decide for yourself whether
         a condition is met.
-        - This setup is losing: the brief marks THIS CELL as losing — the same rule, the
-          same direction, the same entry path, over its last trades. This is the
-          strongest ground you have, because it is this exact trade's own track record.
-          It needs at least 5 closed trades to be available at all.
+        - This setup is losing: the brief shows this setup's own closed trades cut three
+          ways — the exact cell (same rule, side and entry path), the same rule in the
+          same session of day, and the rule overall. The ground is available when ANY
+          slice with at least 5 closed trades has a negative mean R. Read the counts:
+          a slice marked too thin is not evidence either way, and a narrow slice with
+          5 trades is weaker than a wide one with 20 even when both are negative.
+          This is the strongest ground you have, because it is this account's own result
+          rather than a view about the market.
         - Trend against the entry: the brief marks the 4-hour move as running against the
           direction proposed. This rule enters on a short-horizon pattern and has no view
           on the larger move; entering a LONG into a sustained fall is buying a knife.
@@ -360,11 +364,28 @@ public sealed class AiEntryGate(
         // The cell's own record, named so the model cannot mistake it for the strategy's.
         // "CANDLE_REVERSAL SHORT" and "CANDLE_REVERSAL LONG" are different trades and the
         // first has one observation against the second's twenty-nine.
-        var cell = e.CellTrades == 0
-            ? "no closed trades yet"
-            : $"{c.Strategy} {c.Side}" +
-              $"{(string.IsNullOrEmpty(flow.EntryPath) ? "" : $" via {flow.EntryPath}")}: " +
-              $"{e.CellTrades} closed, {e.CellWins} won, mean R {e.CellMeanR:+0.000;-0.000}";
+        // One line per slice, narrowest first, each with its own n so the model can see
+        // which of them is worth anything. A slice under MinCellTrades is printed with its
+        // count and explicitly marked as too thin rather than left out — "no evidence" and
+        // "evidence that says nothing" are different, and hiding the thin one invites the
+        // model to assume the wider slice is the narrow one.
+        static string Slice(string label, int n, int wins, decimal meanR) =>
+            n == 0
+                ? $"{label,-34} no closed trades yet"
+                : $"{label,-34} {n,3} closed, {wins,3} won, mean R {meanR:+0.000;-0.000}" +
+                  (n < GateEvidence.MinCellTrades ? "   (too thin to read)" : "");
+
+        var inUs = GateEvidence.IsUsSession(DateTime.UtcNow);
+
+        var cell = Slice(
+            $"{c.Strategy} {c.Side}{(string.IsNullOrEmpty(flow.EntryPath) ? "" : $" via {flow.EntryPath}")}",
+            e.CellTrades, e.CellWins, e.CellMeanR);
+
+        var session = Slice(
+            $"{c.Strategy} in {(inUs ? "12-20 UTC" : "20-12 UTC")}",
+            e.SessionTrades, e.SessionWins, e.SessionMeanR);
+
+        var rule = Slice($"{c.Strategy} overall", e.RuleTrades, e.RuleWins, e.RuleMeanR);
 
         var lossLimitUsd = c.CapitalUsd * c.DailyLossLimitPct;
         var lossShare    = lossLimitUsd > 0
@@ -411,14 +432,19 @@ public sealed class AiEntryGate(
                       "  absent, not zero, and are not grounds for anything.")}
 
             THE FOUR GROUNDS, EACH MARKED FROM THIS ACCOUNT'S OWN CLOSED TRADES
-              this cell         {cell}
-                                {(e.CellTrades < GateEvidence.MinCellTrades
-                                    ? $"only {e.CellTrades} closed trade(s) — too few to read, so " +
-                                      "'this setup is losing' is NOT AVAILABLE as a ground"
-                                    : e.CellIsLosing
-                                        ? "mean R is NEGATIVE over this cell's own record — " +
-                                          "'this setup is losing' is AVAILABLE as a ground"
-                                        : "mean R is positive — 'this setup is losing' is NOT AVAILABLE")}
+              this setup's own record, measured over its last closed trades:
+                {cell}
+                {session}
+                {rule}
+                                {(e.CellIsLosing
+                                    ? "at least one slice with enough trades is NEGATIVE — " +
+                                      "'this setup is losing' is AVAILABLE as a ground"
+                                    : e.CellTrades < GateEvidence.MinCellTrades
+                                   && e.SessionTrades < GateEvidence.MinCellTrades
+                                        ? $"no slice has reached {GateEvidence.MinCellTrades} closed " +
+                                          "trades yet, so 'this setup is losing' is NOT AVAILABLE"
+                                        : "every slice with enough trades is positive — " +
+                                          "'this setup is losing' is NOT AVAILABLE")}
               4-hour move       {e.Move4hPct,6:+0.00;-0.00}%   (12-hour {e.Move12hPct:+0.00;-0.00}%)
                                 {(e.TrendAgainst(c.Side)
                                     ? $"the market has moved {e.Move4hPct:+0.00;-0.00}% against a {c.Side} " +
@@ -441,7 +467,6 @@ public sealed class AiEntryGate(
               dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
               today's P&L       ${c.TodayPnlUsd,6:F2}   — {lossShare}
               open, this rule   {c.OpenPositions,6}       — limit {c.MaxOpenPositions}
-              {c.Strategy} overall: {e.RuleTrades} closed, {e.RuleWins} won, mean R {e.RuleMeanR:+0.000;-0.000}
 
             ACCOUNT
               capital ${c.CapitalUsd:F2}, open positions {c.OpenPositions} of {c.MaxOpenPositions}
@@ -595,10 +620,13 @@ public sealed class AiEntryGate(
         if ((text.Contains("losing") || text.Contains("base rate") || text.Contains("track record"))
             && !e.CellIsLosing)
             return e.CellTrades < GateEvidence.MinCellTrades
-                ? $"it cites this setup's record, and the brief showed only {e.CellTrades} closed " +
-                  $"trade(s) — below the {GateEvidence.MinCellTrades} needed for that ground to exist."
-                : $"it cites this setup as losing, and the brief showed mean R " +
-                  $"{e.CellMeanR:+0.000;-0.000} over {e.CellTrades} trades.";
+                && e.SessionTrades < GateEvidence.MinCellTrades
+                ? $"it cites this setup's record, and no slice has reached " +
+                  $"{GateEvidence.MinCellTrades} closed trades — the cell has {e.CellTrades} and " +
+                  $"the session slice {e.SessionTrades}, so that ground does not exist yet."
+                : $"it cites this setup as losing, and every slice with enough trades is " +
+                  $"positive: cell {e.CellMeanR:+0.000;-0.000} over {e.CellTrades}, session " +
+                  $"{e.SessionMeanR:+0.000;-0.000} over {e.SessionTrades}.";
 
         if (text.Contains("trend") && !e.TrendAgainst(c.Side))
             return $"it cites the trend, and the brief showed a 4-hour move of " +
