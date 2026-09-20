@@ -2016,6 +2016,9 @@ _Open._
 
 ## H20 — Hold the SHORT side to a higher bar than the LONG side
 
+> **CLOSED 2026-09-20 as SUPERSEDED by H21, after one observation and about eight hours.
+> Operator override — H20's own reject condition was NOT met.** See the Result section.
+
 - **Opened** 2026-09-20
 - **Change** `FlowSignalOptions.ShortRatioMinimum` 3.0 and `ShortMinOfi` 0.60, applied to
   XVENUE_FLOW only, on **both** entry paths. The long side is untouched at 2.1x / $3M, and
@@ -2095,6 +2098,97 @@ not be opened while this one is running.
 
 None in money; `paper_mode` is true. The cost is the short side of one rule in a market
 that may turn down, and roughly 1 signal per 30 days by the measurement above.
+
+### Result
+
+**SUPERSEDED by H21 on 2026-09-20, ~8 hours after deploy, on 1 observation.**
+
+What it did in that window. It was live from 18:59 UTC and refused the short side 8 times,
+every one correctly on a sell-dominated bucket, never on a buy-dominated one — so the
+implementation was right and the LONG side was untouched, which was the one condition that
+would have rejected it outright. Seven of the eight were buckets the OLD 2.1x rule would
+have refused anyway, differing only in which code was logged.
+
+**The eighth is the whole result.** At 02:30 on 09-20 a bucket traded $14.81M at 2.44:1
+sell-dominated — over the $3M floor, over the old 2.1x — so the old rule would have taken
+a SHORT. H20 blocked it, and SOL fell from about 109.5 to 108.1 over the following half
+hour. One short, blocked, that would have worked.
+
+**H20's own reject condition was not met, and it is being overridden anyway.** The rule
+said reject "if SOL falls more than 5% over the window and the missed shorts would have
+been the only thing working". SOL was −4.93% over 24h, under the bar, and n=1 is not a
+window. This is an operator override on a single observation, the same shape as H18
+overriding H16, and it is recorded as that rather than dressed up as a measured result.
+
+What the eight hours DID establish, independent of the override: the two thresholds were
+unreachable exactly as predicted before deploy — 0 buckets cleared |OFI| 0.60, and the one
+bucket that cleared 3.0x in 30 days was the 02:30 one. H20 stopped the short side rather
+than raising its bar, which is what the entry said it would do.
+
+---
+
+## H21 — Hold the SHORT side to a bigger print, at the same ratio
+
+- **Opened** 2026-09-20, replacing H20 after one observation
+- **Change** `ShortMinVolumeUsd` = **$10M** for XVENUE_FLOW, used in place of
+  `RatioMinVolumeUsd` ($3M) when the bucket is sell-dominated. `ShortRatioMinimum` and
+  `ShortMinOfi` are deleted: **the ratio test is symmetric again at 2.1x.**
+- **Purpose** Operator decision. H20 raised the short bar so far it removed the side; this
+  puts the bar on the size of the print instead, keeping the ratio where it was.
+
+### What changes, exactly
+
+    long side    >= $3M   AND >= 2.1x      unchanged
+    short side   >= $10M  AND >= 2.1x      was $3M / 2.1x before H20, 3.0x + |OFI| 0.60 under H20
+    waiver       >= $20M  at any ratio     UNCHANGED, and see below
+
+### Know what this number is fitted to
+
+**Over 30 days to 2026-09-20, sell-dominated buckets clearing $10M AND 2.1x number
+EXACTLY ONE** — the 02:30 bucket on 09-20, $14.81M at 2.44x, which is the bucket that was
+on screen when the threshold was chosen. The old $3M floor admitted 30 over the same
+window.
+
+A threshold picked from one observation, which then matches one observation, is a
+description of that event rather than a filter. It is written down here before the result
+so that "it worked" cannot later be claimed for it on the same single bucket that chose
+it. See the trial-budget note at the top of this file.
+
+### It does not slow the short side as a whole
+
+`RatioHighVolumeUsd` is $20M, already above the new floor, so the news-print waiver is
+untouched and keeps taking shorts at ANY ratio: **19 qualifying sell-dominated buckets over
+the same 30 days, against 1 for the ratio path.** The waiver is therefore now the source of
+essentially every short this rule takes. Of the 7 shorts on record, 3 came through it,
+including two of the three worst. If the intent was to slow shorts generally rather than to
+restrict the ratio path, `RatioHighVolumeUsd` has to move too, and that is a separate
+change.
+
+The startup banner states this, so it cannot be discovered later by surprise.
+
+### Decision rule, fixed in advance
+
+Judge on data collected after this deploy, at **10 closed XVENUE_FLOW shorts** or
+**21 days**, whichever comes first. The count is on shorts, not on all trades, because
+shorts are what changed.
+
+- **Keep** if short-side mean R over the window is above **-0.10R**, i.e. the size floor
+  turned a -0.483R side into something near break-even.
+- **Reject and restore the symmetric $3M floor** if short-side mean R is below -0.483R,
+  the pre-change figure — the floor would then be selecting worse shorts, not better ones.
+- **Reject as untestable** if fewer than 5 shorts arrive in 21 days. A rule that produces
+  no observations cannot be judged, and at that point the honest options are long-only by
+  explicit choice or moving the waiver, not another threshold.
+- **Do not attribute the 02:30 bucket to this rule.** It is the observation that chose the
+  threshold and it predates the deploy.
+- **Split the result by entry_path.** Ratio-path and waiver shorts are now different
+  populations with different floors, and pooling them would hide which one is working.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is taking ratio-path shorts at roughly 1 per
+month, which means this hypothesis is very likely to hit the "untestable" branch above.
+That is itself the finding worth having.
 
 ### Result
 

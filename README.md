@@ -91,15 +91,17 @@ entry paths and `bot_trades.entry_path` records which one fired:
                  -> the ratio test is WAIVED, entry takes whichever side traded more,
                     however narrow the lead
 
-    SHORT gate   applies to BOTH paths, ahead of the waiver (H20, 2026-09-20)
-                 sell >= ShortRatioMinimum x buy (3.0x) AND |OFI| >= ShortMinOfi (0.60)
-                 The two are the same number -- 0.60 |OFI| IS 4.0x -- so the OFI leg is
-                 the one that binds, and it sits ABOVE this market's all-time maximum of
-                 0.590. In 30 days, 0 of 738 qualifying sell-dominated buckets cleared
-                 it. XVENUE_FLOW is effectively LONG-ONLY; the startup banner says so.
-                 Why: 7 closed shorts at -3.383R against a flat long side, and 0 wins in
-                 10 short signals ever. The sample is confounded by a 7.4% rally -- see
-                 H20, which records that and the decision rule.
+    SHORT floor  >= $10M instead of the long side's $3M, SAME 2.1x ratio (H21, 2026-09-20)
+                 H20 tried 3.0x + |OFI| 0.60 and that is 4.0x written twice, above the
+                 all-time maximum of 0.590 -- it removed the short side rather than
+                 raising its bar, and was superseded after one observation.
+                 KNOW WHAT $10M IS FITTED TO: in 30 days exactly ONE sell-dominated
+                 bucket clears $10M AND 2.1x, and it is the bucket that chose the
+                 threshold. The old $3M floor admitted 30.
+                 IT DOES NOT TOUCH THE WAIVER: $20M is above the new floor, so the
+                 news-print path still takes shorts at any ratio -- 19 buckets over the
+                 same 30 days against 1 for the ratio path. Most shorts now come from
+                 there. See H21 for the decision rule.
 
 The waiver exists to catch a news print, where a stampede has size on both sides and never
 produces a 2.1:1 lean — measured, ratio falls as volume rises, and only 1 of the 42 buckets
@@ -116,6 +118,7 @@ Refusals carry named codes:
 |---|---|
 | `BUCKET_NOT_SETTLED` | bucket closed under `RatioSettleMinutes` ago; the worker is still writing it |
 | `VOLUME_TOO_THIN` | under the notional floor — a 2:1 lean on $2M is what a quiet hour looks like |
+| `SHORT_VOLUME_TOO_THIN` | sell-dominated and under the SHORT side's own $10M floor (H21) |
 | `RATIO_TOO_LOW` | neither side dominates by enough, and the bucket is under the waiver |
 | `BUCKET_PERFECTLY_BALANCED` | waiver volume reached with buy exactly equal to sell — no side to take |
 | `ONE_SIDED_BUCKET` | no volume on one side at all; a data fault, not a market state |

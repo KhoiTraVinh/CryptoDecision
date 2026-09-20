@@ -131,25 +131,31 @@ public sealed class CrossVenueFlowStrategy(
     };
 
     /// <summary>
-    /// The SHORT side's own thresholds, stated at startup rather than left to be inferred.
+    /// The SHORT side's own notional floor, stated at startup rather than left to be
+    /// inferred.
     ///
-    /// It says UNREACHABLE out loud when the required |OFI| is at or above 0.59, because
-    /// that is this market's all-time maximum over 30 days — 1,250 sell-dominated buckets,
-    /// one of which reached 0.590. A threshold nobody can reach and a threshold nobody
-    /// meant to set look identical in a config file, which is the same reason the ratio
-    /// path announces itself when RatioMinimum is out of reach.
+    /// H20 put a ratio and an |OFI| gate here and both were out of reach, which stopped the
+    /// short side instead of raising its bar; H21 replaces them with size. The banner still
+    /// has to say how rare the result is, because a floor almost nothing clears and a floor
+    /// nobody meant to set look identical in a config file.
     /// </summary>
     private static string DescribeShortGate(FlowSignalOptions s)
     {
-        var impliedRatio = (1.0 + s.ShortMinOfi) / (1.0 - s.ShortMinOfi);
+        if (s.ShortMinVolumeUsd <= 0m || s.ShortMinVolumeUsd <= s.RatioMinVolumeUsd)
+            return "SHORT and LONG are held to the same floor.";
 
-        var gate = $"SHORT additionally requires sell >= {s.ShortRatioMinimum:F2}x buy AND " +
-                   $"|OFI| >= {s.ShortMinOfi:F2} (= {impliedRatio:F2}x), on BOTH paths — the " +
-                   "high-volume waiver waives the ratio test for longs only (H20).";
+        var gate = $"SHORT requires >= ${s.ShortMinVolumeUsd / 1_000_000m:F1}M instead of the " +
+                   $"long side's ${s.RatioMinVolumeUsd / 1_000_000m:F1}M, at the same " +
+                   $"{s.RatioMinimum:F2}x ratio (H21).";
 
-        return s.ShortMinOfi >= 0.59
-            ? gate + " AT THIS |OFI| THE SHORT SIDE IS UNREACHABLE: no bucket in 30 days " +
-                     "cleared it, the observed maximum being 0.590. Expect LONG-ONLY behaviour."
+        // The waiver sits above this floor, so it is untouched and becomes the main way a
+        // short still happens. Said out loud because "I raised the short floor" and "I
+        // slowed the short side" are different claims and only the first one is true.
+        return s.RatioHighVolumeUsd > 0m && s.RatioHighVolumeUsd > s.ShortMinVolumeUsd
+            ? gate + $" The ${s.RatioHighVolumeUsd / 1_000_000m:F1}M waiver is ABOVE that floor " +
+                     "and still takes shorts at any ratio, so it is now where most shorts will " +
+                     "come from — 19 qualifying buckets in the last 30 days against 1 for this " +
+                     "ratio path."
             : gate;
     }
 
