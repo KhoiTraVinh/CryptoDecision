@@ -850,6 +850,17 @@ public sealed class TradingBotService(
             // logged at Debug under an Information minimum, with target_price still
             // showing the anchor. Trade 93 cleared its stored target and did not close,
             // and there was nothing to look at that would have explained it.
+            // Stamped whatever the reviewer answered, including "could not answer", because
+            // the stamp paces the NEXT review. Not wrapped in the dynamic-levels check
+            // below: a review that returns HOLD changes no level and still has to be
+            // recorded, or the position would be re-reviewed every cycle.
+            if (decision.ExitReviewedAt is { } reviewedAt)
+            {
+                trade.LastExitReviewAt = reviewedAt;
+                await SafeRecordAsync(
+                    repo.StampExitReviewAsync(trade.Id, reviewedAt, ct), "exit review stamp");
+            }
+
             if (decision.DynamicStopPrice   != trade.DynamicStopPrice ||
                 decision.DynamicTargetPrice != trade.DynamicTargetPrice)
             {

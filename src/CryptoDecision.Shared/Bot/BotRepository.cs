@@ -354,7 +354,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
                    leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason, entry_path
+                   gate_verdict, gate_reason, entry_path, last_exit_review_at
             FROM bot_trades
             WHERE status = 'OPEN'
             ORDER BY opened_at ASC
@@ -392,6 +392,26 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// Null clears them, which is the correct state when the feature is off or the trade
     /// has no favourable excursion: "not applicable" rather than "unchanged".
     /// </summary>
+    /// <summary>
+    /// Stamp when the LLM was last asked whether to cut this position.
+    ///
+    /// Written even when the answer was HOLD, and even when the model could not answer at
+    /// all — the stamp paces the NEXT question, so a failed review must still consume its
+    /// slot. Without that, an Ollama outage would make the bot retry every 30 seconds and
+    /// spend the whole cycle budget on a service that is down.
+    /// </summary>
+    public async Task StampExitReviewAsync(
+        long tradeId, DateTime reviewedAt, CancellationToken ct = default)
+    {
+        const string sql = "UPDATE bot_trades SET last_exit_review_at = @at WHERE id = @id";
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("at", reviewedAt);
+        cmd.Parameters.AddWithValue("id", tradeId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task UpdateDynamicLevelsAsync(
         long tradeId, decimal? stopPrice, decimal? targetPrice, CancellationToken ct = default)
     {
@@ -419,7 +439,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
                    pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
                    mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
                    leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason, entry_path
+                   gate_verdict, gate_reason, entry_path, last_exit_review_at
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -706,5 +726,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         GateVerdict   = r.IsDBNull(26) ? null : r.GetString(26),
         GateReason    = r.IsDBNull(27) ? null : r.GetString(27),
         EntryPath     = r.IsDBNull(28) ? null : r.GetString(28),
+        LastExitReviewAt = r.IsDBNull(29) ? null : r.GetDateTime(29),
     };
 }

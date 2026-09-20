@@ -2365,3 +2365,84 @@ the risk that the $2.5M floor admits the thin-volume cases the original sweep wa
 ### Result
 
 _Open._
+
+---
+
+## H24 — The model decides the early exit, the OFI rule becomes its fallback
+
+- **Opened** 2026-09-20
+- **Change** After a position has been held `ExitReviewAfter` (2h), and then at most once
+  every `ExitReviewEvery` (2h), `AiExitReviewer` is asked whether force remains behind it
+  or the trend has turned. CUT closes the position as `LLM_EXIT`. The 15-bucket
+  `OFI_REVERSAL` rule **no longer runs every cycle** — it runs only when a review was due
+  and the model could not answer.
+- **Purpose** Operator decision: stop cutting on a hard-coded sign flip.
+
+### What is actually being replaced
+
+`OFI_REVERSAL` is the only exit on this account that has produced positive R: **30 exits,
++4.647R**, against the stop's -6.615R over 6 and a take-profit that has never fired. It is
+not deleted and it is not switched off — it is demoted to the failure path. That ordering
+is the whole change: if it kept running each cycle it would close positions long before
+the first review was due (mean hold to an OFI exit was 3.83h against a 2h first review) and
+the model would effectively never be asked.
+
+### Why the cadence is two hours and not per bucket
+
+The evidence only changes when a bucket closes, so a per-bucket review would be the
+theoretical maximum. It is not affordable here, and the numbers are measured rather than
+guessed:
+
+    one call                        42-43 s
+    host                            2 vCPU, Ollama at 3.406 of its 3.418 GiB limit
+    concurrency                     OLLAMA_NUM_PARALLEL=1 — calls serialise
+    cycle budget                    120 s, shared with every open position and the gate
+    per-bucket cadence              ~16 calls per 4h position, ~32-100/day
+    two-hour cadence                ~2 calls per position, ~4/day
+
+Two positions reviewed synchronously in one cycle is 86s; add an entry-gate call at 43s and
+the cycle exceeds its budget and logs "Open positions were not evaluated this cycle". The
+two-hour pacing keeps total model load at the same order as the entry gate's current
+2-10 calls a day.
+
+### The asymmetry that makes the entry gate safe does not exist here
+
+Every gate failure resolves to "no entry", which costs an opportunity and never a position.
+An exit has no such default: silence must mean hold, which leaves a position with no early
+exit, or cut, which pays a round trip on every Ollama hiccup. So the reviewer does not
+pick — it reports `Unavailable` and the caller runs the deterministic rule. An unparseable
+or unrecognised answer is also `Unavailable`, deliberately, rather than being quietly
+downgraded to HOLD.
+
+### What the model is and is not asked
+
+It is asked one bounded question about evidence already assembled — does the flow still
+push this way, or has it turned — and is shown the closed buckets since the position
+opened, each with OFI and notional, plus the 1h and 4h price moves. Stop, target, size and
+max hold are shown as context it cannot change. It is not asked to predict price.
+
+### Decision rule, fixed in advance
+
+Judge at **15 closed trades** or **21 days**, whichever comes first, splitting exits by
+reason.
+
+- **Keep** if mean R across all exits is above **+0.003R**, the account's pre-change
+  figure, AND `LLM_EXIT` mean R is above `OFI_REVERSAL`'s historical +0.155 (4.647/30).
+- **Revert to the deterministic rule** if `LLM_EXIT` mean R is below 0 while
+  `OFI_REVERSAL` remains positive, or if stop-outs rise above 25% of exits — the failure
+  mode to watch is the model holding through a reversal the rule would have caught, which
+  shows up as damage moving from `OFI_REVERSAL` into `SL`.
+- **Revert regardless of R** if reviews are not happening: fewer than one review per closed
+  trade means the pacing or the plumbing is wrong, not the judgement.
+- **Watch the fallback rate.** If `Unavailable` exceeds a third of due reviews, this is
+  measuring Ollama's uptime rather than the model's judgement, and the result is void.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The real cost is that the exit producing all of this
+account's positive R is now gated behind a 3B model on a saturated host — which is why the
+fallback exists and why the fallback rate is part of the decision rule.
+
+### Result
+
+_Open._

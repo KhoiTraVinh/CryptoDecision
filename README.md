@@ -124,6 +124,21 @@ Refusals carry named codes:
 | `NO_CLOSED_BUCKET` | nothing to score yet |
 | `FLOW_BARS_STALE` | newest bucket older than `MaxBarAge` — ingestion has stopped |
 
+### The early exit is now the model's call (H24, 2026-09-20)
+
+After 2h held, and then at most once every 2h, `AiExitReviewer` is asked whether force
+remains behind the position or the trend has turned. CUT closes it as `LLM_EXIT`. The
+15-bucket `OFI_REVERSAL` rule no longer runs every cycle — it runs ONLY when a review was
+due and the model could not answer (Ollama down, timed out, unparseable). That fallback is
+deliberate: `OFI_REVERSAL` is the only exit that has produced positive R here, 30 exits at
++4.647R, and an outage falls back to it rather than to nothing.
+
+The cadence is measured, not chosen: one call costs 42-43s on a 2-vCPU host where Ollama
+runs `NUM_PARALLEL=1`, against a 120s cycle budget shared with every open position and the
+entry gate. Per-bucket review would be ~16 calls per trade; two-hourly is ~2. See H24 for
+the arithmetic and the decision rule, and `bot_trades.last_exit_review_at` for the pacing
+clock, which is per position and survives a restart.
+
 ### CANDLE_REVERSAL — the dip rule, and the majority of the trade stream
 
 Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) closed

@@ -86,10 +86,16 @@ builder.Services.AddSingleton<ITradingStrategy>(sp =>
     };
     builder.Configuration.GetSection(FlowStrategyOptions.DipSection).Bind(options);
 
+    // The reviewer is passed EXPLICITLY. It is an optional constructor parameter, so
+    // leaving it off here would not fail the build or the startup -- it would silently
+    // give this instance no early exit at all, and this instance is the majority of the
+    // trade stream. That is the third time a second strategy instance has quietly diverged
+    // from the first by being constructed by hand instead of by the container.
     return new CrossVenueFlowStrategy(
         sp.GetRequiredService<IFlowBarRepository>(),
         options,
-        sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>());
+        sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>(),
+        sp.GetRequiredService<IExitReviewer>());
 });
 
 // The entry gate. This is the only place a language model can affect whether real
@@ -106,6 +112,11 @@ builder.Services.AddSingleton<GateRetrievalOptions>(sp =>
     return options;
 });
 builder.Services.AddSingleton<IEntryGate, AiEntryGate>();
+
+// The exit reviewer shares the Ollama client, the model and the timeout with the entry
+// gate. One model is loaded on this host (OLLAMA_MAX_LOADED_MODELS=1) and calls serialise
+// (NUM_PARALLEL=1), so a second model here would not be servable even if it were wanted.
+builder.Services.AddSingleton<IExitReviewer, AiExitReviewer>();
 
 // ─── Trading Bot ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<BotStateService>();

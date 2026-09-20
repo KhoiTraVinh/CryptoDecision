@@ -129,6 +129,12 @@ public sealed record BotTrade
     /// is applied to. Feeding these back into it would compound the scale once per cycle
     /// — see sql/035 and the dynamic block in CrossVenueFlowStrategy.
     /// </summary>
+    /// <summary>
+    /// When the LLM was last asked whether to cut this position, or null for never.
+    /// Paces the review; see sql/040.
+    /// </summary>
+    public DateTime? LastExitReviewAt { get; set; }
+
     public decimal? DynamicStopPrice   { get; set; }
 
     /// <inheritdoc cref="DynamicStopPrice"/>

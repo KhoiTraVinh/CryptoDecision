@@ -211,4 +211,10 @@ public sealed record ExitDecision(
     decimal  CurrentPrice,
     decimal  ChangePct,
     decimal? DynamicStopPrice   = null,
-    decimal? DynamicTargetPrice = null);
+    decimal? DynamicTargetPrice = null,
+
+    /// <summary>
+    /// Set when the LLM exit reviewer was consulted this cycle, whatever it answered.
+    /// The caller persists it to pace the next review; null means no review happened.
+    /// </summary>
+    DateTime? ExitReviewedAt = null);
