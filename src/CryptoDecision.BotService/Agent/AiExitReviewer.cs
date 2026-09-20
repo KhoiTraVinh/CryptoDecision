@@ -337,17 +337,36 @@ public sealed class AiExitReviewer(
 
         // Claims about which way the buckets lean, checked against the count the brief
         // printed. Both directions are wrong in the same way and both are worth catching.
+        //
+        // MATCHED WITH A GAP-TOLERANT PATTERN, NOT `Contains`. The first version of this
+        // used plain substrings and missed its very first real case within an hour: the
+        // model wrote "the recent buckets lean CLEARLY against the position" and
+        // `Contains("lean against")` does not match that. One adverb defeated it. This is
+        // the same failure as the SQL detector that only knew the previous two fabrication
+        // shapes — a matcher written against one sentence is blind to its paraphrase — so
+        // the verbs and the direction words are now allowed up to three words apart.
         var withIt = c.Buckets.Count(b => isLong ? b.Ofi > 0 : b.Ofi < 0);
 
-        if ((text.Contains("lean the position") || text.Contains("lean towards the position")
-          || text.Contains("favour") || text.Contains("favor"))
-            && c.Buckets.Count > 0 && withIt * 2 < c.Buckets.Count)
+        static bool Near(string text, string first, string second) =>
+            System.Text.RegularExpressions.Regex.IsMatch(
+                text, $@"\b{first}\w*\b(\s+\w+){{0,3}}\s+\b{second}\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        var saysWith    = Near(text, "lean", "with") || Near(text, "lean", "toward")
+                       || Near(text, "lean", "towards") || Near(text, "favour", "position")
+                       || Near(text, "favor", "position") || text.Contains("still favour")
+                       || text.Contains("still favor");
+
+        var saysAgainst = Near(text, "lean", "against") || Near(text, "turn", "against")
+                       || Near(text, "push", "against") || text.Contains("force is gone")
+                       || text.Contains("force has gone") || text.Contains("no longer favour")
+                       || text.Contains("no longer favor");
+
+        if (saysWith && c.Buckets.Count > 0 && withIt * 2 < c.Buckets.Count)
             return $"it says the buckets favour the position, and the brief showed only " +
                    $"{withIt} of {c.Buckets.Count} doing so.";
 
-        if ((text.Contains("turned against") || text.Contains("lean against")
-          || text.Contains("force is gone"))
-            && c.Buckets.Count > 0 && withIt * 2 > c.Buckets.Count)
+        if (saysAgainst && c.Buckets.Count > 0 && withIt * 2 > c.Buckets.Count)
             return $"it says the flow has turned against the position, and the brief showed " +
                    $"{withIt} of {c.Buckets.Count} buckets still favouring it.";
 
