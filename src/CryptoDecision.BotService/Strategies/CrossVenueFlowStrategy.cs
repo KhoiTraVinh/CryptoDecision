@@ -141,21 +141,31 @@ public sealed class CrossVenueFlowStrategy(
     /// </summary>
     private static string DescribeShortGate(FlowSignalOptions s)
     {
-        if (s.ShortMinVolumeUsd <= 0m || s.ShortMinVolumeUsd <= s.RatioMinVolumeUsd)
-            return "SHORT and LONG are held to the same floor.";
+        var ownRatio  = s.ShortRatioMinimum > 0m && s.ShortRatioMinimum != s.RatioMinimum;
+        var ownVolume = s.ShortMinVolumeUsd  > 0m && s.ShortMinVolumeUsd  != s.RatioMinVolumeUsd;
 
-        var gate = $"SHORT requires >= ${s.ShortMinVolumeUsd / 1_000_000m:F1}M instead of the " +
-                   $"long side's ${s.RatioMinVolumeUsd / 1_000_000m:F1}M, at the same " +
-                   $"{s.RatioMinimum:F2}x ratio (H21).";
+        if (!ownRatio && !ownVolume)
+            return "SHORT and LONG are held to the same thresholds.";
 
-        // The waiver sits above this floor, so it is untouched and becomes the main way a
-        // short still happens. Said out loud because "I raised the short floor" and "I
-        // slowed the short side" are different claims and only the first one is true.
-        return s.RatioHighVolumeUsd > 0m && s.RatioHighVolumeUsd > s.ShortMinVolumeUsd
-            ? gate + $" The ${s.RatioHighVolumeUsd / 1_000_000m:F1}M waiver is ABOVE that floor " +
-                     "and still takes shorts at any ratio, so it is now where most shorts will " +
-                     "come from — 19 qualifying buckets in the last 30 days against 1 for this " +
-                     "ratio path."
+        var gate = "SHORT requires " +
+                   (ownRatio  ? $">= {s.ShortRatioMinimum:F2}x (long side {s.RatioMinimum:F2}x)" : "") +
+                   (ownRatio && ownVolume ? " and " : "") +
+                   (ownVolume ? $">= ${s.ShortMinVolumeUsd / 1_000_000m:F2}M " +
+                                $"(long side ${s.RatioMinVolumeUsd / 1_000_000m:F1}M)" : "") +
+                   " (H22).";
+
+        // Two things a reader must not have to work out for themselves.
+        if (ownVolume && s.ShortMinVolumeUsd < s.RatioMinVolumeUsd)
+            gate += " NOTE the short notional floor is BELOW the long one — on this side the " +
+                    "ratio is doing the work and the notional is only a sanity floor.";
+
+        // The waiver is above both floors and is deliberately NOT gated, so it keeps taking
+        // shorts at any ratio. Said out loud because "I raised the short bar" and "I slowed
+        // the short side" are different claims and only the first one is true.
+        return s.RatioHighVolumeUsd > 0m
+            ? gate + $" The ${s.RatioHighVolumeUsd / 1_000_000m:F1}M waiver is NOT gated and " +
+                     "still takes shorts at any ratio — 19 qualifying buckets in the last 30 " +
+                     "days against 11 for this ratio path."
             : gate;
     }
 

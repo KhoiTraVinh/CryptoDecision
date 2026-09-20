@@ -91,17 +91,14 @@ entry paths and `bot_trades.entry_path` records which one fired:
                  -> the ratio test is WAIVED, entry takes whichever side traded more,
                     however narrow the lead
 
-    SHORT floor  >= $10M instead of the long side's $3M, SAME 2.1x ratio (H21, 2026-09-20)
-                 H20 tried 3.0x + |OFI| 0.60 and that is 4.0x written twice, above the
-                 all-time maximum of 0.590 -- it removed the short side rather than
-                 raising its bar, and was superseded after one observation.
-                 KNOW WHAT $10M IS FITTED TO: in 30 days exactly ONE sell-dominated
-                 bucket clears $10M AND 2.1x, and it is the bucket that chose the
-                 threshold. The old $3M floor admitted 30.
-                 IT DOES NOT TOUCH THE WAIVER: $20M is above the new floor, so the
-                 news-print path still takes shorts at any ratio -- 19 buckets over the
-                 same 30 days against 1 for the ratio path. Most shorts now come from
-                 there. See H21 for the decision rule.
+    SHORT rules  >= 2.5x ratio (long side 2.1x) AND >= $2.5M (long side $3.0M)
+                 H22, 2026-09-20. The short notional floor is BELOW the long one on
+                 purpose: on this side the ratio does the work. Applied AFTER the
+                 waiver, so the $20M news-print path still takes shorts at any ratio.
+                 Third setting of this parameter in one day -- H20 (4.0x, matched 0
+                 buckets in 30 days), H21 ($10M+2.1x, matched 1, never deployed),
+                 H22 (matched 11, spread across the window). See H22 for the count
+                 and the decision rule.
 
 The waiver exists to catch a news print, where a stampede has size on both sides and never
 produces a 2.1:1 lean — measured, ratio falls as volume rises, and only 1 of the 42 buckets
@@ -118,7 +115,8 @@ Refusals carry named codes:
 |---|---|
 | `BUCKET_NOT_SETTLED` | bucket closed under `RatioSettleMinutes` ago; the worker is still writing it |
 | `VOLUME_TOO_THIN` | under the notional floor — a 2:1 lean on $2M is what a quiet hour looks like |
-| `SHORT_VOLUME_TOO_THIN` | sell-dominated and under the SHORT side's own $10M floor (H21) |
+| `SHORT_VOLUME_TOO_THIN` | sell-dominated and under the SHORT side's own $2.5M floor (H22) |
+| `SHORT_RATIO_TOO_LOW` | sell-dominated and under the SHORT side's own 2.5x ratio (H22) |
 | `RATIO_TOO_LOW` | neither side dominates by enough, and the bucket is under the waiver |
 | `BUCKET_PERFECTLY_BALANCED` | waiver volume reached with buy exactly equal to sell — no side to take |
 | `ONE_SIDED_BUCKET` | no volume on one side at all; a data fault, not a market state |

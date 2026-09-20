@@ -346,29 +346,33 @@ public sealed record FlowSignalOptions(
     int     RatioSettleMinutes            = 3,
 
     /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: the notional floor a SHORT must clear,
-    /// in USD, in place of <see cref="RatioMinVolumeUsd"/>. 0 falls back to that one and
-    /// makes the two sides symmetric again.
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: how far SELL volume must outweigh buy
+    /// before a SHORT is allowed, in place of <see cref="RatioMinimum"/>. 0 makes the two
+    /// sides symmetric again.
     ///
-    /// **This is H21 and it replaces H20 after one observation.** H20 held the short side
-    /// to 3.0x and |OFI| 0.60, which is 4.0x expressed twice, above this market's all-time
-    /// maximum of 0.590 -- so it did not raise the bar, it removed the side. The ratio test
-    /// is symmetric again at <see cref="RatioMinimum"/> and the size of the print is what
-    /// the short side is now held to.
-    ///
-    /// **KNOW WHAT THIS NUMBER IS FITTED TO.** Over 30 days to 2026-09-20, sell-dominated
-    /// buckets clearing $10M AND 2.1x number EXACTLY ONE -- the 02:30 bucket on 09-20,
-    /// $14.81M at 2.44x, which is the bucket the operator was looking at when the threshold
-    /// was chosen. The old $3M floor admitted 30 over the same window. A threshold picked
-    /// from one observation and matching one observation is a description of that event,
-    /// not a filter, and H21 records that before the result rather than after.
-    ///
-    /// IT DOES NOT TOUCH THE WAIVER. RatioHighVolumeUsd is $20M, already above this, so
-    /// the news-print path keeps taking shorts at any ratio -- 19 qualifying sell-dominated
-    /// buckets over the same 30 days, which is where most shorts will now come from.
-    /// Raise RatioHighVolumeUsd too if the intent was to slow the short side as a whole.
+    /// Applied AFTER the high-volume waiver, so the news-print path keeps taking shorts at
+    /// any ratio. H20 put this ahead of the waiver and thereby changed two rules on one
+    /// decision; keeping them separate means each can be judged on its own.
     /// </summary>
-    decimal ShortMinVolumeUsd             = 10_000_000m)
+    decimal ShortRatioMinimum             = 2.5m,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.FlowRatio"/>: the notional floor a SHORT must clear,
+    /// in USD, in place of <see cref="RatioMinVolumeUsd"/>. 0 falls back to that one.
+    ///
+    /// **NOTE IT IS BELOW THE LONG SIDE'S $3M**, deliberately: under H22 the ratio does the
+    /// work on the short side and the notional is only a sanity floor. The -0.012 mean R
+    /// measured below $3M is a pooled figure over both sides at 2:1, not a short-side
+    /// measurement at 2.5:1, so it does not directly argue against this.
+    ///
+    /// **This pair is the third setting of the short rule in one day**, after H20 (3.0x +
+    /// |OFI| 0.60, unreachable) and H21 ($10M + 2.1x, one matching bucket in 30 days).
+    /// Unlike both, it produces a testable population: over 30 days to 2026-09-20,
+    /// **11 sell-dominated buckets clear $2.5M AND 2.5x**, spread from 08-27 to 09-20
+    /// rather than clustered, roughly 0.37/day. See H22, including the count of how many
+    /// times this parameter has now moved.
+    /// </summary>
+    decimal ShortMinVolumeUsd             = 2_500_000m)
 {
     /// <summary>
     /// How many closed buckets to load before scoring.
@@ -863,13 +867,27 @@ public static class CrossVenueFlowScorer
                 EntryPath:           EntryPaths.HighVolume);
         }
 
-        if (ratio < (double)options.RatioMinimum)
+        // The ratio floor is side-dependent too, and sits AFTER the waiver so the
+        // news-print path keeps its documented "any ratio" behaviour. H20 put the short
+        // ratio ahead of the waiver and that also changed what the waiver does, which is a
+        // second change riding on one decision; H22 keeps them separate.
+        var ratioFloor = sellSide && options.ShortRatioMinimum > 0m
+            ? options.ShortRatioMinimum
+            : options.RatioMinimum;
+
+        if (ratio < (double)ratioFloor)
             return FlowVerdict.Abstain(
-                "RATIO_TOO_LOW",
+                sellSide && ratioFloor != options.RatioMinimum
+                    ? "SHORT_RATIO_TOO_LOW"
+                    : "RATIO_TOO_LOW",
                 $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
                 $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
                 $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
-                $"{options.RatioMinimum:F2}:1 minimum" +
+                $"{ratioFloor:F2}:1 minimum" +
+                (sellSide && ratioFloor != options.RatioMinimum
+                    ? $" the SHORT side requires — the long side needs only " +
+                      $"{options.RatioMinimum:F2}:1 (H22)"
+                    : "") +
                 (options.RatioHighVolumeUsd > 0m
                     ? $", and under the ${options.RatioHighVolumeUsd / 1_000_000m:F1}M that " +
                       "would have waived it."

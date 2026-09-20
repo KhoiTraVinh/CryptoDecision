@@ -2129,6 +2129,10 @@ than raising its bar, which is what the entry said it would do.
 
 ## H21 — Hold the SHORT side to a bigger print, at the same ratio
 
+> **CLOSED 2026-09-20 as SUPERSEDED by H22, with ZERO observations — it was never
+> deployed.** Production was still running H20 when the replacement was written. See the
+> Result section.
+
 - **Opened** 2026-09-20, replacing H20 after one observation
 - **Change** `ShortMinVolumeUsd` = **$10M** for XVENUE_FLOW, used in place of
   `RatioMinVolumeUsd` ($3M) when the bucket is sell-dominated. `ShortRatioMinimum` and
@@ -2189,6 +2193,92 @@ shorts are what changed.
 None in money; `paper_mode` is true. The cost is taking ratio-path shorts at roughly 1 per
 month, which means this hypothesis is very likely to hit the "untestable" branch above.
 That is itself the finding worth having.
+
+### Result
+
+**SUPERSEDED by H22 on 2026-09-20, with ZERO observations. It never reached production.**
+
+Committed as `9f20a66` and pushed; CI had not finished deploying it when the operator
+changed the thresholds again, so the bot never ran a single cycle under $10M / 2.1x. There
+is nothing to report about its behaviour because it had none.
+
+What survives is the measurement that prompted the replacement, and it was already in the
+entry above: **$10M AND 2.1x matched exactly one sell-dominated bucket in 30 days**, the
+one that chose the threshold. H22 uses 2.5x / $2.5M, which matches 11 spread across the
+whole window. Replacing an untestable threshold with a testable one before either has run
+is the right direction; doing it inside the same hour is not, and the count below is the
+point.
+
+**THIS PARAMETER HAS NOW MOVED THREE TIMES IN ONE DAY** — H20 (3.0x + |OFI| 0.60), H21
+($10M + 2.1x), H22 (2.5x + $2.5M) — against 7 closed shorts of lifetime evidence. That
+ratio is exactly what the trial budget at the top of this file exists to make visible.
+
+---
+
+## H22 — Short side: 2.5x ratio on a $2.5M floor
+
+- **Opened** 2026-09-20, replacing H21 before H21 ran
+- **Change** `ShortRatioMinimum` **2.5x** (long side stays 2.1x) and `ShortMinVolumeUsd`
+  **$2.5M** (long side stays $3M), for XVENUE_FLOW. Both apply only to a sell-dominated
+  bucket. The ratio check sits AFTER the waiver, so the $20M news-print path is untouched.
+- **Purpose** Operator decision: keep the short side alive but make the imbalance carry it.
+
+### What changes
+
+    long side    >= $3.0M  AND >= 2.1x     unchanged
+    short side   >= $2.5M  AND >= 2.5x
+    waiver       >= $20M   at any ratio    unchanged, NOT gated
+
+**The short notional floor is BELOW the long one and that is deliberate.** On this side the
+ratio is doing the work; the notional is a sanity floor, not the filter. The -0.012 mean R
+measured below $3M is a pooled figure over both sides at 2:1 — it is not a short-side
+measurement at 2.5:1, so it does not directly argue against $2.5M, but it is also not
+evidence for it.
+
+### Why this threshold is testable where the last two were not
+
+    setting                        qualifying sell-dominated buckets / 30 days
+    old symmetric  $3M   + 2.1x    30
+    H20            any   + 4.0x     0   (|OFI| 0.60 is above the all-time max of 0.590)
+    H21            $10M  + 2.1x     1   (and it was the bucket that chose the threshold)
+    H22 (this)     $2.5M + 2.5x    11
+
+The eleven run 08-27, 09-01, 09-02, 09-06 ×2, 09-08, 09-10 ×2, 09-17, 09-19, 09-20 —
+spread across the whole window rather than clustered on one event, at roughly 0.37/day.
+That is a population that can actually produce a verdict inside three weeks.
+
+### The honest problem with this entry
+
+**This parameter has moved three times today** — H20, H21, H22 — against a lifetime
+evidence base of 7 closed shorts. H21 never ran at all. Two of the three moves were made
+while looking at a specific bucket on screen. The trial budget at the top of this file
+exists for exactly this pattern, and the count is recorded here rather than left to be
+reconstructed later from `git log`.
+
+Nothing about H22 is more measured than H20 or H21 were; what it has is a larger
+qualifying population, which makes it falsifiable rather than correct.
+
+### Decision rule, fixed in advance
+
+Judge at **10 closed XVENUE_FLOW shorts** or **21 days**, whichever comes first. Split by
+`entry_path` — RATIO and HIGH_VOLUME shorts are different populations under different
+rules and pooling them hides which one is working.
+
+- **Keep** if RATIO-path short mean R is above **-0.10R** over the window.
+- **Reject and go long-only by explicit choice** if RATIO-path short mean R is below
+  **-0.483R**, the pre-H20 figure. Three failed thresholds would then be enough: the
+  conclusion is that the short side of this rule does not work, not that the fourth number
+  will fix it.
+- **Do not move this parameter again before the window closes.** If it moves, this entry
+  is void and nothing has been learned from any of H20, H21 or H22.
+- **Do not attribute the 02:15 or 02:30 buckets of 09-20 to this rule.** Both predate the
+  deploy and one of them chose the threshold.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. At 0.37 qualifying buckets a day the window will
+likely close on the 21-day branch with fewer than 10 shorts, and the waiver will contribute
+most of whatever short flow appears.
 
 ### Result
 
