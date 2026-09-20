@@ -470,7 +470,26 @@ public sealed record FlowVerdict(
     /// bot_trades.entry_path so a position can still be attributed to its rule hours
     /// later, after the sentence that produced it is gone.
     /// </summary>
-    string   EntryPath = "")
+    string   EntryPath = "",
+
+    /// <summary>
+    /// How strongly the rule fired, in that rule's own units — the number a human would
+    /// name if asked "how big was this one". CandleReversal puts the absolute percent
+    /// move that triggered it; FlowRatio puts the volume ratio.
+    ///
+    /// **Units differ between rules on purpose, and that is safe because every consumer
+    /// filters by strategy first.** Retrieval compares a CandleReversal signal only against
+    /// other CandleReversal signals, so "2.44" always means a ratio there and "1.98" always
+    /// means a percent here. Do not average this column across strategies.
+    ///
+    /// It exists because the gate's nearest-neighbour search had nothing real to rank on.
+    /// Measured 2026-09-20 over every signal on record: CandleReversal has 35 rows with
+    /// ONE distinct stop_pct and ONE distinct aggregate_ofi, so two of the three terms in
+    /// the distance were constants and the search collapsed to atr_pct — which is not why
+    /// the rule fired — then tie-broke on recency. Five retrieved "similar" cases cost a
+    /// measured +10.4s per gate call and were ranked on an irrelevant axis.
+    /// </summary>
+    double   TriggerValue = 0.0)
 {
     public static FlowVerdict Abstain(
         string code,
@@ -652,7 +671,10 @@ public static class CrossVenueFlowScorer
                   (contested
                      ? $" The {dipBars}-bar window also showed a {dipMovePct:F2}% fall, which the " +
                        "shorter window overrides: the dip has already been bought back."
-                     : ""));
+                     : ""),
+            // The size of the move that fired it, unsigned — the side already carries the
+            // direction, and retrieval wants "how big a dip" not "which way".
+            TriggerValue:        Math.Abs(isDip ? dipMovePct : riseMovePct));
     }
 
     /// <summary>
@@ -881,7 +903,8 @@ public static class CrossVenueFlowScorer
                                      // brief" was being handed a claim with no number in it.
                                      $"lead of {Math.Abs(ofi) * 100:F1}% of the bucket's notional. " +
                                      "Volume is the whole signal here; price is not consulted.",
-                EntryPath:           EntryPaths.HighVolume);
+                EntryPath:           EntryPaths.HighVolume,
+                TriggerValue:        ratio);
         }
 
         // The ratio floor is side-dependent too, and sits AFTER the waiver so the
@@ -928,7 +951,8 @@ public static class CrossVenueFlowScorer
                                  $"past the {options.RatioMinimum:F2}:1 and " +
                                  $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floors. Entering " +
                                  "WITH the dominant side; price is not consulted.",
-            EntryPath:           EntryPaths.Ratio);
+            EntryPath:           EntryPaths.Ratio,
+            TriggerValue:        ratio);
     }
 }
 

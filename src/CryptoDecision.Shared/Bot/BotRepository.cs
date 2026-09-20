@@ -112,6 +112,12 @@ public sealed record GateEvidence(
             : Move4hPct <= -TrendPct;
 }
 
+/// <summary>
+/// One closed trade, for the short ledger the gate is shown beside the averages.
+/// See <see cref="BotRepository.GetRecentTradesForRuleAsync"/>.
+/// </summary>
+public sealed record RecentTrade(DateTime ClosedAt, string Side, string CloseReason, decimal R);
+
 /// <summary>Persists paper/real trades to the bot_trades table.</summary>
 public sealed class BotRepository(NpgsqlDataSource dataSource)
 {
@@ -512,6 +518,55 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// the question is "is this cell losing NOW" — a rule that was fixed a week ago
     /// should not keep being refused for what it did before.
     /// </param>
+    /// <summary>
+    /// The last few closed trades from one rule, newest first, as a short ledger.
+    ///
+    /// The three slices in <see cref="GateEvidence"/> are averages, and an average hides
+    /// the thing the operator most wants the gate to notice: that the previous trade from
+    /// this same rule just lost. On 2026-09-20 the gate approved trade 105 while trade 104
+    /// — same rule, same side, opened 98 minutes earlier — had stopped out at -1.12R
+    /// SEVENTEEN SECONDS before the evidence query ran. The brief marked "one event twice"
+    /// as an available ground and never said how that event ended.
+    ///
+    /// Deliberately raw rows rather than another statistic. Five lines cost about sixty
+    /// tokens, which is roughly two seconds of generation against a 120s cycle budget, and
+    /// a sequence is something a reader can judge where a mean is something they have to
+    /// trust.
+    /// </summary>
+    public async Task<IReadOnlyList<RecentTrade>> GetRecentTradesForRuleAsync(
+        string symbol, string mode, string strategy, int limit = 5,
+        CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT closed_at, side, COALESCE(close_reason, '?'),
+                   pnl_pct / NULLIF(ABS(entry_price - stop_price) / entry_price, 0) AS r
+            FROM bot_trades
+            WHERE symbol = @symbol AND mode = @mode AND strategy = @strategy
+              AND status IN ('CLOSED','STOPPED')
+              AND stop_price IS NOT NULL AND entry_price > 0
+            ORDER BY closed_at DESC
+            LIMIT @limit
+            """;
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("symbol",   symbol);
+        cmd.Parameters.AddWithValue("mode",     mode);
+        cmd.Parameters.AddWithValue("strategy", strategy);
+        cmd.Parameters.AddWithValue("limit",    limit);
+
+        var rows = new List<RecentTrade>(limit);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            rows.Add(new RecentTrade(
+                ClosedAt:    r.GetDateTime(0),
+                Side:        r.GetString(1),
+                CloseReason: r.GetString(2),
+                R:           r.IsDBNull(3) ? 0m : r.GetDecimal(3)));
+
+        return rows;
+    }
+
     public async Task<GateEvidence> GetGateEvidenceAsync(
         string symbol, string mode, string strategy, string side,
         string? entryPath, int lookback = 20, CancellationToken ct = default)

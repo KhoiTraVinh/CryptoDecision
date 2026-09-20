@@ -48,7 +48,13 @@ public sealed record EntryCandidate(
     decimal       CapitalUsd          = 0m,
     decimal       DailyLossLimitPct   = 0m,
     double        MaxDispersionBps    = 0.0,
-    int           MaxOpenPositions    = 0);
+    int           MaxOpenPositions    = 0,
+
+    /// <summary>
+    /// This rule's last few closed trades, newest first. Empty when none or the query
+    /// failed, which renders nothing rather than an empty heading.
+    /// </summary>
+    IReadOnlyList<RecentTrade>? RecentTrades = null);
 
 /// <summary>What the gate decided, and why, in its own words.</summary>
 /// <param name="Unavailable">
@@ -323,6 +329,10 @@ public sealed class AiEntryGate(
                 aggregateOfi:        c.Flow.AggregateOfi,
                 stopPct:             c.Geometry.StopPct,
                 asOfUtc:             DateTime.UtcNow,
+                // The axis that actually separates one setup of this rule from another.
+                // See sql/039: without it the distance collapsed to ATR for
+                // CandleReversal, whose stop_pct and aggregate_ofi are single-valued.
+                triggerValue:        c.Flow.TriggerValue,
                 k:                   retrieval.Examples,
                 ct:                  ct);
         }
@@ -471,7 +481,8 @@ public sealed class AiEntryGate(
             ACCOUNT
               capital ${c.CapitalUsd:F2}, open positions {c.OpenPositions} of {c.MaxOpenPositions}
               realised P&L today: ${c.TodayPnlUsd:F2}
-            {DescribeExamples(examples)}
+            {DescribeRecentTrades(c)}
+            {DescribeExamples(examples, flow.TriggerValue)}
             Approve or skip.
             """;
     }
@@ -486,7 +497,43 @@ public sealed class AiEntryGate(
     /// twelve similar setups lost, eleven losses is the true neighbourhood and
     /// presenting a tidy half-and-half sample would be manufacturing a different one.
     /// </summary>
-    private static string DescribeExamples(IReadOnlyList<SimilarCase> examples)
+    /// <summary>
+    /// This rule's last few closed trades, in order, newest first.
+    ///
+    /// The slices above are means, and a mean hides the one thing the operator most wants
+    /// noticed: that the previous trade from this same rule just lost. On 2026-09-20 the
+    /// gate approved a CANDLE_REVERSAL long while the previous CANDLE_REVERSAL long — 98
+    /// minutes earlier — had stopped out at -1.12R seventeen seconds before the evidence
+    /// query ran. "One event twice" was marked available; how the event ended was nowhere.
+    ///
+    /// Rendered as raw rows rather than another statistic, because a sequence is something
+    /// a reader can judge and a mean is something they have to trust. Five lines is about
+    /// sixty tokens.
+    /// </summary>
+    private static string DescribeRecentTrades(EntryCandidate c)
+    {
+        if (c.RecentTrades is not { Count: > 0 } recent) return "";
+
+        var sb = new StringBuilder(
+            $"\nTHIS RULE'S LAST {recent.Count} CLOSED TRADE(S), NEWEST FIRST — what just happened\n");
+
+        foreach (var t in recent)
+            sb.AppendLine(
+                $"  {t.ClosedAt:MM-dd HH:mm}Z  {t.Side,-5} {t.CloseReason,-13} {t.R,6:+0.00;-0.00}R");
+
+        // Stated as a count rather than left for the model to tally. It has miscounted a
+        // five-row list before, and an invented statistic here would be a fabricated
+        // premise of exactly the kind the prompt forbids.
+        var losers = recent.Count(t => t.R < 0m);
+        sb.AppendLine(
+            losers == recent.Count
+                ? $"  ALL {recent.Count} of the last {recent.Count} lost."
+                : $"  {losers} of the last {recent.Count} lost.");
+
+        return sb.ToString();
+    }
+
+    private static string DescribeExamples(IReadOnlyList<SimilarCase> examples, double candidateTrigger)
     {
         if (examples.Count == 0) return "";
 
@@ -496,16 +543,40 @@ public sealed class AiEntryGate(
 
         var sb = new StringBuilder("\nSIMILAR PAST SIGNALS ON THIS SIDE (already resolved before now)\n");
 
+        // The three fields that used to print here — aggregate z, the venue tally and
+        // dispersion — are structurally 0 under both surviving rules, so every line read
+        // "z=+0.00  0/3 venues  disp 0.0bps" and the model was handed three constants
+        // dressed as evidence. What replaces them is the one number that actually differs
+        // between two setups of the same rule: how hard it fired. See sql/039.
         foreach (var e in examples)
             sb.Append("  ")
-              .Append($"{e.SignalAt:MM-dd HH:mm}Z  z={e.AggregateZ,+5:F2}  {e.AgreeingVenues}/{e.ParticipatingVenues} venues  ")
-              .Append($"disp {e.DispersionBps,4:F1}bps  stop {e.StopPct:P2}  -> {e.Outcome}")
+              .Append($"{e.SignalAt:MM-dd HH:mm}Z  ")
+              .Append(e.TriggerValue is { } tv
+                          ? $"fired at {tv,5:F2}  "
+                          : "strength not recorded  ")
+              .Append($"-> {e.Outcome}")
               .Append(e.MinutesToOutcome is { } m ? $" after {m} min" : "")
               .Append(e.OutcomeR != 0m ? $" ({e.OutcomeR:+0.00;-0.00}R)" : "")
               .AppendLine();
 
         sb.AppendLine($"  Of these {examples.Count}: {wins} win, {losses} loss, {flat} neither. " +
                       $"This is a small sample from one instrument — weak evidence, not a rule.");
+
+        // The losing ones, called out by name. The list above is ordered by similarity and
+        // a run of losses inside it is easy to skim past; this is the question the operator
+        // actually wants the gate asking — "has this kind of setup already lost money on
+        // this account, and how much".
+        if (losses > 0)
+        {
+            var lost = examples.Where(e => e.Outcome == "LOSS").ToList();
+            sb.AppendLine(
+                $"  OF THE CLOSEST {examples.Count}, {losses} LOST: " +
+                string.Join(", ", lost.Select(e =>
+                    e.TriggerValue is { } t
+                        ? $"{t:F2} -> {e.OutcomeR:+0.00;-0.00}R"
+                        : $"{e.OutcomeR:+0.00;-0.00}R")) +
+                $". The candidate is at {candidateTrigger:F2}.");
+        }
 
         return sb.ToString();
     }

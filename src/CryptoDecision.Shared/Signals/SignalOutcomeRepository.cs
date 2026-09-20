@@ -34,7 +34,13 @@ public sealed record SimilarCase(
     decimal  OutcomeR,
     int?     MinutesToOutcome,
     string?  GateDecision,
-    double   Distance);
+    double   Distance,
+
+    /// <summary>
+    /// How hard that past signal fired, in its rule's own units — percent move for
+    /// CandleReversal, volume ratio for FlowRatio. NULL on rows written before sql/039.
+    /// </summary>
+    decimal? TriggerValue);
 
 /// <summary>How much of the table is labelled, and over what span.</summary>
 public sealed record OutcomeCoverage(int Decided, int Pending, DateTime? First, DateTime? Last)
@@ -91,12 +97,12 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
                 symbol, side, strategy, bucket_start, signal_at,
                 aggregate_z, aggregate_ofi, agreeing_venues, participating_venues,
                 excluded_venues, dispersion_bps, atr_pct, signal_price,
-                stop_pct, target_pct, reward_risk, confidence, venue_votes)
+                stop_pct, target_pct, reward_risk, confidence, venue_votes, trigger_value)
             VALUES (
                 @symbol, @side, @strategy, @bucket, @signalAt,
                 @z, @ofi, @agree, @part,
                 @excluded, @disp, @atr, @price,
-                @stopPct, @targetPct, @rr, @conf, @votes)
+                @stopPct, @targetPct, @rr, @conf, @votes, @trigger)
             ON CONFLICT (symbol, side, bucket_start, strategy) DO NOTHING
             RETURNING id
             """;
@@ -134,6 +140,12 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
             cmd.Parameters.AddWithValue("targetPct", geo.TargetPct);
             cmd.Parameters.AddWithValue("rr",       geo.RewardRisk);
             cmd.Parameters.AddWithValue("conf",     r.Confidence);
+            // How hard the rule fired, in its own units -- see sql/039 and
+            // FlowVerdict.TriggerValue. 0 is written as NULL: no surviving rule can fire
+            // at zero strength, so a 0 here means "not recorded" and must not be ranked
+            // against real values.
+            cmd.Parameters.AddWithValue("trigger",
+                flow.TriggerValue != 0.0 ? (decimal)flow.TriggerValue : (object)DBNull.Value);
             // Also NULL. This serialised a per-venue breakdown that only the deleted
             // ZScore rule ever produced; every row written since carries the empty array
             // `[]`, which reads as "measured, and there was nothing" rather than "this
@@ -413,17 +425,27 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
     /// </summary>
     public async Task<IReadOnlyList<SimilarCase>> FindSimilarAsync(
         string symbol, string side, string strategy, double atrPct, double aggregateOfi,
-        decimal stopPct, DateTime asOfUtc, int k = 5, CancellationToken ct = default)
+        decimal stopPct, DateTime asOfUtc, double triggerValue = 0.0, int k = 5,
+        CancellationToken ct = default)
     {
         const string sql = """
             SELECT signal_at, side, aggregate_z, agreeing_venues, participating_venues,
                    dispersion_bps, stop_pct, outcome, outcome_r, minutes_to_outcome,
-                   gate_decision,
-                   sqrt(
-                       pow((COALESCE(atr_pct, 0) - @atr) / 0.15, 2) +
-                       pow((abs(COALESCE(aggregate_ofi, 0)) - @absOfi) / 0.10, 2) +
-                       pow((stop_pct - @stopPct) / 0.004, 2)
-                   ) AS distance
+                   gate_decision, trigger_value,
+                   -- Rank on how hard the rule fired, relative to the candidate, which is
+                   -- the only axis that means anything within one rule. The old three-term
+                   -- distance survives ONLY for rows predating sql/039, and the +10 puts
+                   -- every such row behind every comparable one: a neighbour we can
+                   -- actually compare beats one we cannot, and they still fill the list
+                   -- while the new column is sparse.
+                   CASE
+                       WHEN trigger_value IS NOT NULL AND @trigger IS NOT NULL
+                           THEN abs(trigger_value - @trigger) / GREATEST(@trigger, 0.5)
+                       ELSE 10 + sqrt(
+                               pow((COALESCE(atr_pct, 0) - @atr) / 0.15, 2) +
+                               pow((abs(COALESCE(aggregate_ofi, 0)) - @absOfi) / 0.10, 2) +
+                               pow((stop_pct - @stopPct) / 0.004, 2))
+                   END AS distance
             FROM signal_outcomes
             WHERE symbol = @symbol
               AND side = @side
@@ -449,6 +471,11 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("absOfi",     (decimal)Math.Abs(aggregateOfi));
         cmd.Parameters.AddWithValue("stopPct",    stopPct);
         cmd.Parameters.AddWithValue("asOf",       asOfUtc);
+        // NULL, not 0, when the caller has no trigger to compare: the CASE above then
+        // falls through to the legacy distance for every row instead of ranking them all
+        // against a value that means "not recorded".
+        cmd.Parameters.AddWithValue("trigger",
+            triggerValue != 0.0 ? (decimal)triggerValue : (object)DBNull.Value);
         cmd.Parameters.AddWithValue("k",          k);
 
         var cases = new List<SimilarCase>(k);
@@ -467,7 +494,8 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
                 OutcomeR:            r.IsDBNull(8) ? 0m : r.GetDecimal(8),
                 MinutesToOutcome:    r.IsDBNull(9) ? null : r.GetInt32(9),
                 GateDecision:        r.IsDBNull(10) ? null : r.GetString(10),
-                Distance:            r.GetDouble(11)));
+                TriggerValue:        r.IsDBNull(11) ? null : r.GetDecimal(11),
+                Distance:            r.GetDouble(12)));
         }
 
         return cases;

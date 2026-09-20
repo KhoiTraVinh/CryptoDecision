@@ -528,6 +528,20 @@ public sealed class TradingBotService(
             evidence = GateEvidence.Unknown;
         }
 
+        // The ledger is fetched separately and failure is swallowed the same way: the gate
+        // must be no stricter when a research query hiccups than when it succeeds.
+        IReadOnlyList<RecentTrade> recentTrades = [];
+        try
+        {
+            recentTrades = await repo.GetRecentTradesForRuleAsync(
+                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE", strategyName, ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("[Gate] Could not read this rule's recent trades: {Err}. " +
+                           "Reviewing without the ledger.", ex.Message);
+        }
+
         // Counted across EVERY strategy, which is the number no limit in this loop
         // holds. max_open_per_side is scoped to the proposing strategy, so
         // CANDLE_REVERSAL and XVENUE_FLOW can each open a LONG on the same instrument
@@ -550,6 +564,7 @@ public sealed class TradingBotService(
             Evidence:      evidence,
             Strategy:      strategyName,
             OpenSameSide:  openSameSide,
+            RecentTrades:  recentTrades,
 
             // The four thresholds the gate is allowed to refuse against, carried in so
             // the brief can state each value next to the limit it was judged by. The
