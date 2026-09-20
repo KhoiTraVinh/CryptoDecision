@@ -2519,3 +2519,79 @@ did. Volume is small: the gate runs 2-10 times a day, the reviewer about twice p
 No threshold moves. H22 and H23 keep their populations and their decision rules — neither
 touches a brief. H24's mechanism is unchanged; only its prompt text and its instrumentation
 move, so its 15-trade / 21-day clock restarts rather than its criteria changing.
+
+---
+
+# Observation window W1 — 2026-09-20 14:16 UTC to 2026-09-27 14:16 UTC
+
+Seven days, opened by the operator after a day in which this rule changed four times and
+five defects were found and fixed. **Nothing is to be changed inside it.** That is the
+whole point: every entry above was opened, measured for hours, and replaced before it could
+produce a verdict, and a file full of hypotheses that never ran is not a trial budget — it
+is a record of not having one.
+
+Running `f8e1f46`. `paper_mode` is true throughout.
+
+## What is being measured
+
+Three open hypotheses share this window, and each already has its decision rule fixed:
+
+    H22   short side 2.5x / $2.5M            10 closed shorts or 21 days
+    H23   long side matched to it            10 closed RATIO-path trades or 21 days
+    H24   the model owns the early exit      15 closed trades or 21 days
+
+W1 is shorter than all three deliberately. It is not a verdict window — it is the period in
+which **no parameter moves**, so that when those counts fill, they are filled by one
+configuration rather than four. If a threshold moves inside W1, all three entries are void
+and say so.
+
+## Baseline at 14:16 UTC, to measure the week against
+
+    closed trades          48      mean R -0.0282    total -$0.9515    20 wins
+    signals                79      trigger_value on 3, gate approved 47, refused 2
+
+    by exit reason              n     total R
+      OFI_REVERSAL             31      +4.378
+      SL                        9     -10.008
+      TIMEOUT                   3      -0.424
+      FLOW_REVERSAL             2      +0.101
+      MANUAL_FLOW_REVERSAL      1      +2.326
+      LLM_EXIT                  1      -0.114
+      TP                        1      +2.388
+
+    by rule and side            n      mean R
+      CANDLE_REVERSAL LONG     19      +0.165
+      CANDLE_REVERSAL SHORT     1      -1.049
+      XVENUE_FLOW     LONG     21      -0.003
+      XVENUE_FLOW     SHORT     7      -0.483
+
+    config   capital $100 · risk 0.60% · both strategies live · enabled · paper
+
+Only trades **opened after 14:16 UTC on 2026-09-20** count toward W1.
+
+## The four things worth watching, in order
+
+1. **Does damage move from `OFI_REVERSAL` into `SL`?** That is H24's named failure mode: the
+   model holding through a reversal the 15-bucket rule would have caught. The stop already
+   carries −10.008R of the account's −0.95; it does not need more.
+2. **Is the exit reviewer's PREMISE true?** Four reviews so far: one sound, three with a
+   false or recited premise, including the one CUT it has made. The decisions were
+   defensible each time, which is exactly what makes this hard to judge — a right answer for
+   a fabricated reason is indistinguishable from a right answer until it is a wrong one.
+   `ContradictsBrief` now logs these as they happen; **count the warnings**.
+3. **What is the fallback rate?** If `Unavailable` exceeds a third of due reviews, W1
+   measured Ollama's uptime, not the model's judgement, and H24 is void.
+4. **Does the gate refuse again, and is it right?** It refused twice in its life, both on
+   2026-09-20, both correctly. `CellIsLosing` now includes the rule slice; the next refusal
+   is the first test of that fix.
+
+## What would end W1 early
+
+- `paper_mode` going false. This window is not evidence for live trading and nothing in it
+  is designed to be.
+- A circuit breaker tripping, which disables the bot in `bot_config` and requires a person.
+- Any parameter change, which voids H22, H23 and H24 as stated above.
+
+## Result
+
+_Open. Review on or after 2026-09-27 14:16 UTC._
