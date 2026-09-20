@@ -80,8 +80,8 @@ Take the last closed 15-minute bucket and wait `RatioSettleMinutes` (3) for the
 aggregation worker to fold in late trades. Price is not consulted at all. There are two
 entry paths and `bot_trades.entry_path` records which one fired:
 
-    RATIO        notional >= RatioMinVolumeUsd ($3M)
-                 AND dominant side >= RatioMinimum x the other (2.1x, = |OFI| 0.355)
+    RATIO        notional >= RatioMinVolumeUsd ($2.5M)
+                 AND dominant side >= RatioMinimum x the other (2.5x, = |OFI| 0.429)
                  SWITCHED OFF as H16 on 2026-09-18 after 12 trades at -4.477R by
                  raising RatioMinimum to 99.0, and switched back ON as H18 on
                  2026-09-19 -- by operator override, with H16's own restore
@@ -91,14 +91,15 @@ entry paths and `bot_trades.entry_path` records which one fired:
                  -> the ratio test is WAIVED, entry takes whichever side traded more,
                     however narrow the lead
 
-    SHORT rules  >= 2.5x ratio (long side 2.1x) AND >= $2.5M (long side $3.0M)
-                 H22, 2026-09-20. The short notional floor is BELOW the long one on
-                 purpose: on this side the ratio does the work. Applied AFTER the
-                 waiver, so the $20M news-print path still takes shorts at any ratio.
-                 Third setting of this parameter in one day -- H20 (4.0x, matched 0
-                 buckets in 30 days), H21 ($10M+2.1x, matched 1, never deployed),
-                 H22 (matched 11, spread across the window). See H22 for the count
-                 and the decision rule.
+    Both sides now run the SAME thresholds (H23, 2026-09-20): RatioMinimum 2.1 -> 2.5
+                 and RatioMinVolumeUsd $3M -> $2.5M, which is what H22 had set for the
+                 short side alone. The ratio move is INSIDE its own sweep -- 1.8/2.1/2.5
+                 were a measured plateau and 2.5 is its top edge. The volume move is
+                 NOT: $2.5M reaches into the band that measured -0.012R at 2:1, and is
+                 carried on the argument that a 2.5:1 ratio excludes most of that band
+                 anyway. Coverage over 30 days: ratio path 64 -> 27 signals, waiver
+                 unchanged at 51. Fourth change to this rule in one day -- H20, H21,
+                 H22, H23. See those entries for the count and the decision rules.
 
 The waiver exists to catch a news print, where a stampede has size on both sides and never
 produces a 2.1:1 lean — measured, ratio falls as volume rises, and only 1 of the 42 buckets
@@ -115,8 +116,8 @@ Refusals carry named codes:
 |---|---|
 | `BUCKET_NOT_SETTLED` | bucket closed under `RatioSettleMinutes` ago; the worker is still writing it |
 | `VOLUME_TOO_THIN` | under the notional floor — a 2:1 lean on $2M is what a quiet hour looks like |
-| `SHORT_VOLUME_TOO_THIN` | sell-dominated and under the SHORT side's own $2.5M floor (H22) |
-| `SHORT_RATIO_TOO_LOW` | sell-dominated and under the SHORT side's own 2.5x ratio (H22) |
+| `SHORT_VOLUME_TOO_THIN` | sell-dominated and under a SHORT-specific notional floor — UNREACHABLE while the two sides are equal (H23) |
+| `SHORT_RATIO_TOO_LOW` | sell-dominated and under a SHORT-specific ratio — UNREACHABLE while the two sides are equal (H23) |
 | `RATIO_TOO_LOW` | neither side dominates by enough, and the bucket is under the waiver |
 | `BUCKET_PERFECTLY_BALANCED` | waiver volume reached with buy exactly equal to sell — no side to take |
 | `ONE_SIDED_BUCKET` | no volume on one side at all; a data fault, not a market state |

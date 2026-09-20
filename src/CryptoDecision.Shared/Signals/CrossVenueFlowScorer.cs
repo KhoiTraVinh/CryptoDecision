@@ -262,15 +262,24 @@ public sealed record FlowSignalOptions(
 
     /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: how far the dominant side must
-    /// outweigh the other, as a plain volume ratio. 2.1 means buy volume at least 2.1x
+    /// outweigh the other, as a plain volume ratio. 2.5 means buy volume at least 2.5x
     /// sell volume for a long.
     ///
-    /// Chosen by the operator from the middle of a three-cell plateau — 1.8, 2.1 and
-    /// 2.5 are all positive overall, after discarding the largest winner, and in both
-    /// sample halves — rather than at its argmax. 3.0 fails the outlier check on 12
-    /// observations.
+    /// **2.1 -> 2.5 on 2026-09-20 (H23), to match the short side.** This is the one
+    /// threshold change in the H20-H23 sequence that lands INSIDE its own measurement
+    /// rather than outside it: the original sweep found a three-cell plateau at 1.8, 2.1
+    /// and 2.5, all positive overall after discarding the largest winner and in both
+    /// sample halves, with 3.0 failing the outlier check on 12 observations. 2.1 was
+    /// picked from the middle of that plateau; 2.5 is its top edge, still on the plateau.
+    ///
+    /// It also moves toward the evidence rather than away: the RATIO path is negative on
+    /// both sides so far — LONG -0.248R over 9, SHORT -0.749R over 3 — so raising the bar
+    /// on the long side is not tightening a rule that was working.
+    ///
+    /// Cost in coverage, measured on 30 days: buy-dominated buckets clearing the floor and
+    /// the ratio fall from 34 to 16, about 0.53/day.
     /// </summary>
-    decimal RatioMinimum                  = 2.1m,
+    decimal RatioMinimum                  = 2.5m,
 
     /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: minimum notional in the qualifying
@@ -280,8 +289,16 @@ public sealed record FlowSignalOptions(
     /// imbalance measured -0.012 mean R once the largest winner was removed and -0.082
     /// in the first sample half; above it, +0.332 and +0.521. A 2:1 lean on two million
     /// dollars is what a quiet hour looks like, and it predicts nothing.
+    ///
+    /// **$3M -> $2.5M on 2026-09-20 (H23), to match the short side. THIS ONE GOES AGAINST
+    /// THE MEASUREMENT ABOVE** and the paragraph is left intact rather than softened: $2.5M
+    /// reaches half a million dollars into the band that measured -0.012R. The argument for
+    /// it is that the band was measured at a **2:1** imbalance and the ratio is now 2.5:1,
+    /// so the thin-volume cases it describes are largely excluded by the ratio instead —
+    /// but that is a reason to expect it to be survivable, not evidence that it is. H23
+    /// carries it as the weaker half of a symmetry change.
     /// </summary>
-    decimal RatioMinVolumeUsd             = 3_000_000m,
+    decimal RatioMinVolumeUsd             = 2_500_000m,
 
     /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: bucket notional at or above which the

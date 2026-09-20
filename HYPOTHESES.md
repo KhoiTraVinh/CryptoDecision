@@ -2283,3 +2283,85 @@ most of whatever short flow appears.
 ### Result
 
 _Open._
+
+---
+
+## H23 — Make the LONG side match the short: 2.5x on a $2.5M floor
+
+- **Opened** 2026-09-20, alongside H22 rather than replacing it
+- **Change** `RatioMinimum` 2.1 → **2.5** and `RatioMinVolumeUsd` $3M → **$2.5M**. The short
+  overrides from H22 keep their values, which now equal the long ones, so **both sides run
+  2.5x on $2.5M** and the asymmetry introduced by H20 is gone.
+- **Purpose** Operator decision: one rule for both directions.
+
+### What runs now
+
+    long side    >= $2.5M  AND >= 2.5x
+    short side   >= $2.5M  AND >= 2.5x     (ShortRatioMinimum/ShortMinVolumeUsd, equal)
+    waiver       >= $20M   at any ratio    unchanged, still not gated
+
+`ShortRatioMinimum` and `ShortMinVolumeUsd` are deliberately left in place at equal values
+rather than deleted: the two sides were split yesterday and may be split again, and the
+startup banner now reports "SHORT and LONG are held to the same thresholds" so the equality
+is visible rather than implied. A consequence worth knowing: **`SHORT_RATIO_TOO_LOW` and
+`SHORT_VOLUME_TOO_THIN` are unreachable while the values are equal** — refusals on both
+sides come back as `RATIO_TOO_LOW` and `VOLUME_TOO_THIN`.
+
+### The two halves of this change are not equally supported
+
+**The ratio move is inside its own measurement.** The original sweep found a three-cell
+plateau at 1.8 / 2.1 / 2.5 — all positive overall after discarding the largest winner, and
+in both sample halves — with 3.0 failing the outlier check. 2.1 was chosen from the middle
+of that plateau and 2.5 is its top edge, still on it. This is the only threshold change in
+the H20–H23 sequence that lands inside a measurement rather than outside one.
+
+It also moves toward the evidence rather than away from it. The RATIO path is negative on
+both sides so far:
+
+    entry_path  side    n   pnl_usd   mean_R
+    RATIO       LONG    9   -0.3346   -0.248
+    RATIO       SHORT   3   -0.3370   -0.749
+
+so raising the long bar is not tightening a rule that was working.
+
+**The volume move goes against its measurement, and that is recorded rather than softened.**
+$2.5M reaches half a million dollars into the band that measured **-0.012 mean R** once the
+largest winner was removed, and -0.082 in the first sample half, against +0.332 and +0.521
+above $3M. The argument for it is that the band was measured at a **2:1** imbalance while
+the ratio is now 2.5:1, so most of the thin-volume cases it describes are excluded by the
+ratio instead. That is a reason to expect it to survive, not evidence that it will.
+
+### Coverage
+
+Measured on 30 days of `flow_bars_15m`:
+
+    side     dominated buckets   old ($3M, 2.1x)   new ($2.5M, 2.5x)   waiver
+    LONG                 1,322                34                  16       32
+    SHORT                1,274                30                  11       19
+
+So the ratio path goes from 64 to 27 signals per 30 days, about 0.9/day, with the waiver
+unchanged at 51.
+
+### Decision rule, fixed in advance
+
+Judge with H22, at **10 closed RATIO-path trades** or **21 days**, whichever comes first,
+split by side.
+
+- **Keep** if RATIO-path mean R over the window is above **-0.248R**, the long side's
+  pre-change figure, on the long side and above -0.10R overall.
+- **Reject the volume half first** if the losing trades cluster in the $2.5M–$3.0M band —
+  restore `RatioMinVolumeUsd` to $3M and keep 2.5x. The two halves have different support
+  and should be able to fail separately.
+- **Reject both** if mean R is below -0.248R on the long side, i.e. tightening the ratio
+  made the long side worse.
+- **Do not move either number before the window closes.** With H22 this is the fourth
+  change to this rule in one day; a fifth inside the window voids both entries.
+
+### Cost of being wrong
+
+None in money; `paper_mode` is true. The cost is roughly half the ratio-path signals, and
+the risk that the $2.5M floor admits the thin-volume cases the original sweep warned about.
+
+### Result
+
+_Open._
