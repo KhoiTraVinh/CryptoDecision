@@ -191,8 +191,35 @@ public sealed class AiExitReviewer(
         sb.AppendLine($"  held {c.HeldHours:F1}h of a {c.MaxHoldHours:F0}h maximum");
         sb.AppendLine($"  stop {c.StopPrice:F2}, target {c.TargetPrice:F2} — both live, both checked in code");
         sb.AppendLine();
-        sb.AppendLine($"PRICE CONTEXT   1h {c.Move1hPct:+0.00;-0.00}%   4h {c.Move4hPct:+0.00;-0.00}%");
-        sb.AppendLine($"  A {(isLong ? "falling" : "rising")} market runs against this {c.Side}.");
+        // Each move is LABELLED with what it means for this position, and the "both against"
+        // test is EVALUATED here rather than left to the model.
+        //
+        // This line used to read "A {falling|rising} market runs against this {side}" — a
+        // legend explaining which direction hurts. The model recited it as an observation on
+        // its first review, and on the second and third it emitted "the 1-hour and 4-hour
+        // price moves both run against it" — verbatim one of the CUT conditions below —
+        // which was FALSE on review #2 (4h was +0.75%, with the position) and TRUE on #3.
+        // A fixed phrase emitted regardless of the data is not a reading of the brief. So
+        // the brief now states the answer and there is nothing left to recite.
+        // Parameter deliberately NOT named isLong: a local function parameter that shadows
+        // an enclosing local is CS0136, and this file cannot be compile-checked on every
+        // edit here.
+        static string Runs(decimal move, bool forLong) =>
+            move == 0m                ? "flat"
+            : (move > 0m) == forLong  ? "runs WITH the position"
+                                      : "runs AGAINST the position";
+
+        var oneAgainst  = (c.Move1hPct > 0m) != isLong && c.Move1hPct != 0m;
+        var fourAgainst = (c.Move4hPct > 0m) != isLong && c.Move4hPct != 0m;
+
+        sb.AppendLine("PRICE CONTEXT");
+        sb.AppendLine($"  1h {c.Move1hPct,6:+0.00;-0.00}%   {Runs(c.Move1hPct, isLong)}");
+        sb.AppendLine($"  4h {c.Move4hPct,6:+0.00;-0.00}%   {Runs(c.Move4hPct, isLong)}");
+        sb.AppendLine(
+            oneAgainst && fourAgainst
+                ? "  BOTH the 1h and 4h moves run against this position."
+                : "  They do NOT both run against this position, so the price half of the " +
+                  "'trend has turned' test is not met.");
         sb.AppendLine();
 
         sb.AppendLine("CLOSED 15-MINUTE BUCKETS SINCE THE POSITION OPENED, OLDEST FIRST");
@@ -250,6 +277,12 @@ public sealed class AiExitReviewer(
                            ? r.GetString() ?? "(no reason given)"
                            : "(no reason given)";
 
+            if (ContradictsBrief(reason, c) is { } contradiction)
+                log.LogWarning(
+                    "[ExitReview] Trade {Id} answered {Decision} on a premise the brief " +
+                    "contradicts: {Detail} Reason given: {Reason}",
+                    c.TradeId, decision, contradiction, reason);
+
             if (string.Equals(decision, "CUT", StringComparison.OrdinalIgnoreCase))
             {
                 log.LogInformation(
@@ -272,6 +305,53 @@ public sealed class AiExitReviewer(
             return ExitReview.NotReviewed(
                 $"Exit reviewer answer for trade {c.TradeId} did not parse: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Does the stated reason assert something the brief showed to be false?
+    ///
+    /// The same shape as <c>AiEntryGate.ContradictsBrief</c>, and here for the same reason:
+    /// the model's first three reviews all produced a defensible DECISION with a recited or
+    /// false PREMISE, and the premise is the only part that survives into the log. Review #2
+    /// claimed "the 1-hour and 4-hour price moves both run against it" when 4h was +0.75%,
+    /// with the position.
+    ///
+    /// It only LOGS. The decision stands either way — a detector that could overturn the
+    /// model would make the model decorative, which is the arrangement this replaced. What
+    /// it buys is that a wrong premise is visible at the moment it happens rather than
+    /// reconstructed from SQL hours later, which is how all three were caught.
+    /// </summary>
+    private static string? ContradictsBrief(string reason, ExitCandidate c)
+    {
+        var text   = reason.ToLowerInvariant();
+        var isLong = !string.Equals(c.Side, "SHORT", StringComparison.OrdinalIgnoreCase);
+
+        var oneAgainst  = (c.Move1hPct > 0m) != isLong && c.Move1hPct != 0m;
+        var fourAgainst = (c.Move4hPct > 0m) != isLong && c.Move4hPct != 0m;
+
+        if (text.Contains("both run against") || text.Contains("both running against"))
+            if (!(oneAgainst && fourAgainst))
+                return $"it says both price moves run against the position, and the brief " +
+                       $"showed 1h {c.Move1hPct:+0.00;-0.00}% and 4h {c.Move4hPct:+0.00;-0.00}% " +
+                       $"against a {c.Side} — {(oneAgainst || fourAgainst ? "only one does" : "neither does")}.";
+
+        // Claims about which way the buckets lean, checked against the count the brief
+        // printed. Both directions are wrong in the same way and both are worth catching.
+        var withIt = c.Buckets.Count(b => isLong ? b.Ofi > 0 : b.Ofi < 0);
+
+        if ((text.Contains("lean the position") || text.Contains("lean towards the position")
+          || text.Contains("favour") || text.Contains("favor"))
+            && c.Buckets.Count > 0 && withIt * 2 < c.Buckets.Count)
+            return $"it says the buckets favour the position, and the brief showed only " +
+                   $"{withIt} of {c.Buckets.Count} doing so.";
+
+        if ((text.Contains("turned against") || text.Contains("lean against")
+          || text.Contains("force is gone"))
+            && c.Buckets.Count > 0 && withIt * 2 > c.Buckets.Count)
+            return $"it says the flow has turned against the position, and the brief showed " +
+                   $"{withIt} of {c.Buckets.Count} buckets still favouring it.";
+
+        return null;
     }
 
     private static string Trim(string s) =>

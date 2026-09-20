@@ -86,16 +86,28 @@ public sealed record GateEvidence(
     public const double ClusterMinutes = 120d;
 
     /// <summary>
-    /// The cell's own record is losing, OR this session is. Either slice reaching
-    /// <see cref="MinCellTrades"/> and coming out negative makes the ground available.
+    /// The cell's own record is losing, OR this session's, OR the rule's overall. ANY slice
+    /// reaching <see cref="MinCellTrades"/> and coming out negative makes the ground
+    /// available, which is exactly what the system prompt tells the model.
     ///
-    /// Two slices rather than one because they fail at different times and the gate
-    /// should see whichever has evidence: the cell is the narrowest read but takes
-    /// longest to fill, and the session slice fills faster because it ignores side and
-    /// entry path. Both are the account's own closed trades, so neither is a forecast.
+    /// Three slices because they fail at different times: the cell is the narrowest read
+    /// but takes longest to fill, the session slice fills faster because it ignores side
+    /// and entry path, and the rule slice is widest and fills first. All three are the
+    /// account's own closed trades, so none is a forecast.
+    ///
+    /// **THE RULE SLICE WAS MISSING HERE UNTIL 2026-09-20, AND IT COST A FALSE ALARM.** The
+    /// brief prints all three and the prompt says ANY of them, but this property looked at
+    /// two. On signal 892 the slices were cell −0.749 over 3 (too thin), session +0.078
+    /// over 14, and **rule −0.262 over 20**. The brief printed that negative rule line and
+    /// then asserted, two lines later, "every slice with enough trades is positive — 'this
+    /// setup is losing' is NOT AVAILABLE". The model read the rule line, refused, and was
+    /// RIGHT; <c>ContradictsBrief</c> then flagged its true statement as a fabricated
+    /// premise. A brief that contradicts itself is worse than one that is merely strict,
+    /// because it makes the model's correct answers look like defects.
     /// </summary>
     public bool CellIsLosing => (CellTrades    >= MinCellTrades && CellMeanR    < 0m)
-                             || (SessionTrades >= MinCellTrades && SessionMeanR < 0m);
+                             || (SessionTrades >= MinCellTrades && SessionMeanR < 0m)
+                             || (RuleTrades    >= MinCellTrades && RuleMeanR    < 0m);
 
     // Two per-slice properties stood here for one commit — CellSliceIsLosing and
     // SessionSliceIsLosing, added "so the brief can say which slice is carrying the

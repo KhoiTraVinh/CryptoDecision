@@ -2446,3 +2446,76 @@ fallback exists and why the fallback rate is part of the decision rule.
 ### Result
 
 _Open._
+
+---
+
+## Defect fixes, 2026-09-20 — and the measurement windows they reset
+
+Four defects found by watching H24's first three exit reviews and the gate's first two
+refusals. All four are fixed; three of them edit a brief, and **that resets the windows of
+H17, H19 and H24**. The counts below start again from this deploy. That cost is paid
+deliberately: a window measuring a brief that contradicts itself measures nothing.
+
+### 1. `GateEvidence.CellIsLosing` ignored the rule slice
+
+The system prompt tells the model the ground is available when **ANY** slice with at least
+five closed trades is negative. The property checked cell and session only. On signal 892
+the slices were:
+
+    cell     XVENUE_FLOW SHORT/RATIO    n=3    -0.749   (too thin)
+    session  XVENUE_FLOW non-US          n=14   +0.078
+    rule     XVENUE_FLOW overall         n=20   -0.262   <-- negative, n >= 5
+
+So the brief printed that rule line and then asserted, two lines below it, *"every slice
+with enough trades is positive — 'this setup is losing' is NOT AVAILABLE"*. The model read
+the rule line, refused, **and was right**; `ContradictsBrief` flagged its true statement as
+a fabricated premise. The property now includes the rule slice and the warning enumerates
+all three. Verified against the real 892 numbers plus three controls.
+
+**This is the reverse of the defect recorded against the gate so far.** Five of six earlier
+instances were the model asserting something the brief denied. This one was the brief
+denying something it had itself printed.
+
+### 2. The exit brief handed the model a sentence to recite
+
+It printed `A {falling|rising} market runs against this {side}.` — a legend explaining which
+direction hurts. Review #1 recited it as an observation. Reviews #2 and #3 then emitted *"the
+1-hour and 4-hour price moves both run against it"*, which is verbatim one of the CUT
+conditions in the prompt: **false on #2** (4h was +0.75%, with the position) and **true on
+#3** — where it should then have produced a CUT and did not.
+
+A fixed phrase emitted regardless of the data is not a reading of the brief. The brief now
+labels each move and evaluates the test itself:
+
+    PRICE CONTEXT
+      1h  -0.46%   runs AGAINST the position
+      4h  -1.00%   runs AGAINST the position
+      BOTH the 1h and 4h moves run against this position.
+
+or the explicit negative. There is nothing left to recite, and the comparison is arithmetic
+in code rather than a judgement handed to a 3B model.
+
+### 3. The exit reviewer had no contradiction detector
+
+`AiEntryGate` has had one since the first audit; the reviewer shipped without. It now has
+the same check for the three claims it can make — both-moves-against, buckets-favour,
+flow-has-turned — each compared against the number the brief printed. Probed on the real
+review #2 inputs: the claim is caught with *"only one does"*, and the same sentence against
+review #3's inputs is correctly left alone.
+
+**It only logs.** A detector that could overturn the model would make the model decorative,
+which is the arrangement all of this replaced.
+
+### 4. Both briefs were invisible in production
+
+Both are logged at Debug and Serilog's `MinimumLevel.Default` is Information, so neither
+ever emitted. Every audit so far — six of the gate, three of the reviewer — rebuilt the
+brief by hand from `flow_bars_15m` and `bot_trades`. `appsettings.json` now overrides
+`CryptoDecision.BotService.Agent` to Debug, and the gate logs its brief too, which it never
+did. Volume is small: the gate runs 2-10 times a day, the reviewer about twice per position.
+
+### What this does NOT change
+
+No threshold moves. H22 and H23 keep their populations and their decision rules — neither
+touches a brief. H24's mechanism is unchanged; only its prompt text and its instrumentation
+move, so its 15-trade / 21-day clock restarts rather than its criteria changing.

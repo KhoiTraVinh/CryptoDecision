@@ -249,10 +249,20 @@ public sealed class AiEntryGate(
 
         var examples = await RetrieveSimilarAsync(candidate, ct);
 
+        var brief = Describe(candidate, examples);
+
+        // The brief is the entire input to the decision and nothing recorded it. Every
+        // audit of this gate so far — six of them — has had to rebuild the brief by hand
+        // from flow_bars_15m and bot_trades to find out whether a cited number was real.
+        // The exit reviewer logs its brief for the same reason; appsettings raises this
+        // namespace to Debug so both actually emit.
+        log.LogDebug("[Gate] Brief for {Strategy} {Side}:\n{Brief}",
+            candidate.Strategy, candidate.Side, brief);
+
         var messages = new JsonArray
         {
             new JsonObject { ["role"] = "system", ["content"] = SystemPrompt },
-            new JsonObject { ["role"] = "user",   ["content"] = Describe(candidate, examples) },
+            new JsonObject { ["role"] = "user",   ["content"] = brief },
         };
 
         OllamaAgentClient.ChatTurn? turn;
@@ -690,14 +700,20 @@ public sealed class AiEntryGate(
         // the opposite is asserting something the model was shown to be false.
         if ((text.Contains("losing") || text.Contains("base rate") || text.Contains("track record"))
             && !e.CellIsLosing)
-            return e.CellTrades < GateEvidence.MinCellTrades
+            // All THREE slices are enumerated. The rule slice was missing from both this
+            // message and CellIsLosing until 2026-09-20, which produced a warning that
+            // listed cell and session, called the setup positive, and was contradicted by
+            // the rule line printed three lines above it in the same brief.
+            return e.CellTrades    < GateEvidence.MinCellTrades
                 && e.SessionTrades < GateEvidence.MinCellTrades
+                && e.RuleTrades    < GateEvidence.MinCellTrades
                 ? $"it cites this setup's record, and no slice has reached " +
-                  $"{GateEvidence.MinCellTrades} closed trades — the cell has {e.CellTrades} and " +
-                  $"the session slice {e.SessionTrades}, so that ground does not exist yet."
+                  $"{GateEvidence.MinCellTrades} closed trades — cell {e.CellTrades}, session " +
+                  $"{e.SessionTrades}, rule {e.RuleTrades}, so that ground does not exist yet."
                 : $"it cites this setup as losing, and every slice with enough trades is " +
                   $"positive: cell {e.CellMeanR:+0.000;-0.000} over {e.CellTrades}, session " +
-                  $"{e.SessionMeanR:+0.000;-0.000} over {e.SessionTrades}.";
+                  $"{e.SessionMeanR:+0.000;-0.000} over {e.SessionTrades}, rule " +
+                  $"{e.RuleMeanR:+0.000;-0.000} over {e.RuleTrades}.";
 
         if (text.Contains("trend") && !e.TrendAgainst(c.Side))
             return $"it cites the trend, and the brief showed a 4-hour move of " +
