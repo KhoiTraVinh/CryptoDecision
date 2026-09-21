@@ -626,18 +626,41 @@ public sealed class AiEntryGate(
                 return GateDecision.Approve(reason);
 
             case "SKIP":
-                // Logged at Warning when the stated ground is one the brief closed
-                // off. The refusal still stands — this class cannot be allowed to
-                // overrule the veto, or the veto is not a veto — but a refusal whose
-                // premise contradicts the brief is a defect, and it now says so in the
-                // log at the moment it happens rather than only in a table nobody has
-                // opened yet. Five of twelve refusals in the first audited day were
-                // of this kind.
+                // A REFUSAL ON A PREMISE THE BRIEF CONTRADICTS IS NOT A REVIEW, AND NO
+                // LONGER STANDS AS ONE.
+                //
+                // This used to log and let the refusal through, on the argument that the
+                // class must not overrule the veto or the veto is not a veto. That was
+                // right about the veto and wrong about what had happened: the prompt's one
+                // hard rule is that every claim must be true of a number in the brief, and
+                // a reason that breaks it is evidence the brief was not read. There is no
+                // veto to protect, because nothing was reviewed.
+                //
+                // Measured over the 23 hours to 2026-09-21 13:20: the gate refused 14 of
+                // 14 signals and the bot took ZERO trades. Five of the seven
+                // CANDLE_REVERSAL refusals cited a negative mean R while all three slices
+                // were positive — two of them literally reported "a negative mean R of
+                // +0.165", and one reported "-0.165" where the brief said +0.165. One
+                // simply quoted the marker text back: "shows 'this setup is losing' is
+                // available".
+                //
+                // Downgraded to Unreviewed rather than to an approval. That keeps it a
+                // refusal, leaves `allow_entry_without_gate` as the thing that decides
+                // whether the entry proceeds, and records it as APPROVED_DEGRADED so these
+                // are countable and separable from real approvals. A refusal whose premise
+                // CHECKS OUT is untouched and remains absolute.
                 if (ContradictsBrief(reason, candidate) is { } contradiction)
+                {
                     log.LogWarning(
-                        "[Gate] SKIPPED {Side} {Symbol} on a premise the brief contradicts: {Detail} " +
+                        "[Gate] {Side} {Symbol} was SKIPPED on a premise the brief contradicts, " +
+                        "so it is recorded as UNREVIEWED rather than refused: {Detail} " +
                         "Reason given: {Reason}",
                         candidate.Side, candidate.Symbol, contradiction, reason);
+
+                    return GateDecision.Unreviewed(
+                        $"Gate answered SKIP on a premise the brief contradicts ({contradiction}) " +
+                        $"Its stated reason was: {reason}");
+                }
 
                 log.LogInformation(
                     "[Gate] SKIPPED {Side} {Symbol} (flow z={Z:F2}, {Agree}/{Part} venues): {Reason}",
@@ -698,8 +721,15 @@ public sealed class AiEntryGate(
         // The three new grounds, checked the same way and for the same reason: each
         // reduces to a comparison the brief already printed, so a reason that asserts
         // the opposite is asserting something the model was shown to be false.
-        if ((text.Contains("losing") || text.Contains("base rate") || text.Contains("track record"))
-            && !e.CellIsLosing)
+        // Every phrasing the model has actually produced for this ground, not just the one
+        // it used first. A probe caught "a negative mean R of -0.165 over the last 19 closed
+        // trades", which contains none of the original three words; production happened to
+        // append ", indicating a losing setup" so it matched by luck. Matching by luck is
+        // how the exit detector missed its first real case one day earlier.
+        if ((text.Contains("losing") || text.Contains("base rate") || text.Contains("track record")
+          || text.Contains("negative mean") || text.Contains("negative r")
+          || text.Contains("lost money") || text.Contains("has lost"))
+            && !e.AnySliceIsLosing)
             // All THREE slices are enumerated. The rule slice was missing from both this
             // message and CellIsLosing until 2026-09-20, which produced a warning that
             // listed cell and session, called the setup positive, and was contradicted by

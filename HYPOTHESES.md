@@ -2595,3 +2595,83 @@ Only trades **opened after 14:16 UTC on 2026-09-20** count toward W1.
 ## Result
 
 _Open. Review on or after 2026-09-27 14:16 UTC._
+
+---
+
+## W1 RESTARTED — the gate deadlocked the bot for 23 hours
+
+W1 opened at 2026-09-20 14:16 UTC and produced **zero trades in 23 hours**. It measured
+nothing, so it restarts from this deploy. What it did surface is worth more than the week
+would have been.
+
+### What happened
+
+From 14:16 on 09-20 to 13:20 on 09-21 the gate was asked 14 times and **refused 14 times**.
+Two separate causes, and the first one is mine.
+
+**1. The rule slice deadlocked XVENUE_FLOW.** `CellIsLosing` gained the rule slice on
+2026-09-20 to fix a brief that contradicted itself. It fixed that and created something
+worse: the rule slice is the strategy's whole life, XVENUE_FLOW sat at **−0.262 over 20**,
+so the ground was available on *every* signal, the gate refused all 6 of them, no trade
+opened, and the −0.262 could never move. **All six refusals were perfectly TRUE.** Nothing
+logged an error; the strategy simply switched itself off.
+
+A veto with no path back out is not a ground. The cell and session slices churn — they go
+negative, block the entries the record warns about, and recover as better trades close. The
+rule slice over a net-negative strategy cannot.
+
+**2. The model invented negatives for CANDLE_REVERSAL.** Five of its seven refusals cited a
+losing record while all three slices were positive (cell +0.165/19, session +0.274/13, rule
++0.105/20):
+
+    "this setup's own record shows a negative mean R of +0.165"      (twice)
+    "a negative mean R of -0.165 over the last 19 closed trades"     (sign flipped)
+    "shows 'this setup is losing' is available"                      (quoting the marker)
+
+The other two, at 17:30 and 19:00, were legitimate — those fall in the US session, where the
+slice really is −0.209 over 7.
+
+### The two fixes
+
+**Availability and support are no longer the same set.** `CellIsLosing` (what the model is
+*invited* to use) is cell-or-session again. A new `AnySliceIsLosing` (whether a stated
+reason citing the record is *supported*) includes the rule slice. The rule line is still
+printed. So the brief cannot contradict itself — the defect the rule slice was added to fix
+— and it cannot deadlock either.
+
+**A refusal on a premise the brief contradicts no longer stands as a refusal.** It becomes
+`Unreviewed`, which is still a refusal but one `allow_entry_without_gate` may override, and
+which records as `APPROVED_DEGRADED` so these stay countable. The earlier reasoning — "this
+class must not overrule the veto" — was right about the veto and wrong about the situation:
+the prompt's one hard rule is that every claim must be true of a number in the brief, so a
+reason that breaks it is evidence the brief was not read. There is no veto to protect when
+nothing was reviewed. **A refusal whose premise checks out is untouched and absolute.**
+
+### What the gate will still block, correctly
+
+    XVENUE_FLOW LONG/RATIO     blocked    cell -0.248 over 9, genuinely negative
+    CANDLE_REVERSAL in 12-20   blocked    session -0.209 over 7, genuinely negative
+    CANDLE_REVERSAL elsewhere  allowed    every slice positive; was blocked on invented numbers
+    XVENUE_FLOW SHORT          allowed    cell only 3 trades, too thin to read
+
+That is the operator's stated intent working: block what actually lost, stop blocking on
+numbers that do not exist.
+
+### A hole the probe found that production had hidden
+
+The contradiction trigger matched `losing | base rate | track record`. The sign-flipped
+reason above contains none of them — production only matched because it happened to append
+", indicating a losing setup". Widened to the phrasings the model has actually produced.
+**This is the third time in two days that a substring matcher has been defeated by a
+paraphrase**, after the exit detector missed "lean CLEARLY against". Match on intent, never
+on one remembered sentence.
+
+### W1 restart
+
+New window: **2026-09-21 13:2x UTC + 7 days**, same terms — no parameter moves, H22/H23/H24
+measured inside it. The baseline is unchanged from the original W1 entry because no trade
+opened: 48 closed, mean R −0.0282, −$0.9515.
+
+### Result
+
+_Open._

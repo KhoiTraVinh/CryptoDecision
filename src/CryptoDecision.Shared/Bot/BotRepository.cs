@@ -86,28 +86,40 @@ public sealed record GateEvidence(
     public const double ClusterMinutes = 120d;
 
     /// <summary>
-    /// The cell's own record is losing, OR this session's, OR the rule's overall. ANY slice
-    /// reaching <see cref="MinCellTrades"/> and coming out negative makes the ground
-    /// available, which is exactly what the system prompt tells the model.
+    /// The cell's own record is losing, OR this session's. **The rule slice is printed in
+    /// the brief but deliberately does NOT make the ground available** — see below.
     ///
-    /// Three slices because they fail at different times: the cell is the narrowest read
-    /// but takes longest to fill, the session slice fills faster because it ignores side
-    /// and entry path, and the rule slice is widest and fills first. All three are the
-    /// account's own closed trades, so none is a forecast.
+    /// The two slices used here CHURN. The cell is side-and-path scoped over the last 20
+    /// closed, the session is the strategy inside one half of the day over the last 20, and
+    /// both move as trades close: a run of losses makes the ground available, the entries
+    /// it blocks are the ones the record says to avoid, and the slice recovers as better
+    /// trades close. That is a feedback loop that can settle.
     ///
-    /// **THE RULE SLICE WAS MISSING HERE UNTIL 2026-09-20, AND IT COST A FALSE ALARM.** The
-    /// brief prints all three and the prompt says ANY of them, but this property looked at
-    /// two. On signal 892 the slices were cell −0.749 over 3 (too thin), session +0.078
-    /// over 14, and **rule −0.262 over 20**. The brief printed that negative rule line and
-    /// then asserted, two lines later, "every slice with enough trades is positive — 'this
-    /// setup is losing' is NOT AVAILABLE". The model read the rule line, refused, and was
-    /// RIGHT; <c>ContradictsBrief</c> then flagged its true statement as a fabricated
-    /// premise. A brief that contradicts itself is worse than one that is merely strict,
-    /// because it makes the model's correct answers look like defects.
+    /// THE RULE SLICE CANNOT SETTLE, AND ADDING IT DEADLOCKED THE BOT FOR 23 HOURS.
+    /// It was added on 2026-09-20 to fix a brief that contradicted itself, and it did fix
+    /// that — but a strategy whose lifetime record is negative then carries the ground on
+    /// EVERY signal, the gate refuses every entry, and with no entries the record can never
+    /// change. Measured: XVENUE_FLOW sat at rule −0.262 over 20, and from 2026-09-20 14:16
+    /// to 2026-09-21 13:20 the gate refused 6 of 6 XVENUE_FLOW signals on grounds that were
+    /// all perfectly TRUE, took zero trades, and left the −0.262 exactly where it was. A
+    /// veto with no path back out is not a ground, it is a switch-off.
+    ///
+    /// The self-contradicting brief is fixed the other way instead: the rule line is still
+    /// printed, and <c>AiEntryGate.ContradictsBrief</c> counts a citation of ANY negative
+    /// slice — including this one — as supported. So the marker states what the model is
+    /// INVITED to use, the detector judges whether what it SAID was false, and the two no
+    /// longer have to be the same set.
     /// </summary>
     public bool CellIsLosing => (CellTrades    >= MinCellTrades && CellMeanR    < 0m)
-                             || (SessionTrades >= MinCellTrades && SessionMeanR < 0m)
-                             || (RuleTrades    >= MinCellTrades && RuleMeanR    < 0m);
+                             || (SessionTrades >= MinCellTrades && SessionMeanR < 0m);
+
+    /// <summary>
+    /// Any printed slice with enough trades is negative — the test for whether a stated
+    /// reason citing this account's record is SUPPORTED, which is a wider question than
+    /// whether the ground was offered. Used only by the contradiction detector.
+    /// </summary>
+    public bool AnySliceIsLosing => CellIsLosing
+                             || (RuleTrades >= MinCellTrades && RuleMeanR < 0m);
 
     // Two per-slice properties stood here for one commit — CellSliceIsLosing and
     // SessionSliceIsLosing, added "so the brief can say which slice is carrying the
