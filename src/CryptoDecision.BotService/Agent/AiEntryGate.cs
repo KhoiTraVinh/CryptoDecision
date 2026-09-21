@@ -662,6 +662,35 @@ public sealed class AiEntryGate(
                         $"Its stated reason was: {reason}");
                 }
 
+                // ONE GROUND IS NOT ENOUGH, and the prompt has always said so.
+                //
+                // This is the rule the model was given and never applied: "one marginal
+                // reading is usually not enough; two or more pointing the same way usually
+                // is". It refused on a single ground every single time, and over 26 hours
+                // that took the account from trading to not trading at all — 18 refusals,
+                // zero entries, through an 8.7% move. Of the eleven that have resolved,
+                // ten had exactly one ground available and the blocked LONGs alone were
+                // +14.296R.
+                //
+                // Downgraded rather than approved, exactly like a contradicted premise: it
+                // stays a refusal, `allow_entry_without_gate` decides whether the entry
+                // proceeds, and it records as APPROVED_DEGRADED so single-ground skips
+                // remain countable and separable.
+                var grounds = AvailableGrounds(candidate);
+
+                if (grounds < 2)
+                {
+                    log.LogWarning(
+                        "[Gate] {Side} {Symbol} was SKIPPED on {Grounds} available ground(s). " +
+                        "The brief requires two before skipping is expected, so this is recorded " +
+                        "as UNREVIEWED rather than refused. Reason given: {Reason}",
+                        candidate.Side, candidate.Symbol, grounds, reason);
+
+                    return GateDecision.Unreviewed(
+                        $"Gate answered SKIP with only {grounds} ground(s) available, and the " +
+                        $"brief asks for two. Its stated reason was: {reason}");
+                }
+
                 log.LogInformation(
                     "[Gate] SKIPPED {Side} {Symbol} (flow z={Z:F2}, {Agree}/{Part} venues): {Reason}",
                     candidate.Side, candidate.Symbol, candidate.Flow.AggregateZ,
@@ -694,6 +723,37 @@ public sealed class AiEntryGate(
     /// <c>excluded == 0</c> never held and the detector was dead for the only rule that
     /// trades — the exact defect it exists to catch, in the code that catches it.
     /// </summary>
+    /// <summary>
+    /// How many of the four grounds the brief marked AVAILABLE for this candidate.
+    ///
+    /// The system prompt has always said one is usually not enough — *"One marginal reading
+    /// is usually not enough; two or more pointing the same way usually is"* and *"When two
+    /// grounds are marked AVAILABLE, skipping is the expected answer"*. Nothing enforced it,
+    /// and the model refused on a single ground every time.
+    ///
+    /// Measured over the 18 signals the gate refused between 2026-09-20 14:16 and
+    /// 2026-09-21 16:11, of which 11 have resolved: **ten of the eleven had exactly ONE
+    /// ground available**, always "this setup is losing". The eleventh, a SHORT, had two
+    /// (losing + trend) and was the one refusal the outcome vindicated.
+    ///
+    ///     blocked LONGs    8    +14.296R   every resolved one a winner
+    ///     blocked SHORTs   3     -3.000R   every one a loser
+    ///     net blocked           +11.296R   against an account whose whole life is -0.95R
+    ///
+    /// Requiring two is therefore not fitted to that sample — it is the rule the prompt
+    /// already states, finally applied. That distinction is what makes it defensible if the
+    /// next week trends the other way.
+    /// </summary>
+    private static int AvailableGrounds(EntryCandidate c)
+    {
+        var e = c.Evidence;
+
+        return (e.CellIsLosing            ? 1 : 0)
+             + (e.TrendAgainst(c.Side)    ? 1 : 0)
+             + (e.ClusteredPath           ? 1 : 0)
+             + (c.OpenSameSide >= 1       ? 1 : 0);
+    }
+
     private static string? ContradictsBrief(string reason, EntryCandidate c)
     {
         var text = reason.ToLowerInvariant();

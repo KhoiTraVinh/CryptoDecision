@@ -2675,3 +2675,66 @@ opened: 48 closed, mean R −0.0282, −$0.9515.
 ### Result
 
 _Open._
+
+---
+
+## The gate took the account to zero trades through an 8.7% move
+
+Between 2026-09-20 14:16 and 2026-09-21 16:11 the gate was asked 18 times, **refused 18
+times, and the bot opened nothing** while SOL ran from 108 to 118.
+
+Every refusal cited a true number. That is exactly why this entry exists: per-decision
+correctness told us nothing, and it was used — by me, in this file's own commentary — to
+call the behaviour fine while it was costing more than the account has ever made.
+
+### What the refusals cost
+
+Eleven of the eighteen have resolved on the 12-hour label:
+
+    blocked LONGs     8    +14.296R    every resolved one positive
+    blocked SHORTs    3     -3.000R    every one a loser
+    net                    +11.296R
+
+Against an account whose entire 48-trade history is **−0.95R**. The gate blocked the
+direction that was working and, separately, blocked the direction that was not.
+
+### The cause: one ground was treated as sufficient
+
+Ten of the eleven had **exactly ONE** ground available — "this setup is losing", live via
+the session slice at −0.324 over 14. No trend, no cluster, no concentration. The eleventh,
+signal 1194, had two (losing + trend, 4h +3.69% against a SHORT) and is the only refusal
+the outcome vindicated.
+
+The prompt has always said one is not enough:
+
+> *One marginal reading is usually not enough; two or more pointing the same way usually is.*
+> *When two grounds are marked AVAILABLE, skipping is the expected answer, not a bold one.*
+
+Nothing enforced it. `AvailableGrounds` now counts the four, and a SKIP with fewer than two
+is downgraded to `Unreviewed` — still a refusal, still subject to
+`allow_entry_without_gate`, recorded as `APPROVED_DEGRADED` so single-ground skips stay
+countable.
+
+**This is not fitted to the eleven observations.** It is the rule the prompt already
+states, finally applied, which is what makes it defensible if the next week trends the
+other way.
+
+### Replayed through the fix
+
+    +12.300R would have passed the gate
+     -1.000R stays blocked — signal 1194, two grounds, and it lost
+
+### Two caveats that bound the number, not the direction
+
+- **Position limits were not modelled.** Two per strategy and one per side mean the ten
+  could not all have been held at once, so +12.3R is an upper bound on the opportunity, not
+  a forecast of realised P&L.
+- **The outcome labels are 12-hour fixed barriers, not the deployed exit.** The OFI and LLM
+  exits close at a mean 3.8-4h. This repo has been wrong before by measuring a bare cap
+  instead of the exit that runs.
+
+The direction survives both: **8 of 8 resolved LONGs were positive.**
+
+### Result
+
+_Open — W1 restarts again from this deploy._
