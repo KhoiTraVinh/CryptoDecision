@@ -151,7 +151,8 @@ public sealed class CrossVenueFlowStrategy(
     /// silence whether a position will be cut by a rule, by a model, or not at all.
     /// </summary>
     private string DescribeExitPolicy() =>
-        !tuning.UseFlowOfiExit
+        DescribeRatchet() +
+        (!tuning.UseFlowOfiExit
             ? "EARLY EXIT OFF: only the stop, the target and the max-hold cap close a " +
               "position. "
             : reviewer is null
@@ -160,7 +161,21 @@ public sealed class CrossVenueFlowStrategy(
                 : $"EARLY EXIT: after {tuning.ExitReviewAfter.TotalHours:F0}h and then every " +
                   $"{tuning.ExitReviewEvery.TotalHours:F0}h, the MODEL is asked whether force " +
                   $"remains or the trend has turned; the {tuning.FlowOfiBars}-bucket OFI rule " +
-                  "runs ONLY as the fallback when it cannot answer. ";
+                  "runs ONLY as the fallback when it cannot answer. ");
+
+    /// <summary>
+    /// The ratchet, said at startup alongside the reviewer.
+    ///
+    /// It closes positions on its own and runs every cycle, so leaving it out of the
+    /// banner would repeat the mistake the dynamic widening made: a mechanism moving real
+    /// money with nothing at startup admitting it exists.
+    /// </summary>
+    private string DescribeRatchet() =>
+        !tuning.UseRatchetExit
+            ? ""
+            : $"RATCHET: once a position reaches {tuning.RatchetArmR:F2}R of favourable " +
+              $"excursion it is closed if it gives back {tuning.RatchetGivebackPct:P0} of that " +
+              "peak, checked every cycle with no model call (H25). ";
 
     private static string DescribeShortGate(FlowSignalOptions s)
     {
@@ -652,6 +667,91 @@ public sealed class CrossVenueFlowStrategy(
         var hitTarget = isLong ? currentPrice >= tgtPrice : currentPrice <= tgtPrice;
         if (hitTarget) return Exit("TP", currentPrice, changePct, dynamicStop, dynamicTarget);
 
+        // ── Ratchet: keep what the position has already earned ────────────────
+        //
+        // H25. Runs EVERY cycle and costs no model call, which is the whole point. The
+        // model is asked at 2h and then every 2h; the peak does not wait for it.
+        //
+        // Measured over all ten LLM_EXIT closures (trades 105-114, 2026-09-20..23), with
+        // 1R = the stop the position was sized against:
+        //
+        //   every hold an exact multiple of the 2h grid   120 121 121 121 120 121 242 362 483 483
+        //   seven of ten peaked BEFORE the first review   median peak at minute 64.5
+        //   peak-to-exit giveback                         4.940R total, 0.494R per trade
+        //     the review cadence could not see            3.052R  (62%)
+        //     the model saw and held through              1.888R  (38%)
+        //
+        // THE CADENCE HALF IS NOT A PROMPT PROBLEM and no better model fixes it. Asked
+        // every 2h, a PERFECT reviewer — one that always cuts at the best checkpoint it is
+        // ever shown — tops out at +0.883R against the +3.682R those price paths actually
+        // offered. At 60m it would reach +2.052R and at 30m +2.655R, but one call costs
+        // 42-43s on 2 vCPU with Ollama at NUM_PARALLEL=1 inside a 120s cycle budget, so
+        // that spend does not exist. This does the part that needs no judgement.
+        //
+        // WHAT IT IS NOT. It does not decide whether the thesis is dead — that stays the
+        // model's job, and the OFI rule's when the model cannot answer. It only refuses to
+        // hand back a gain already on the board. Over the ten it fires five times; the
+        // other five exit exactly as they do today.
+        //
+        // WHY THESE TWO NUMBERS, and the honest limit on them. Replayed across arm
+        // 0.3/0.4/0.5R x giveback 40/50/60%, EVERY cell beat what actually ran, by +0.11R
+        // to +1.22R over the ten. But the ranking INSIDE the grid flips depending on
+        // whether the replay reads 1m closes or 1m highs and lows, so n=10 supports the
+        // mechanism and cannot choose the parameter. 0.30R / 40% is the best cell in the
+        // close-based replay — the one that matches how the bot actually samples, every
+        // 30s at the last trade price — and is positive in both, as are its neighbours.
+        // A starting value with a decision rule attached, not a fitted optimum.
+        //
+        // IT PULLS AGAINST THE DYNAMIC WIDENING, on purpose and visibly. That mechanism
+        // moves the stop further away as favourable excursion grows; this one closes on
+        // the way back from the same excursion. Both read PeakPrice. Nothing here removes
+        // or overrides the widening — it still sets the level SL fires on — but on a
+        // position that has travelled and turned, the ratchet is what now speaks first.
+        //
+        // Set UseRatchetExit false to remove it.
+        if (tuning.UseRatchetExit && trade.PeakPrice.HasValue)
+        {
+            // The R unit is the STORED stop, never the widened one. The stored level is
+            // what position size was set against (notional = capital x risk% / stopPct),
+            // so it is the only distance that means one unit of this account's risk.
+            // Reading the widened stop instead would make the arm threshold drift outward
+            // exactly as the position travels, which is the defect, not the measure.
+            var riskDist = Math.Abs(trade.EntryPrice - trade.StopPrice!.Value);
+
+            if (riskDist > 0m)
+            {
+                var peakR = (isLong
+                    ? trade.PeakPrice.Value - trade.EntryPrice
+                    : trade.EntryPrice - trade.PeakPrice.Value) / riskDist;
+
+                var nowR = (isLong
+                    ? currentPrice - trade.EntryPrice
+                    : trade.EntryPrice - currentPrice) / riskDist;
+
+                if (peakR >= tuning.RatchetArmR)
+                {
+                    var floorR = peakR * (1m - tuning.RatchetGivebackPct);
+
+                    if (nowR <= floorR)
+                    {
+                        // Information, not Debug. The dynamic widening spent nine days
+                        // invisible under the default minimum level and surfaced only as
+                        // "price passed TP and nothing happened". An exit that closes
+                        // positions says so where the operator already looks.
+                        log.LogInformation(
+                            "[XFlow] Trade {Id} {Side} RATCHET exit at {Now:F3}R: peak was " +
+                            "{Peak:F3}R, floor {Floor:F3}R ({Give:P0} giveback, armed at {Arm:F2}R). " +
+                            "Entry {Entry:F4}, peak {PeakPx:F4}, now {Price:F4}.",
+                            trade.Id, trade.Side, nowR, peakR, floorR,
+                            tuning.RatchetGivebackPct, tuning.RatchetArmR,
+                            trade.EntryPrice, trade.PeakPrice.Value, currentPrice);
+
+                        return Exit("RATCHET", currentPrice, changePct, dynamicStop, dynamicTarget);
+                    }
+                }
+            }
+        }
+
         // ── Exit when the aggregate imbalance turns against the position ───────
         //
         // Sum buy and sell notional over the last FlowOfiBars closed buckets, take the
@@ -1100,4 +1200,33 @@ public sealed class FlowStrategyOptions
     /// start missing its deadline -- see AiExitReviewer for the arithmetic.
     /// </summary>
     public TimeSpan ExitReviewEvery { get; set; } = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// Close a position that has given back too much of its own best excursion.
+    ///
+    /// H25, opened 2026-09-23. The exit reviewer only looks at 2h and then every 2h, and
+    /// over the ten LLM_EXIT closures 62% of the 4.940R of peak-to-exit giveback was lost
+    /// between two looks rather than at one of them. This runs every cycle and asks no
+    /// model. The measurement, the perfect-reviewer ceiling by cadence, and why the
+    /// parameter is a starting value rather than an optimum are all in EvaluateExitAsync.
+    /// </summary>
+    public bool UseRatchetExit { get; set; } = true;
+
+    /// <summary>
+    /// Favourable excursion, in R against the STORED stop, before the ratchet arms.
+    ///
+    /// 0.30R = 0.60% of price at the 2.00% stop floor. Six of the ten measured trades ever
+    /// reached it, so it acts often enough to be observable inside one window; 0.50R was
+    /// reached by two and is effectively dormant.
+    /// </summary>
+    public decimal RatchetArmR { get; set; } = 0.30m;
+
+    /// <summary>
+    /// Fraction of the peak the position may give back before it is closed.
+    ///
+    /// 40%: a peak of 0.50R closes at 0.30R. Every cell of 40/50/60% beat what actually
+    /// ran; the grid cannot rank them on n=10, and 40% is the best cell in the replay that
+    /// matches how the bot samples price.
+    /// </summary>
+    public decimal RatchetGivebackPct { get; set; } = 0.40m;
 }

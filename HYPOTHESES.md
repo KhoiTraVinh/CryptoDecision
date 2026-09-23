@@ -2738,3 +2738,144 @@ The direction survives both: **8 of 8 resolved LONGs were positive.**
 ### Result
 
 _Open — W1 restarts again from this deploy._
+
+## H25 — A ratchet, because the reviewer's 2-hour grid cannot see the peak
+
+Opened **2026-09-23**, from the operator's own observation: *"LLM_EXIT còn hơi chậm nhịp
+đảo chiều của thị trường."* It is measurable, and it measured worse than it looked.
+
+### The exit is quantised to the review grid
+
+Every `LLM_EXIT` closure to date, in minutes held:
+
+    120  121  121  121  120  121  242  362  483  483
+
+Not one value off a multiple of ~120. The reviewer fires at 2h and then every 2h, so the
+market may turn whenever it likes and the position still leaves on the grid.
+
+### Where the peak actually is
+
+Over trades 105-114, with **1R = the stop the position was sized against** (2.00% of price):
+
+    trade  peak R   peak at min   exit R   giveback R
+      105   0.481       137       -0.114      0.595
+      106   0.401        64       -0.423      0.824
+      107   0.184        65       -0.236      0.420
+      108   0.818        49       +0.490      0.328
+      109   0.346       108       +0.200      0.146
+      110   0.013         4       -0.740      0.753
+      111   0.612       120       +0.547      0.065
+      112   0.698       157       -0.204      0.902
+      113   0.280        32       -0.188      0.468
+      114   0.102         0       -0.337      0.439
+
+**Seven of ten peaked before the first review.** Median peak at minute 64.5, first look at
+minute 120.
+
+### The giveback splits two ways, and the larger half is not the model's fault
+
+    total peak-to-exit giveback        4.940R   (0.494R per trade)
+      lost between two reviews         3.052R   (62%)
+      seen at a review and held        1.888R   (38%)
+
+The judgement half is concentrated in two trades that were held down a decaying position:
+
+    112:  +0.55 -> +0.39 -> -0.13     cut at -0.204
+    105:  +0.37 -> +0.05 -> -0.10 -> -0.03    cut at -0.114
+
+The six that closed at their first review lost 0.001-0.065R to judgement each. **The model
+did not misjudge those. It was never shown them.**
+
+### No better model can fix the larger half
+
+Best R obtainable by a **perfect** reviewer — one that always cuts at the best checkpoint it
+is ever shown — as a function of cadence:
+
+    review every 120 min   +0.883R     <- today's ceiling
+    review every  60 min   +2.052R
+    review every  30 min   +2.655R
+    the price paths offered +3.682R
+    what actually ran      -1.005R
+
+Buying the 60-minute row means doubling model calls at 42-43s each, on 2 vCPU with Ollama
+pinned to `NUM_PARALLEL=1` inside a 120s cycle shared with the entry gate. That spend does
+not exist. So the fix has to be the part that needs no judgement.
+
+### A rejected alternative, measured and dropped
+
+**Trigger the review on an OFI flip instead of on the clock** — same number of calls, placed
+where they matter. It fails. First flip against the position:
+
+    trade   flip at min   |OFI| at flip   R at flip   actual exit R
+      111        14          0.039          +0.051       +0.547
+      109        14          0.169          -0.051       +0.200
+      112       314          0.002          +0.288       -0.204
+      113        11          0.107          +0.136       -0.188
+
+Seven of ten flip inside 14 minutes, several at |OFI| under 0.04 — the sign crossing zero,
+not a reversal. Acting there destroys 111 and 109. This is `flow-has-no-direction` again,
+and the idea is dropped rather than tuned.
+
+### What ships
+
+Arm at **0.30R** of favourable excursion; close when the position has given back **40%** of
+its own peak. Every cycle, no model call, reading the `peak_price` the bot already maintains.
+It does not decide whether the thesis is dead — the model and the OFI fallback keep that —
+it only refuses to hand back a gain already on the board.
+
+### Replay, and the limit on it
+
+    arm   giveback   fired   total R   vs actual
+    0.3      40%       5      +0.213     +1.218
+    0.3      50%       5      -0.072     +0.933
+    0.3      60%       4      -0.152     +0.853
+    0.4      40%       3      -0.270     +0.735
+    0.4      50%       3      -0.476     +0.529
+    0.5      40%       2      -0.580     +0.425
+    0.5      60%       2      -0.895     +0.110
+
+**Every cell beats what ran.** But re-measured on 1m highs and lows instead of 1m closes the
+ranking inside the grid flips and (0.4, 50%) becomes best. So n=10 supports the mechanism
+and **cannot choose the parameter**. 0.30 / 40% is taken because it wins the close-based
+replay — the one that matches how the bot samples, every 30s at the last trade price — is
+positive in both, and has positive neighbours in both.
+
+### Caveats that bound the number, not the direction
+
+- **n = 10, in-sample, three days, one regime.** SOL fell through most of it.
+- **Only `LLM_EXIT` trades are in the sample.** No SL or TIMEOUT closure is represented.
+- **Position limits are not modelled.** Exiting earlier frees a slot and would have changed
+  which later entries existed at all, so +1.2R is an arithmetic difference, not a forecast.
+
+### It pulls against the dynamic widening, deliberately
+
+`use_dynamic_tp_sl` moves both barriers **outward** as excursion grows; this closes on the
+way back from the same excursion. Both read `PeakPrice`. Verified on trade 108: stored stop
+113.807, dynamic stop 113.447 — the protective level retreating while the position was up
+1.13%. Nothing here removes or overrides the widening, which still sets the level `SL` fires
+on. The operator owns that mechanism; this entry only records that the two now speak to the
+same position and the ratchet speaks first.
+
+### Decision rule, fixed in advance
+
+Judge at **15 closed trades that armed** (peak >= 0.30R) **or 14 days**, whichever first.
+
+- **Reject** if mean R across all closed trades falls below **-0.10R**, the W1-so-far figure
+  it is meant to beat.
+- **Reject** if `RATCHET` exits show a mean R below **0.00R** — the rule's entire claim is
+  that it banks something, and a negative mean means it is cutting winners instead.
+- **Reject** if damage migrates into `SL`: more than 3 stop-outs in the window, against 0
+  since W1 restarted.
+- **Keep and leave alone** otherwise. The parameter does **not** move on this evidence —
+  the grid could not rank cells on n=10 and will not rank them on n=15 either. A parameter
+  change needs its own entry and its own window.
+
+### Result
+
+_Open._
+
+### W1 note
+
+This ships **inside** W1, by explicit operator instruction on 2026-09-23 after being told it
+would void H22, H23 and H24. Those three lose their window and must be re-opened against a
+new baseline if they are still wanted.

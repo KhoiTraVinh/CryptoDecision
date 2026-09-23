@@ -820,7 +820,11 @@ public sealed class TradingBotService(
             return;
         }
 
-        // ── 3. Update peak price (the breakeven stop reads it) ──────────────────
+        // ── 3. Update peak price ────────────────────────────────────────────────
+        //
+        // Read by the dynamic widening, which pushes both barriers out as this grows, and
+        // since H25 by the ratchet, which closes the position on the way back from it.
+        // The breakeven stop that this line used to name was deleted on 2026-09-19.
         foreach (var trade in openTrades)
         {
             var newPeak = trade.Side == "SHORT"
