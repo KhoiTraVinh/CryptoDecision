@@ -695,12 +695,31 @@ public sealed class CrossVenueFlowStrategy(
         //
         // WHY THESE TWO NUMBERS, and the honest limit on them. Replayed across arm
         // 0.3/0.4/0.5R x giveback 40/50/60%, EVERY cell beat what actually ran, by +0.11R
-        // to +1.22R over the ten. But the ranking INSIDE the grid flips depending on
-        // whether the replay reads 1m closes or 1m highs and lows, so n=10 supports the
-        // mechanism and cannot choose the parameter. 0.30R / 40% is the best cell in the
-        // close-based replay — the one that matches how the bot actually samples, every
-        // 30s at the last trade price — and is positive in both, as are its neighbours.
-        // A starting value with a decision rule attached, not a fitted optimum.
+        // to +1.22R. But the ranking INSIDE the grid flips depending on whether the replay
+        // reads 1m closes or 1m highs and lows, so the sample supports the MECHANISM and
+        // cannot choose the parameter.
+        //
+        // THE ARM WAS 0.30R FOR TWO HOURS. It went to 0.25R on 2026-09-23 by operator
+        // decision, prompted by trade 116 — peak +0.277R, 0.023R short of arming, then
+        // straight down to -0.45R with 42 minutes still to run before its first review.
+        // That is n=1 and it is not why the number is defensible. This is:
+        //
+        //   arm      fired/total R (close)     fired/total R (high-low)
+        //   0.20        7   +0.445                8   +0.103
+        //   0.25        5   +0.096                7   +0.295
+        //   0.30        5   +0.174                6   -0.026
+        //   0.35        4   +0.133                5   +0.116
+        //                                 against -1.044R actually run, n=11
+        //
+        // Re-measured with trade 115 included, at 40% giveback. Every cell beats the live
+        // result by +1.0R to +1.5R and the spread BETWEEN cells is noise on eleven trades.
+        // But 0.30 is the one cell here that turns negative under the high-low convention,
+        // and 0.25 is positive under both — so the earlier preference for 0.30, argued from
+        // the close-based replay alone, was the weaker read. The operator's instinct was
+        // better than my table.
+        //
+        // None of that makes 0.25 measured. It makes it not-worse. A starting value with a
+        // decision rule attached, not a fitted optimum.
         //
         // IT PULLS AGAINST THE DYNAMIC WIDENING, on purpose and visibly. That mechanism
         // moves the stop further away as favourable excursion grows; this one closes on
@@ -1215,18 +1234,25 @@ public sealed class FlowStrategyOptions
     /// <summary>
     /// Favourable excursion, in R against the STORED stop, before the ratchet arms.
     ///
-    /// 0.30R = 0.60% of price at the 2.00% stop floor. Six of the ten measured trades ever
+    /// 0.25R = 0.50% of price at the 2.00% stop floor. Seven of the eleven measured trades
     /// reached it, so it acts often enough to be observable inside one window; 0.50R was
     /// reached by two and is effectively dormant.
+    ///
+    /// **Lowered from 0.30R on 2026-09-23 by operator decision**, the same day it shipped,
+    /// after trade 116 peaked 0.023R under the old threshold and then reversed 0.73R. The
+    /// live near-miss is not the justification — n=1 never is. The re-measurement in
+    /// EvaluateExitAsync is: 0.25 is positive under both replay conventions and 0.30 is the
+    /// one cell that is not. See the H25 amendment for what this costs the window.
     /// </summary>
-    public decimal RatchetArmR { get; set; } = 0.30m;
+    public decimal RatchetArmR { get; set; } = 0.25m;
 
     /// <summary>
     /// Fraction of the peak the position may give back before it is closed.
     ///
     /// 40%: a peak of 0.50R closes at 0.30R. Every cell of 40/50/60% beat what actually
-    /// ran; the grid cannot rank them on n=10, and 40% is the best cell in the replay that
-    /// matches how the bot samples price.
+    /// ran; the grid cannot rank them on the eleven trades measured, and 40% is the best
+    /// cell in the replay that matches how the bot samples price. Unchanged by the
+    /// 2026-09-23 arm override, which moved RatchetArmR only.
     /// </summary>
     public decimal RatchetGivebackPct { get; set; } = 0.40m;
 }

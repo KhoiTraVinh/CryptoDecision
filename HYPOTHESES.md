@@ -2879,3 +2879,57 @@ _Open._
 This ships **inside** W1, by explicit operator instruction on 2026-09-23 after being told it
 would void H22, H23 and H24. Those three lose their window and must be re-opened against a
 new baseline if they are still wanted.
+
+### H25 amendment — the arm moves to 0.25R, same day, by operator decision
+
+H25 shipped at 13:27 UTC with `RatchetArmR` 0.30 and a decision rule saying in as many
+words that **the parameter does not move on this evidence**. It moved at 15:5x UTC. This
+section is here so that is a recorded override rather than a quiet edit.
+
+**What prompted it.** Trade 116, XVENUE_FLOW SHORT via HIGH_VOLUME, opened 14:19 at 113.78:
+
+    peak    113.15  =  +0.277R      0.023R short of arming
+    then    114.81  =  -0.453R      78 minutes held, first review not due until 16:19
+
+A 0.73R round trip, with the ratchet standing right there and 42 minutes still to run
+before anything would look at the position. Exactly the hole H25 was written about, missed
+by two hundredths of an R.
+
+**That is n=1 and it is not the justification.** One observation on the day a hypothesis
+opens is the 250:1 overfitting ratio in person. What makes 0.25 defensible is a
+re-measurement, now including trade 115 which closed after the original replay, at 40%
+giveback, under both conventions:
+
+    arm     fired / total R (close)    fired / total R (high-low)
+    0.20       7     +0.445               8     +0.103
+    0.25       5     +0.096               7     +0.295
+    0.30       5     +0.174               6     -0.026
+    0.35       4     +0.133               5     +0.116
+                              against -1.044R actually run, n = 11
+
+Every cell still beats the live result by +1.0R to +1.5R and the spread between cells is
+noise on eleven trades. But **0.30 is the only cell here that turns negative under the
+high-low convention, and 0.25 is positive under both.** The original preference for 0.30
+was argued from the close-based replay alone and was the weaker read of the two. The
+operator's instinct beat the table; the table, asked properly, agrees.
+
+**0.25 is still not measured.** It is not-worse. The honest statement is that eleven trades
+cannot rank these cells and both values sit inside the same flat region.
+
+**What it costs.** Nothing empirical: `RatchetArmR` 0.30 was live for 2h07 and fired **zero
+times**, so no observation is discarded. What is spent is the credibility of the rule that
+said it would not move — and the answer to that is this section, not a softer rule.
+
+**The H25 window restarts from this deploy.** The decision rule is unchanged in every other
+respect — judge at 15 closed trades that armed, or 14 days:
+
+- Reject if mean R across all closed trades falls below **-0.10R**.
+- Reject if `RATCHET` exits show a mean R below **0.00R**.
+- Reject if more than 3 stop-outs appear in the window.
+- **The arm does not move again inside this window.** If it does, H25 stops being a
+  hypothesis and becomes a preference, and the next entry should say so plainly rather
+  than carrying a decision rule it does not keep.
+
+### Result
+
+_Open — restarted 2026-09-23 at the 0.25R arm._
