@@ -3037,3 +3037,101 @@ Ships while H25 is open, which means the two overlap and a bad week cannot be at
 one of them without reading the per-trade reasons. That is accepted deliberately: H26 fires
 on ~5 % of positions and marks every one of them with the `HV_REGIME` close reason, so the
 populations separate cleanly in the data even though the windows do not.
+
+## H28 — The exit reviewer looks every hour instead of every two
+
+Opened **2026-09-24**, operator's decision. `ExitReviewAfter` and `ExitReviewEvery` both go
+from 2h to 1h. **Nothing else changes** — the ratchet stays at arm 0.25R / 40% giveback, the
+OFI fallback stays, the geometry stays.
+
+### Why: the first look was landing an hour past the median peak
+
+Time from entry to the position's own best price, from OKX ticks, over the 15 closed trades
+with geometry:
+
+    min 0.2    Q1 18.6    MEDIAN 62.3    Q3 92.7    max 162.1     minutes
+    12 of 15 peaked before minute 120
+
+The opening question was being asked at minute 120 on a distribution whose median is 62. Four
+fifths of the time the model was being shown the aftermath and asked to judge the event.
+
+### What cadence can buy, at the ceiling
+
+Best R obtainable by a **perfect** reviewer — one that always cuts at the best checkpoint it
+is ever shown — over those trades:
+
+    every 120 min   +0.883 R
+    every  60 min   +2.052 R
+    every  30 min   +2.655 R
+    the price paths offered   +3.682 R
+    what actually ran         -1.005 R
+
+Halving the interval more than doubles the ceiling. This does not claim the model will reach
+it; it says the ceiling was the binding constraint and now it is less so.
+
+### What it costs, and why 30 minutes is not on the table
+
+A call is 42-43s measured, on 2 vCPU with Ollama at `NUM_PARALLEL=1`, inside a 120s cycle
+budget shared with the entry gate.
+
+    2h cadence   ~2 calls per trade
+    1h cadence   ~4 calls per trade
+    worst case   two positions due in one cycle + one gate call  ~135s against 120s
+
+The risk is accepted, not denied. It is bounded: `max_open_trades_per_strategy` is 2 and
+`last_exit_review_at` paces each position separately, so a cycle can owe a few calls, never
+sixteen. The 15-minute grid would cost ~16 calls per trade and stays out of reach.
+
+### A rule that was measured and NOT taken
+
+The operator first proposed pairing this with a different exit — close when price falls 0.25R
+below the running peak, with no arm threshold. Replayed over the same 15 trades from entry to
+the 720-minute cap:
+
+    giveback   check          fired  SL    meanR
+      0.20     every cycle      14    1   -0.077
+      0.25     every cycle      14    1   -0.105
+      0.25     every 60 min     13    2   -0.243
+      0.25     every 120 min    13    2   -0.211
+
+    what ran -0.122    current ratchet -0.179    no early rule -0.297    perfect +0.465
+
+It measured better than the ratchet that runs today, and dropping the arm fixed the case the
+ratchet structurally cannot reach: trade 119 peaked at 0.017R, was never protected, and lost
+0.777R while nothing was allowed to look at it until minute 120 — that rule takes it at 0.315R.
+
+**It was not taken, and the reason is worth keeping.** With `peak >= entry` always, a 0.25R
+trailing floor makes the 2.00% stop unreachable: the effective stop becomes ~0.50% of price.
+H8 measured stop width across seven values on **68 signals** and found 2.00% best, with 1.0%
+much worse *because* narrow stops destroy the exit that earns — stop-outs 12 to 29, OFI exits
+51 to 30. Fifteen trades do not overturn sixty-eight. The rule also fired on 14 of 15, which
+would have left `OFI_REVERSAL` and `LLM_EXIT` effectively unreachable.
+
+One measurement from that exercise is kept regardless: **a trailing floor must be checked
+every cycle.** Gating the identical rule to a 60-minute scan costs 0.138R per trade, because
+on a clock you exit at whatever minute 60 happens to be rather than at the floor.
+
+### Decision rule, fixed in advance
+
+Judge at **15 closed trades** or **14 days**.
+
+- **Reject on infrastructure first**, before looking at P&L: any `Open positions were not
+  evaluated this cycle` line, or an `Unavailable` rate above one third. Either means this
+  window measured Ollama's queue instead of the model's judgement, and the correct response
+  is to return to 2h rather than to read the R.
+- Reject if mean R across all closed trades falls below **-0.10R**.
+- Reject if damage migrates into `SL`: more than 3 stop-outs in the window.
+- The ratchet is not to be touched inside this window. H25's own amendment already says the
+  arm does not move again, and a second parameter moving at the same time would make both
+  unreadable.
+
+### Result
+
+_Open._
+
+### Window note
+
+H25 (ratchet), H26 (high-volume suspension) and H28 all overlap now. They separate in the
+data by close reason — `RATCHET`, `HV_REGIME`, `LLM_EXIT` — which is the only reason three
+open windows is tolerable rather than reckless. H26 and H28 will land in the same deploy
+because H26's first attempt failed after the image pull and never restarted the stack.

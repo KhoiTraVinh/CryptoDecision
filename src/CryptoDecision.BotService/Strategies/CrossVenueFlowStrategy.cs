@@ -1203,22 +1203,54 @@ public sealed class FlowStrategyOptions
     /// <summary>
     /// How long a position is left alone before the model is first asked whether to cut it.
     ///
-    /// Two hours, chosen by the operator. Below this the position is managed by its stop,
-    /// its target and the max-hold cap only. The measured mean hold to an OFI exit was
-    /// 3.83h, so this deliberately lets a position live through the window where the old
-    /// rule did most of its cutting.
+    /// **One hour since 2026-09-24 (H28). It was two, and that was the expensive number.**
+    ///
+    /// Time from entry to the position's own best price, measured from OKX ticks over the
+    /// 15 closed trades with geometry:
+    ///
+    ///     min 0.2   Q1 18.6   MEDIAN 62.3   Q3 92.7   max 162.1   minutes
+    ///     12 of 15 peaked before minute 120
+    ///
+    /// The first look was landing at minute 120 on a distribution whose median is 62. Four
+    /// fifths of the time the model was being shown the aftermath. Moving the FIRST review
+    /// is most of this change: it puts the opening question at the median peak instead of
+    /// an hour past it.
+    ///
+    /// What a cadence can recover, assuming a PERFECT reviewer that always cuts at the best
+    /// checkpoint it is ever shown:
+    ///
+    ///     every 120 min   +0.883 R        every 60 min   +2.052 R
+    ///     every  30 min   +2.655 R        the paths offered  +3.682 R
+    ///
+    /// Below this the position is managed by its stop, its target, the ratchet and the
+    /// max-hold cap. The old note here said 2h deliberately let a position live through the
+    /// window where the OFI rule did its cutting; that reasoning predates the ratchet, which
+    /// now covers that window every cycle and for free.
     /// </summary>
-    public TimeSpan ExitReviewAfter { get; set; } = TimeSpan.FromHours(2);
+    public TimeSpan ExitReviewAfter { get; set; } = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Minimum gap between two reviews of the same position.
     ///
-    /// Also two hours. At the measured 4.04h average hold that is about two calls per
-    /// trade, against 42-43s each on a 2-vCPU host inside a 120s cycle budget. Lowering it
-    /// toward the 15-minute bucket grid would cost ~16 calls per trade and the cycle would
-    /// start missing its deadline -- see AiExitReviewer for the arithmetic.
+    /// **Also one hour since 2026-09-24 (H28), and this half is the one that costs.**
+    ///
+    /// A call is 42-43s measured, on 2 vCPU with Ollama at NUM_PARALLEL=1, inside a 120s
+    /// cycle budget shared with the entry gate. At two hours this was ~2 calls per trade.
+    /// At one hour it is ~4, and the worst case moves from comfortable to tight: two open
+    /// positions falling due in the same cycle plus one gate call is roughly 135s against a
+    /// 120s budget, and the loop logs "Open positions were not evaluated this cycle".
+    ///
+    /// That is the risk being accepted, not one being denied. It is bounded rather than
+    /// unbounded -- max_open_trades_per_strategy is 2 and reviews are paced per position by
+    /// last_exit_review_at, so a cycle can owe at most a few calls, never sixteen. The
+    /// 15-minute bucket grid, which would cost ~16 calls per trade, remains out of reach.
+    ///
+    /// **Watch for this, first, in the window**: reviews returning Unavailable more often,
+    /// and any "not evaluated this cycle" line at all. Either means the cadence bought
+    /// Ollama's queue rather than the model's judgement, and one hour was too fast for this
+    /// host. See AiExitReviewer for the arithmetic it was originally paced against.
     /// </summary>
-    public TimeSpan ExitReviewEvery { get; set; } = TimeSpan.FromHours(2);
+    public TimeSpan ExitReviewEvery { get; set; } = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Close a position that has given back too much of its own best excursion.
