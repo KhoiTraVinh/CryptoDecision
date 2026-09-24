@@ -2933,3 +2933,107 @@ respect — judge at 15 closed trades that armed, or 14 days:
 ### Result
 
 _Open — restarted 2026-09-23 at the 0.25R arm._
+
+## H26 — A high-volume position suspends every other strategy
+
+Opened **2026-09-24**, the operator's rule, in their words: *"nếu bắt đầu mở lệnh bằng quy
+tắc vol > 20M thì cắt và chặn chiến lược CANDLE LONG và CANDLE SHORT lại cho đến khi lệnh
+vol > 20M được chốt, vì quy tắc vol > 20M là bắt lệnh của trường hợp giá giao động mạnh, nó
+không phù hợp để bắt dao."*
+
+### The premise is the strong part, and it is not close
+
+Every 15-minute bucket on record, split at the waiver threshold, against the 1-minute range
+of the same bucket:
+
+    bucket >= $20M        63 buckets     median range 1.590 %     mean 1.967 %
+    bucket <  $20M     2,966 buckets     median range 0.377 %     mean 0.443 %
+
+**4.2x the volatility**, on 63 observations against 2,966. A rule whose entire entry
+condition is a 0.60 % fall over two bars is not identifying a dip inside a bucket that
+routinely travels 1.6 %. The operator's reading of what the waiver detects is correct and
+measured.
+
+### The rule itself rests on five positions
+
+Across all 62 closed trades there are 8 high-volume positions, and only 5 CANDLE_REVERSAL
+positions ever overlapped one:
+
+     id   action    actual      under H26     delta
+     80   CUT       -0.145        +0.062      +0.207
+     85   CUT       +0.220        +0.754      +0.534
+     95   CUT       +0.699        +1.386      +0.687
+     97   CUT       -0.262        -0.509      -0.247
+    111   BLOCK     +0.547         0.000      -0.547
+                                             --------
+                                             +0.634 R
+
+**CUT is +1.181R over 4. BLOCK is -0.547R over 1, and that one was a winner.**
+
+Cross-checked on a different population — cut at the close of every >=$20M *bucket* rather
+than at a *taken* trade, which selects different positions — and it agrees in sign and
+magnitude: **+0.557R over 4**. Two independent definitions, same answer.
+
+### No mechanism is claimed
+
+The obvious one fails. "Cutting is favourable when the spike runs with the position" is
+refuted by trade 97, which was a SHORT cut into a sell-dominated bucket — same side — and
+was 0.378R worse for it. Four points, no visible structure. The rule is an empirical
+regularity on a sample too small to contain a mechanism.
+
+### The broader check is kinder to the premise than to the rule
+
+All 30 closed CANDLE_REVERSAL trades, by the volume regime at entry:
+
+    a >=$20M bucket in the hour before      3 trades    mean -0.094 R
+    $10-20M                                 8 trades    mean -0.075 R
+    under $10M                             19 trades    mean -0.031 R
+
+Monotone in the predicted direction — but the decisive band is n=3, and **every band is
+negative**. CANDLE_REVERSAL loses in all three regimes (30 trades, -1.468R, mean -0.049R).
+So H26 does less of a losing thing in one state; it does not repair the rule. Whether that
+rule should exist at all is a separate question this entry does not open.
+
+### What ships
+
+Keyed on the **strategy holding the position**, never on the name CANDLE_REVERSAL: while a
+position opened through `EntryPaths.HighVolume` is live, every position belonging to a
+different strategy closes as `HV_REGIME`, and that strategy opens nothing until the holder
+is gone. The holder and anything else from its own strategy are untouched, so the ratio path
+keeps trading.
+
+`bot_config.suspend_on_high_volume` (sql/042) switches it off live, without a deploy,
+because a rule resting on five observations must be reversible between releases.
+
+### It ships with its own contrary evidence recorded
+
+The BLOCK half has one observation and it went against. The operator was shown that and
+chose to ship both halves; this paragraph is the record, not a hedge. If BLOCK is what
+fails, the fix is to keep CUT and drop BLOCK, which the switch does not separate — that
+would be a code change and its own entry.
+
+### Decision rule, fixed in advance
+
+Judge at **10 activations** (a CUT or a BLOCK actually occurring) **or 21 days**.
+
+- Reject if the positions cut under `HV_REGIME` show a mean R **below** the mean R of
+  CANDLE_REVERSAL positions closed in the same window that were not cut.
+- Reject if the count of blocked entries that would have won exceeds those that would have
+  lost, measured on the 12-hour label — the BLOCK half's named failure.
+- Reject if any high-volume position's own R degrades, which would mean the suspension is
+  changing the market state the holder was entered on.
+- **Frequency is expected to be low**: 8 of 62 closed trades were high-volume, median hold
+  141 minutes, and only 5 positions in the whole history would have been touched. At the
+  current rate this fires roughly once every five days, so 21 days is the binding term, not
+  10 activations.
+
+### Result
+
+_Open._
+
+### Window note
+
+Ships while H25 is open, which means the two overlap and a bad week cannot be attributed to
+one of them without reading the per-trade reasons. That is accepted deliberately: H26 fires
+on ~5 % of positions and marks every one of them with the `HV_REGIME` close reason, so the
+populations separate cleanly in the data even though the windows do not.

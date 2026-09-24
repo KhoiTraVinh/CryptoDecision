@@ -237,6 +237,26 @@ public sealed record BotOptions
     public int          MaxOpenHighVolume        { get; set; } = 1;
 
     /// <summary>
+    /// While a high-volume-waiver position is open, close and suspend every OTHER strategy.
+    ///
+    /// H26, 2026-09-24, the operator's rule. A bucket at or above the $20M waiver is not a
+    /// busier bucket, it is a different market: over 63 such buckets against 2,966 ordinary
+    /// ones the median 15-minute range is 1.590% against 0.377%, 4.2x. A rule that buys a
+    /// 0.60% two-bar fall is reading noise in that state, so only the rule that detected the
+    /// state keeps trading through it.
+    ///
+    /// Keyed on the strategy HOLDING the position, never on a strategy name, so the meaning
+    /// survives a third rule being added.
+    ///
+    /// The evidence is thin and uneven, which is why this is a switch rather than a
+    /// hard-coded behaviour: cutting measured +1.181R over 4 positions and blocking -0.547R
+    /// over 1, and that one was a winner. Set false to remove it, live, with an UPDATE --
+    /// SQL is the control surface here and this is the kind of rule that may need turning
+    /// off between deploys.
+    /// </summary>
+    public bool         SuspendOnHighVolume      { get; set; } = true;
+
+    /// <summary>
     /// Concurrent open positions across EVERY strategy, for the configured symbol.
     /// 0 disables.
     ///

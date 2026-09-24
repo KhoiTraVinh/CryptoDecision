@@ -839,9 +839,86 @@ public sealed class TradingBotService(
         }
 
         // ── 4. Manage all open trades exits ────────────────────────────────────
+        //
+        // ── H26: a live high-volume position suspends every OTHER strategy ────
+        //
+        // The $20M waiver fires on a 15-minute bucket that traded at or above the
+        // news-print threshold. Measured over 63 such buckets against 2,966 ordinary
+        // ones, that is not a marginally busier bucket — it is a different market:
+        //
+        //     bucket >= $20M     median 15m range 1.590 %,  mean 1.967 %
+        //     bucket <  $20M     median 15m range 0.377 %,  mean 0.443 %
+        //
+        // 4.2x the volatility, on a sample big enough to believe. The operator's
+        // reading is that a rule which buys a 0.60% two-bar fall is reading noise in
+        // that state — it is built to catch a dip, not a knife — and that the rule
+        // which DID detect the state is the only one that should be acting in it.
+        //
+        // So while a high-volume position is open: every position belonging to another
+        // strategy is closed as HV_REGIME, and that strategy opens nothing until the
+        // high-volume position is gone. The holder itself and anything else from the
+        // same strategy are untouched, which keeps the ratio path free.
+        //
+        // WHAT THE EVIDENCE ACTUALLY SAYS, because the two halves are not equal:
+        //
+        //     CUT    4 positions over the whole history   +1.181 R
+        //     BLOCK  1 position                           -0.547 R   <- against it
+        //                                                 --------
+        //                                                 +0.634 R
+        //
+        // Cross-checked by cutting at every >=$20M BUCKET close rather than at a taken
+        // trade — a different population — and it agrees in sign and size: +0.557R over
+        // 4. Two independent definitions, same answer.
+        //
+        // But that is five positions in 62, and the BLOCK half has exactly one
+        // observation and it went the wrong way: trade 111 was a +0.547R winner this
+        // would have forfeited. It ships at the operator's explicit direction, with
+        // that recorded. No mechanism is claimed for the CUT half either — the obvious
+        // one, "the spike is favourable when it runs with the position", is refuted by
+        // trade 97, which was same-side and worse off cut.
+        //
+        // The broader check is kinder to the premise than to the rule: across all 30
+        // CANDLE_REVERSAL closes, mean R by the volume regime at entry runs -0.094
+        // (a >=$20M bucket in the hour before, n=3) / -0.075 ($10-20M, n=8) / -0.031
+        // (under $10M, n=19). Monotone in the predicted direction, and every band is
+        // negative, so this suspends a rule that loses everywhere rather than fixing one.
+        //
+        // Keyed on the STRATEGY THAT HOLDS the position, never on the name
+        // CANDLE_REVERSAL. The statement is "only the rule that detected this state may
+        // act in it", which stays correct if a third strategy is ever added.
+        //
+        // Set bot_config.suspend_on_high_volume = false to remove it, live, without a
+        // deploy. H26 carries the decision rule.
+        var hvHolder = opts.SuspendOnHighVolume
+            ? openTrades.FirstOrDefault(t => t.EntryPath == EntryPaths.HighVolume)
+            : null;
+
         foreach (var trade in openTrades)
         {
-            var decision = await strategy.EvaluateExitAsync(trade, currentPrice.Value, opts, clockTrusted, ct);
+            var suspended = hvHolder is not null
+                && !string.Equals(trade.Strategy, hvHolder.Strategy, StringComparison.OrdinalIgnoreCase);
+
+            ExitDecision decision;
+
+            if (suspended)
+            {
+                var raw = (currentPrice.Value - trade.EntryPrice) / trade.EntryPrice;
+
+                decision = new ExitDecision(
+                    true, "HV_REGIME", currentPrice.Value,
+                    trade.Side == "SHORT" ? -raw : raw);
+
+                log.LogInformation(
+                    "[TradingBot] Trade {Id} ({Strat} {Side}) is closed as HV_REGIME: trade {HvId} " +
+                    "is open on {HvStrat} through the high-volume waiver, and a >=$20M bucket is a " +
+                    "4.2x-volatility state this rule is not built for. It opens nothing further " +
+                    "until trade {HvId} closes.",
+                    trade.Id, trade.Strategy, trade.Side, hvHolder!.Id, hvHolder.Strategy, hvHolder.Id);
+            }
+            else
+            {
+                decision = await strategy.EvaluateExitAsync(trade, currentPrice.Value, opts, clockTrusted, ct);
+            }
 
             // ── Where the dynamic widening has the barriers, onto the row ──────
             //
@@ -992,6 +1069,40 @@ public sealed class TradingBotService(
             // already been closed this cycle, and on the other side it could not see
             // a position opened by an earlier strategy in this same loop. Both
             // directions are wrong, and the second one lets the limit be exceeded.
+
+            // ── H26, the BLOCK half ───────────────────────────────────────────
+            //
+            // Read from live state for the same reason as everything below it: the
+            // exit loop above may have just closed the high-volume position, and a
+            // block that outlives its own cause is worse than no block. The measured
+            // support for this half is one position and it went against — see the
+            // comment in the exit loop for the full table.
+            if (opts.SuspendOnHighVolume)
+            {
+                var hvLive = state.GetOpenTrades().FirstOrDefault(t =>
+                    string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase)
+                    && t.EntryPath == EntryPaths.HighVolume);
+
+                if (hvLive is not null
+                    && !string.Equals(strat, hvLive.Strategy, StringComparison.OrdinalIgnoreCase))
+                {
+                    log.LogInformation(
+                        "[TradingBot] {Strat} is suspended: trade {HvId} is open on {HvStrat} " +
+                        "through the high-volume waiver. No entry until it closes.",
+                        strat, hvLive.Id, hvLive.Strategy);
+
+                    await SafeRecordAsync(
+                        configRepo.RecordEntryRefusalAsync(
+                            $"HV_REGIME_BLOCK: {strat} is suspended while trade {hvLive.Id} is open " +
+                            $"on {hvLive.Strategy} through the $20M high-volume waiver. A bucket that " +
+                            "size is a 4.2x-volatility state and only the rule that detected it trades " +
+                            "in it (H26).", ct),
+                        "high-volume suspension refusal");
+
+                    continue;
+                }
+            }
+
             var stratTrades = state.GetOpenTrades()
                 .Where(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase))
                 .Where(t => string.Equals(t.Strategy, strat, StringComparison.OrdinalIgnoreCase))
