@@ -3135,3 +3135,74 @@ H25 (ratchet), H26 (high-volume suspension) and H28 all overlap now. They separa
 data by close reason — `RATCHET`, `HV_REGIME`, `LLM_EXIT` — which is the only reason three
 open windows is tolerable rather than reckless. H26 and H28 will land in the same deploy
 because H26's first attempt failed after the image pull and never restarted the stack.
+
+## H26 — first activation, 2026-09-25 11:19 UTC, and it went against the rule
+
+Recorded the day it happened, before the memory of it softens.
+
+    11:19   trade 126 opens  XVENUE_FLOW LONG via the $20M waiver
+    11:19   trade 125 (CANDLE_REVERSAL SHORT, 4 minutes old) is closed HV_REGIME at +0.105R
+    12:18   trade 126 hits its stop at -1.082R
+
+### What the cut cost
+
+Trade 125 was a SHORT cut at 11:19. Its side continued:
+
+    12:19    +1.179 R
+    13:19    +0.670 R
+    14:19    +0.863 R
+    15:00    +0.505 R
+
+It was banked at **+0.105R** and was worth between **+0.5R and +1.2R** for the next four
+hours. The cut landed within a minute of the worst moment to take it — price at 121.32 on
+its way to 118.82.
+
+### And the position it deferred to lost
+
+The premise says a >=$20M bucket is a 4.2x-volatility state and only the rule that detected
+it should trade there. On this occasion the rule that detected it took **-1.082R**, the first
+stop-out since W1 restarted. So the suspension cleared the floor for a loser and silenced a
+winner, both halves in one event:
+
+    CUT   -0.4 to -1.1 R of forgone profit   (counterfactual, unrealised)
+    HV    -1.082 R realised
+
+### What this does and does not change
+
+n=1. It does not reject H26 — the decision rule is 10 activations or 21 days and it will be
+held to that, because rejecting on the first observation is the same error as accepting on
+five. But it is now **two** observations against the BLOCK half (trade 111 before it) and the
+first against the CUT half, and the CUT half was the side the evidence had favoured.
+
+It also sharpens what the rule is claiming. It never claimed the high-volume position would
+win. It claimed the dip rule should not trade that state. Trade 125 was a SHORT — not a dip
+buy, not a knife catch — and the rule suspended it anyway, because the code keys on the
+strategy rather than the direction. That is the generalisation defended when it shipped, and
+this is the first evidence that it is the expensive half of it.
+
+**If H26 fails, read this entry first**: the candidate fix is to suspend only entries the
+premise actually covers, not every position the other strategy holds.
+
+## H28 — its first reject condition fired, and the cause was innocent
+
+At 2026-09-24 21:51:13 the bot logged:
+
+    Evaluation cycle exceeded its 00:02:00 budget and was cancelled after 10s
+
+which is H28's named infrastructure reject — any "open positions were not evaluated this
+cycle" is supposed to mean the one-hour cadence overloaded Ollama, and the response is to
+revert to two hours.
+
+**It was an OKX ticker timeout.** `Okx.TimeoutSeconds` is 10, the elapsed figure was
+10.0018s, and the sentence contradicts itself: ten seconds is not past a hundred and twenty.
+`HttpClient.Timeout` raises `TaskCanceledException`, which is an `OperationCanceledException`,
+and both price feeds excluded exactly that type from their own catch — so the timeout left
+the feed, left `EvalCycleAsync`, and reached a handler that could not tell one cancellation
+from another. It would have happened identically at the two-hour cadence.
+
+Fixed in both places: the feeds now catch their own client timeout when the caller's token is
+un-cancelled and return null, and the cycle handler checks `cycleCts.IsCancellationRequested`
+before claiming the budget was exceeded, with a differently-worded Warning otherwise that
+deliberately omits the phrase the reject condition greps for.
+
+**H28's infrastructure counter therefore stands at zero, not one.** The window continues.

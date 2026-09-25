@@ -30,6 +30,17 @@ public sealed class BinancePriceFeed(
                 $"/api/v3/ticker/price?symbol={symbol}", ct);
             return resp?.Price;
         }
+        // The client's OWN timeout, not the caller's cancellation. HttpClient.Timeout
+        // raises TaskCanceledException, which is an OperationCanceledException, so the
+        // filter below deliberately does not catch it and it used to leave this method
+        // entirely -- see the OKX feed for what that cost.
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(
+                "[Price] Binance ticker for {Symbol} timed out on the client's own deadline. " +
+                "No price this cycle.", symbol);
+            return null;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             log.LogWarning("[Price] Binance ticker for {Symbol} failed: {Err}", symbol, ex.Message);
@@ -57,6 +68,31 @@ public sealed class OkxPriceFeed(
         try
         {
             return await trading.GetLastPriceAsync(OkxSymbols.ToSwapInstId(symbol), ct);
+        }
+        // THIS IS THE ONE THAT BIT, on 2026-09-24 at 21:51:13 UTC.
+        //
+        // Okx.TimeoutSeconds is 10. When the ticker call hit it, HttpClient raised
+        // TaskCanceledException -- an OperationCanceledException -- which the filter
+        // below excludes on purpose, so it was not caught here at all. It travelled out
+        // of the price feed, out of EvalCycleAsync, and into the loop's own handler,
+        // which has no way to tell one cancellation from another and reported it as
+        // "Evaluation cycle exceeded its 00:02:00 budget and was cancelled after 10s" --
+        // a sentence that contradicts itself, since 10s is not past a 120s budget.
+        //
+        // That single line is also the first named reject condition of H28: any "open
+        // positions were not evaluated this cycle" is supposed to mean the one-hour
+        // review cadence overloaded Ollama, and the correct response is to revert to two
+        // hours. A ten-second exchange timeout would have fired it and rolled back a
+        // hypothesis for a reason that has nothing to do with it.
+        //
+        // The caller's token being un-cancelled is what separates the two: the client's
+        // own deadline leaves `ct` alone, a real shutdown or the cycle deadline does not.
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(
+                "[Price] OKX ticker for {Symbol} timed out on the client's own deadline. " +
+                "No price this cycle; the cycle itself is unaffected.", symbol);
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

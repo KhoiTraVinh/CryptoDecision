@@ -180,15 +180,47 @@ public sealed class TradingBotService(
                 }
                 catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
                 {
-                    // The cycle blew its deadline rather than the worker being shut
-                    // down. Error, not Warning: a cycle that cannot finish inside three
-                    // times its own interval means something is wrong, and open
-                    // positions went un-evaluated for that whole stretch.
-                    log.LogError(
-                        "[TradingBot] Evaluation cycle exceeded its {Budget} budget and was " +
-                        "cancelled after {Elapsed:F0}s. Open positions were not evaluated this " +
-                        "cycle; the exchange-side stops are still in force. The loop continues.",
-                        cycleBudget, (DateTime.UtcNow - cycleStarted).TotalSeconds);
+                    var elapsed = (DateTime.UtcNow - cycleStarted).TotalSeconds;
+
+                    // Which cancellation was it? This handler used to assume there was
+                    // only one kind and say so in the log, which was wrong in the way
+                    // that costs the most: it named an innocent mechanism.
+                    //
+                    // On 2026-09-24 at 21:51:13 an OKX ticker call hit its own 10-second
+                    // HttpClient timeout. That raises TaskCanceledException, an
+                    // OperationCanceledException, so it landed here and was reported as
+                    // "cycle exceeded its 00:02:00 budget and was cancelled after 10s" --
+                    // ten seconds against a budget of a hundred and twenty. The sentence
+                    // contradicted itself and still read, at a glance, as the thing H28
+                    // rejects on.
+                    //
+                    // cycleCts is only cancelled by CancelAfter(cycleBudget) or by the
+                    // stopping token, and the stopping token is excluded by the filter
+                    // above, so its state is exactly the discriminator.
+                    if (cycleCts.IsCancellationRequested)
+                    {
+                        // The real thing. Error, not Warning: a cycle that cannot finish
+                        // inside half its liveness window means something is wrong, and
+                        // open positions went un-evaluated for that whole stretch.
+                        log.LogError(
+                            "[TradingBot] Evaluation cycle exceeded its {Budget} budget and was " +
+                            "cancelled after {Elapsed:F0}s. Open positions were not evaluated this " +
+                            "cycle; the exchange-side stops are still in force. The loop continues.",
+                            cycleBudget, elapsed);
+                    }
+                    else
+                    {
+                        // Something inside cancelled itself. Warning, and deliberately
+                        // worded so it cannot be mistaken for the line above -- no
+                        // "not evaluated this cycle", because the operator and H28's
+                        // decision rule both grep for exactly that phrase.
+                        log.LogWarning(
+                            "[TradingBot] A call inside the evaluation cycle cancelled itself after " +
+                            "{Elapsed:F0}s; the {Budget} cycle deadline was NOT reached. Usually an " +
+                            "exchange or model client hitting its own timeout. This cycle is lost, " +
+                            "the next one runs normally, and it is not a cycle-budget problem.",
+                            elapsed, cycleBudget);
+                    }
                 }
                 finally
                 {
