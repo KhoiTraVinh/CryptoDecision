@@ -3313,3 +3313,103 @@ Already named when H26 shipped: suspend only what the premise covers. Both cuts 
 SHORTs, and the premise is about buying falling knives. Keying the suspension on direction, or
 on the dip-entry condition, rather than on the whole strategy would leave the premise intact
 and remove the half the evidence is against. Not applied; H26 gets its window.
+
+## H29 — XVENUE_FLOW is switched off. 2026-09-28.
+
+    UPDATE bot_config SET active_strategies = '{CANDLE_REVERSAL}',
+                          suspend_on_high_volume = FALSE WHERE id = 1;
+
+Applied to production at 2026-09-28 ~13:1x UTC with zero positions open. Verified: the
+startup surface now reads `trading: ["CANDLE_REVERSAL"]`.
+
+### The evidence, and it is the most robust thing this project has measured
+
+Lifetime, 87 closed trades since 09-08, **-4.157R / -$2.4943**. It decomposes exactly:
+
+    XVENUE_FLOW HIGH_VOLUME     13 trades    -2.769 R   mean -0.213
+    XVENUE_FLOW RATIO           19 trades    -1.736 R   mean -0.091
+    CANDLE_REVERSAL             45 trades    -0.007 R   mean -0.0002
+    XVENUE_FLOW (untagged)      10 trades    +0.355 R   mean +0.036
+                                             --------
+                                             -4.157 R
+
+**The account's entire lifetime loss is the two tagged XVENUE paths.**
+
+It is not a few disasters:
+
+    XVENUE tagged paths   32 trades   -4.505 R   mean -0.141   11 wins (34 %)
+      less the worst trade            -3.423 R
+      less the worst two              -2.562 R
+
+By week, **RATIO is negative in 4 of 4 weeks and HIGH_VOLUME in 2 of 2.** Not one positive
+week on either path. Split at 09-19, XVENUE is -1.339R over 18 in the first half and -3.166R
+over 14 in the second — negative in both, and getting worse.
+
+### What this does NOT establish, said plainly
+
+CANDLE_REVERSAL is not a proven edge. It is -0.007R over 45 trades, which reads as flat, but:
+
+    less its best trade     -0.771 R
+    less its best two       -1.470 R
+    first half (n=17)       +0.899 R   mean +0.053
+    second half (n=28)      -0.906 R   mean -0.032
+
+Its flatness is carried by two trades and **it changes sign between the time halves**. The
+"+0.899R over the last 19" figure quoted earlier in this session does not survive the split.
+
+**So H29 stops a bleed. It does not create an edge.** What remains is a rule indistinguishable
+from zero.
+
+### H26 is suspended, not judged
+
+`suspend_on_high_volume` is FALSE because no `HIGH_VOLUME` position can exist any more, which
+makes the rule unreachable rather than wrong. Its window closes unresolved at 2 activations.
+Its own reject test was failing (+0.017R cut against +0.055R uncut) and the structural
+objection stands on the record: it suspended the rule that made money for the path that lost
+it. If XVENUE ever returns, H26 returns as an open question with the direction-keyed fix
+already written up.
+
+### Restore condition, fixed in advance — and why this paragraph exists
+
+**H16 switched the ratio path off on 2026-09-18 and H18 switched it back on the next day by
+operator override, with H16's own restore condition measured and NOT met.** That is the
+failure mode this section is written against.
+
+XVENUE_FLOW returns only when **all** of these hold, measured and written down:
+
+1. A replay over at least **60 XVENUE signals** — not trades — with the deployed exit set,
+   showing mean R **above 0** and above CANDLE_REVERSAL's over the same period.
+2. That replay validated against the real trades it overlaps, per the rule this repo adopted
+   after the backtester was deleted.
+3. The result positive in **both halves** of its own sample, which is the check XVENUE fails
+   today in every form.
+
+An override is permitted — it is the operator's account — but it must be recorded here as an
+override, with the unmet condition named, exactly as H18 should have been.
+
+### Decision rule for H29 itself
+
+Judge at **30 closed CANDLE_REVERSAL trades** or **21 days**.
+
+- **Reject** (i.e. XVENUE's absence was not the problem) if mean R over that window is still
+  below 0. That outcome means the remaining rule has no edge either, and the honest next step
+  is to stop adding mechanisms to it.
+- **Keep** if mean R is above 0 **and** positive in both halves of the window.
+- Note in advance: a positive result here is **not** evidence that CANDLE_REVERSAL works,
+  only that it is no longer being dragged. Separating those two requires the window above.
+
+### On live trading
+
+Recorded because the operator has stated an intention to switch `paper_mode` off at the end
+of the month.
+
+Nothing in 87 trades has demonstrated positive expectancy. XVENUE is negative on every cut;
+CANDLE is zero, carried by two trades, and sign-flipping across halves. Live trading would
+also be **worse** than these figures, not equal to them: paper fills already use maker-in /
+taker-out on the live quote, but funding is not charged in the simulation, and `FATAL IN A
+TREND` is still unresolved — no trend filter has ever been proven, and CANDLE_REVERSAL buys
+dips by construction.
+
+What would have to be true first: a **positive mean R with a confidence interval excluding
+zero, over a window that was not used to choose the configuration.** At ~4 trades a day that
+is roughly 100 trades, about 25 days from the last configuration change — which is today.
