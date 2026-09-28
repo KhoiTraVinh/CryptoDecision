@@ -3206,3 +3206,110 @@ before claiming the budget was exceeded, with a differently-worded Warning other
 deliberately omits the phrase the reject condition greps for.
 
 **H28's infrastructure counter therefore stands at zero, not one.** The window continues.
+
+## H28 — RESULT: KEPT. Judged 2026-09-28 at 24 closed trades.
+
+The rule said judge at 15 closed trades or 14 days. Twenty-four closed between the deploy of
+`b80cad8` on 2026-09-24 16:22 UTC and 2026-09-28 12:46 UTC, so the count term bound first.
+Every condition is taken in the order it was written.
+
+### 1. Infrastructure, checked before any P&L — PASS
+
+    "open positions were not evaluated this cycle"     0 in 72 h
+    exit reviews returning Unavailable                 0
+    container restarts                                 0
+    Error / Fatal across bot, ingestion, processor     0 / 0
+
+The one occurrence that looked like this condition, on 09-24 at 21:51, was an OKX ticker
+timeout misreported as a blown cycle budget. Fixed in `096d6dd`, and it was never this
+condition.
+
+Noted honestly: since that fix deployed, zero exchange timeouts have occurred, so the new
+discrimination has not been exercised. It is a correct-looking change, not a verified one.
+
+### 2. Mean R across all closed trades — PASS
+
+    mean -0.067 R over 24 closed, against a reject line of -0.10 R
+
+### 3. Damage migrating into SL — PASS
+
+    1 stop-out, against a reject line of more than 3
+
+### What the window looked like
+
+    RATCHET     12   +1.702 R   mean +0.142   12 wins / 12
+    LLM_EXIT     9   -2.269 R   mean -0.252    1 win  / 9
+    HV_REGIME    2   +0.034 R   mean +0.017    1 win  / 2
+    SL           1   -1.082 R   mean -1.082    0 wins / 1
+                ------------------------------------------
+                24   -1.615 R   mean -0.067   14 wins
+
+    09-25  12 trades  -2.063 R      09-27   5 trades  +0.553 R
+    09-26   4 trades  +0.267 R      09-28   3 trades  -0.372 R
+
+The whole loss sits on 09-25; the three days after it are net positive.
+
+### The finding H28 did not set out to make
+
+The exit set has partitioned itself, and cleanly:
+
+    reached 0.25R of favourable excursion      13 of 24   -> 12 of them exit RATCHET
+    never did                                  11 of 24   -> LLM_EXIT / SL / HV_REGIME
+
+    RATCHET    average peak 0.366 R    mean outcome +0.142 R
+    LLM_EXIT   average peak 0.161 R    mean outcome -0.252 R    1 win in 9
+
+The ratchet now takes essentially every position that goes into profit, and the reviewer is
+left with a population that never did. That is a harder question than the one it was measured
+on, and 1 win in 9 should be read that way rather than as the model getting worse. It also
+means the cadence H28 bought is being spent on the losing residual: 14 reviews in 72 hours,
+because the ratchet closes most positions before the first hour is up.
+
+**This is the case for the 0.25R-below-peak rule with no arm threshold, measured and declined
+on 2026-09-24.** The evidence for it is stronger now than when it was declined. It is still
+not taken, for the reason recorded then — H8's 68 signals against this window's 24 — and
+because H25 is two armed trades short of its own judgment point, which changing the ratchet
+would void. If it is reopened it should be H29, after H25 closes.
+
+## H26 — interim reading at 2 activations. Its own reject test currently FAILS.
+
+Not a verdict. The rule says judge at 10 activations or 21 days; this is 2 activations on day
+4, and at that rate the 21-day term is what will bind. Recorded now so the numbers do not have
+to be rebuilt later.
+
+### The test as written
+
+> Reject if the positions cut under HV_REGIME show a mean R below the mean R of
+> CANDLE_REVERSAL positions closed in the same window that were not cut.
+
+    cut by H26          2 trades   mean +0.017 R
+    CANDLE not cut     12 trades   mean +0.055 R
+
+**+0.017 < +0.055. The condition is met.** On two observations, which is why it is not acted on.
+
+    125   CANDLE SHORT   09-25 11:15 -> 11:19    4 min held   +0.105 R
+    138   CANDLE SHORT   09-27 08:01 -> 08:04    3 min held   -0.071 R
+
+Both were SHORTs, killed within four minutes of opening. Neither was the knife-catch the
+premise is about.
+
+### The structural argument, which does not depend on the activation count
+
+    CANDLE_REVERSAL — what H26 suspends        14 trades   mean +0.050 R   total +0.696 R
+    XVENUE HIGH_VOLUME — what it defers to      5 trades   mean -0.308 R   total -1.542 R
+
+H26 suspends the only rule that made money in this window in favour of the worst-performing
+entry path in it. That is a property of the design, not of the sample size.
+
+**The premise is still intact** — a >=$20M bucket really is a 4.2x-volatility state, measured
+on 63 buckets against 2,966, and nothing here touches that. What the window disputes is the
+step after it: that the rule which DETECTS the state has thereby earned the right to be the
+only one trading in it. Detecting a regime and being able to trade it are different claims,
+and only the first was ever measured.
+
+### The fix held in reserve
+
+Already named when H26 shipped: suspend only what the premise covers. Both cuts so far were
+SHORTs, and the premise is about buying falling knives. Keying the suspension on direction, or
+on the dip-entry condition, rather than on the whole strategy would leave the premise intact
+and remove the half the evidence is against. Not applied; H26 gets its window.
