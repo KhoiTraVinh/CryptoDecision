@@ -108,40 +108,7 @@ public enum FlowEntryMode
 ///
 /// The defaults below are starting points, not recommendations.
 /// </summary>
-/// <param name="MaxDispersionBps">
-/// Ceiling on cross-venue VWAP dispersion. Wide dispersion means thin books or a
-/// move already in progress — entering into it is paying for information the
-/// market has already priced. Set to 0 to disable the check.
-///
-/// **Disabled (0) on 2026-08-28 by operator decision — see H3.** What is known about
-/// it, so that turning it back on is a decision rather than a guess:
-///
-///   • It did bind, but rarely: one `VENUE_DISPERSION_TOO_WIDE` abstention in the
-///     24 hours audited, against 23 other abstentions for other reasons.
-///   • It carries no visible information about outcomes in the data that exists. On
-///     the fifteen signals with known results the two winners sat at 4.3 and 7.5 bps
-///     while losers spanned 2.2 to 13.2 bps.
-///   • Every actionable signal on record was between 2.2 and 13.2 bps, so at 25 the
-///     ceiling sat at roughly double the observed maximum.
-///
-/// Disabling it also removes the entry gate's most-used excuse as a side effect:
-/// AiEntryGate permits the "late entry" ground only at 80% of the ceiling or above,
-/// and with no ceiling the brief states plainly that the ground is unavailable. The
-/// gate refused eight entries in one day on that ground at 2.8-13.2 bps.
-/// </param>
 public sealed record FlowSignalOptions(
-    // 0 disables the check, and it IS 0 — so nothing reads this as a ceiling anywhere.
-    //
-    // NO SCORER CONSUMES IT. ScoreFlowRatio and ScoreReversal both leave
-    // FlowVerdict.DispersionBps at 0, and the dispersion check the two deleted modes
-    // performed went with them. The value survives only as CONTEXT in the gate brief,
-    // where it is explicitly labelled "not a ground" — see AiEntryGate. It is left in
-    // place rather than deleted because removing it would edit the gate's prompt while
-    // H17 is being measured on that prompt; remove it once H17 closes.
-    //
-    // The comment here used to say "the backtester takes this default rather than a CLI
-    // flag". There has been no backtester since 2026-09-11.
-    double  MaxDispersionBps              = 0.0,
 
     /// <summary>
     /// Which rule decides an entry. See <see cref="FlowEntryMode"/>.

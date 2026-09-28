@@ -47,7 +47,6 @@ public sealed record EntryCandidate(
     int           OpenSameSide        = 0,
     decimal       CapitalUsd          = 0m,
     decimal       DailyLossLimitPct   = 0m,
-    double        MaxDispersionBps    = 0.0,
     int           MaxOpenPositions    = 0,
 
     /// <summary>
@@ -375,9 +374,6 @@ public sealed class AiEntryGate(
 
         // Each of these is one of the four grounds for refusing, rendered so the
         // condition attached to that ground can be evaluated by reading one line.
-        var dispersionShare = c.MaxDispersionBps > 0
-            ? $"{flow.DispersionBps / c.MaxDispersionBps:P0} of the {c.MaxDispersionBps:F1} bps ceiling"
-            : "no ceiling configured";
 
         var e = c.Evidence;
 
@@ -484,7 +480,6 @@ public sealed class AiEntryGate(
                                     : "nothing open on this side — 'concentration' is NOT AVAILABLE")}
 
             CONTEXT, NOT GROUNDS — already checked in code, never a reason to skip
-              dispersion        {flow.DispersionBps,6:F1} bps   — {dispersionShare}
               today's P&L       ${c.TodayPnlUsd,6:F2}   — {lossShare}
               open, this rule   {c.OpenPositions,6}       — limit {c.MaxOpenPositions}
 

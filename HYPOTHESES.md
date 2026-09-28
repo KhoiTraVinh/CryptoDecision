@@ -3413,3 +3413,55 @@ dips by construction.
 What would have to be true first: a **positive mean R with a confidence interval excluding
 zero, over a window that was not used to choose the configuration.** At ~4 trades a day that
 is roughly 100 trades, about 25 days from the last configuration change — which is today.
+
+## Removed 2026-09-28 — what went, and the numbers that outlive it
+
+Deleted after H29 switched XVENUE_FLOW off. Each entry keeps the measurement, because the
+measurement is the reason not to rebuild the thing the same way.
+
+### H26, the high-volume suspension — code and `bot_config.suspend_on_high_volume`
+
+Unreachable rather than merely disabled: with XVENUE_FLOW off no `HIGH_VOLUME` position can
+exist, so the branch could never be taken. Removed from the exit loop, the entry loop,
+`BotOptions` and the config read; the column goes in sql/043.
+
+    cut by the rule          2 positions    mean +0.017 R
+    CANDLE positions left alone  12         mean +0.055 R
+    it suspended  CANDLE_REVERSAL   +0.696 R over 14
+    in favour of  XVENUE HIGH_VOLUME  -1.542 R over 5
+
+**The premise is NOT withdrawn.** A >=$20M bucket is a 4.2x-volatility state — median 15m
+range 1.590% against 0.377%, on 63 buckets against 2,966 — and that measurement stands. What
+failed is the step from *detecting* that state to *being the only rule allowed to trade it*.
+If this is ever rebuilt, key it on the dip-entry condition or on direction, not on the whole
+strategy: both positions it cut were SHORTs killed inside four minutes, and neither was the
+knife-catch the premise describes.
+
+### `MaxDispersionBps` — the dispersion ceiling, and its line in the gate brief
+
+Zero since 2026-08-28 (H3) and never read as a ceiling by any scorer since the two modes that
+used it were deleted. It survived only to render one CONTEXT line, and the code carried its
+own removal instruction: *"remove it once H17 closes."* H17 is closed. The line it produced
+was two dead facts side by side — `dispersion 0.0 bps — no ceiling configured` — on a rule
+that does not measure dispersion at all.
+
+### `btc_probe_1m` — a probe table nothing reads
+
+5,685 rows, 656 kB, zero references in any `.cs`, `.sh` or compose file. A one-off probe whose
+question is settled.
+
+### `GATE_FEEDBACK.md` — 219 lines
+
+Its own header said section 1 had been "superseded twice over", sections 3 and 4 were marked
+*design only — not implemented*, section 5's proposal landed as H17 and was then replaced by
+H19, and nothing in the repository referenced the file. HYPOTHESES.md is the governing record.
+
+### Deliberately KEPT, and why
+
+- **`bot_trades_archive`** — 54 rows of real trade history, 200 kB, no code references. The
+  absence of references is what makes it safe to keep, not a reason to drop it: nothing can
+  break, and the rows are the only copy of what those trades did.
+- **The XVENUE_FLOW machinery in C#.** H29 gives it a written restore condition. Deleting the
+  code turns that condition from a one-line `UPDATE` into a rewrite, which is how a reversible
+  decision quietly becomes an irreversible one. It is disabled by configuration and costs
+  nothing at runtime.
