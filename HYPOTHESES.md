@@ -3465,3 +3465,79 @@ H19, and nothing in the repository referenced the file. HYPOTHESES.md is the gov
   code turns that condition from a one-line `UPDATE` into a rewrite, which is how a reversible
   decision quietly becomes an irreversible one. It is disabled by configuration and costs
   nothing at runtime.
+
+## H30 — The AI entry gate is switched off. 2026-09-29.
+
+    UPDATE bot_config SET require_ai_gate = FALSE WHERE id = 1;
+
+Live config change, no deploy. `TradingBotService` returns `GateDecision.Ungated()` before
+any model call, so entries are recorded `NOT_GATED` and no Ollama call is made for them.
+Verified on production: zero `[Gate] Brief for` and zero `[Gate] Model answered` lines after
+the change.
+
+### The measurement
+
+Every gated signal on record, against the 12-hour label:
+
+    APPROVED            57 signals    mean labelled R   -0.047
+    APPROVED_DEGRADED   35 signals    mean labelled R   +0.030
+    REFUSED             47 signals    mean labelled R   +0.392
+
+    of the 47 refused:   8 WIN   9 LOSS   30 TIMEOUT
+
+**The gate has been refusing the better signals and approving the worse ones.** This is the
+second time it has measured that way; the first, on 20 labelled refusals, gave +0.705R.
+
+### The caveat that bounds it, and it is a large one
+
+**The labels are 12-hour fixed barriers, not the deployed exit.** 30 of the 47 refusals ended
+TIMEOUT, meaning they touched neither barrier inside twelve hours — under the exit set that
+actually runs (ratchet at 0.25R/40%, reviewer at one hour) those positions would have closed
+far earlier and at different prices. This repository has had two conclusions reversed by
+exactly that substitution.
+
+So **+0.392R is a direction, not a magnitude.** What is defensible is the sign and its
+consistency across 47 observations and two separate measurements; what is not defensible is
+treating it as the R this change will earn.
+
+### What this does NOT switch off
+
+`AiExitReviewer` is untouched and still runs at the one-hour cadence — `require_ai_gate`
+governs the entry gate only. The model still decides early exits, which is where it has the
+worse record (1 win in 12, mean -0.256R) but also the harder job, since the ratchet takes
+every position that goes into profit and leaves the reviewer only those that never did.
+
+### The thing being given up, stated plainly
+
+The gate was the reason this system exists in the shape it does: **AI for discipline, not
+prediction**, veto-only, never able to open a position of its own. Switching it off removes
+the only mechanism that could refuse an entry on judgement rather than on arithmetic. The
+remaining refusals are all mechanical — per-side limit, cooldown, daily cap, loss breaker.
+
+That is a real loss of the original design intent, and it is being accepted because the
+measurement says the mechanism was costing money rather than saving it. If the numbers turn,
+this should go back on.
+
+### Decision rule, fixed in advance
+
+Judge at **30 closed trades** or **21 days**, alongside H29 (they share the window and both
+are CANDLE_REVERSAL-only, so they cannot be separated — accepted deliberately, and noted).
+
+- **Restore the gate** if mean R over the window is below **-0.10R**, i.e. worse than the
+  window that had the gate running.
+- **Keep it off** if mean R is above 0 and positive in both halves.
+- **Ambiguous** between those: keep it off and extend, because the null result still means
+  the gate was not paying for its 45-50 seconds per signal.
+- Watch separately: signals now recorded `NOT_GATED` are still labelled, so the comparison
+  "what the gate would have refused" can be rebuilt later from `signal_outcomes` without
+  turning it back on.
+
+### Side effect worth having
+
+Each gate call cost 45-50 seconds of a 2-vCPU host with Ollama at `NUM_PARALLEL=1`, inside a
+120-second cycle budget. Removing it frees that entirely for the exit reviewer, which is the
+one H28 shortened to an hour and which now has the whole budget to itself.
+
+### Result
+
+_Open._
