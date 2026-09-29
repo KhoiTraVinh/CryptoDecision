@@ -24,53 +24,11 @@ public sealed class TradingBotService(
     IOrderEngine          orderEngine,
     BotRepository         repo,
     BotConfigRepository   configRepo,
-    IEntryGate            gate,
     SignalOutcomeRepository signals,
-    // Only for the model name stamped onto each signal row: a verdict is not
-    // comparable across models, and "the gate got worse" after a model change has to
-    // be answerable from the table rather than from memory.
-    AgentOptions          gateOptions,
-    // Read for its thresholds, not to score anything: the gate's brief states each
-    // checked value against the limit the scorer applied to it.
-    FlowStrategyOptions   flowOptions,
-    // For the per-order notional ceiling only. The brief quotes the size the exchange
-    // will actually be asked for, and that ceiling is the last thing to shrink it.
+    // For the per-order notional ceiling, applied when the order is sized.
     OkxOptions            okxOptions,
     ILogger<TradingBotService> log) : BackgroundService
 {
-    /// <summary>
-    /// Declines the gate has already given, keyed by STRATEGY, symbol, side and the
-    /// 15-minute bucket the verdict belongs to.
-    ///
-    /// The evaluation loop runs every 30 seconds but flow bars only change on the
-    /// quarter hour, so one signal was being handed to the model up to thirty
-    /// times. Measured: 55 gate calls carrying six distinct z-scores, and the
-    /// same z=-2.62 candidate drew "1.73:1" and "1.74:1" a minute apart. That is
-    /// not only ~9x of wasted inference — it makes entry timing a lottery, since
-    /// a model that declines nine times and approves on the tenth enters at
-    /// whatever moment it happened to change its mind.
-    ///
-    /// Only declines ON THE MERITS are cached. An approval leads straight to an order,
-    /// and re-serving a stale approval from a dictionary is the one direction where
-    /// being wrong costs money rather than an opportunity. A gate failure is not
-    /// cached either, for the opposite reason: it is not a verdict about the evidence,
-    /// so the argument for the cache does not apply to it, and caching one turned a
-    /// momentary Ollama hiccup into a fifteen-minute blackout.
-    ///
-    /// THE STRATEGY IS PART OF THE KEY, and was not until 2026-09-12. Two strategies now
-    /// run in parallel on the same symbol and can propose the same side in the same
-    /// bucket on completely different evidence — XVENUE_FLOW on order flow,
-    /// CANDLE_REVERSAL on price. Without the strategy in the key, a decline earned by one
-    /// was replayed to the other and the gate never saw the second candidate at all, with
-    /// a cached Reason citing flow thresholds at a rule that does not read flow.
-    ///
-    /// The justification for caching is "the evidence cannot change until the next bar
-    /// closes". That is true within one strategy and false across two, because it is
-    /// different evidence — exactly the kind of premise that stops holding quietly when
-    /// something new is registered beside it.
-    /// </summary>
-    private readonly Dictionary<(string Strategy, string Symbol, string Side, DateTime Bucket), GateDecision>
-        _declinedThisBucket = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -455,215 +413,6 @@ public sealed class TradingBotService(
             "start automatically.");
 
         return false;
-    }
-
-    /// <summary>
-    /// Ask the gate whether a proposed entry is taken.
-    ///
-    /// Returns an approval without consulting the gate in exactly two cases, both of
-    /// which the operator has to have chosen explicitly:
-    ///
-    ///   • Gating is switched off (<c>require_ai_gate = false</c>), recorded as
-    ///     NOT_GATED so the row says the trade was never reviewed.
-    ///   • The gate is unreachable and <c>allow_entry_without_gate = true</c>,
-    ///     recorded as APPROVED_DEGRADED.
-    ///
-    /// The default for both settings is the safe one: gating on, no fallback. An
-    /// unreachable gate then stops entries rather than silently reverting to ungated
-    /// trading, because a deployment where the gate has been dead for a week and
-    /// nothing looks different is the failure this whole arrangement is meant to
-    /// avoid.
-    /// </summary>
-    private async Task<GateDecision> ReviewEntryAsync(
-        BotOptions opts, string strategyName, EntryDecision decision,
-        decimal price, int openPositions, CancellationToken ct)
-    {
-        if (!opts.RequireAiGate) return GateDecision.Ungated();
-
-        // A candidate with no evidence to show cannot be meaningfully reviewed, and
-        // handing the model an empty brief invites it to approve on nothing. Only the
-        // flow strategy produces a FlowVerdict; anything else is treated as ungated
-        // rather than pretend-reviewed, and the row says so.
-        if (decision.Flow is not { } flow || decision.Geometry is not { } geometry)
-        {
-            log.LogDebug(
-                "[Gate] {Strategy} produced no reviewable evidence; recording the entry as NOT_GATED.",
-                strategyName);
-            return GateDecision.Ungated();
-        }
-
-        decimal todayPnl;
-        try
-        {
-            todayPnl = await repo.GetTodayPnlAsync(
-                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE", ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // The day's P&L is context for the gate's judgement, not a precondition
-            // for it. Zero is the neutral value and the omission is logged, rather
-            // than refusing an otherwise good entry over a failed read.
-            log.LogWarning("[Gate] Could not read today's P&L: {Err}. Reviewing without it.",
-                ex.Message);
-            todayPnl = 0m;
-        }
-
-        // Sized the way the ORDER will be sized, not the way orders used to be.
-        //
-        // This called PositionSizer.Resolve — the percentage-of-capital rule — while
-        // EntrySizing has used ResolveByRisk on every entry that carries a stop since
-        // risk-based sizing shipped. At capital $30, risk 0.005 and a 2.00% stop the real
-        // order is $7.50 and the brief said $3.00: the gate was judging the
-        // proportionality of a trade two and a half times smaller than the one it was
-        // approving. It also fed geometry.AtrPctUsed — a 15-minute ATR — into a parameter
-        // PositionSizer calibrates against DAILY volatility, which is the two-readings-of-
-        // one-thing interaction ResolveByRisk exists to remove.
-        //
-        // EntrySizing consolidated the paper and live copies of this arithmetic and missed
-        // this one, because it is not placing an order — it is describing one.
-        var sizing = PositionSizer.ResolveByRisk(
-            opts.CapitalUsd, opts.RiskPctPerTrade, geometry.StopPct,
-            confidence: decision.Confidence,
-            useAiSizing: opts.UseAiSizing);
-
-        // The per-order ceiling only ever shrinks the order, so leaving it out would make
-        // the brief overstate rather than understate — but it is known here and there is
-        // no reason to hand the model a number the exchange will not be asked for.
-        var briefNotional = okxOptions.MaxOrderNotionalUsd > 0m
-            ? Math.Min(sizing.NotionalUsd, okxOptions.MaxOrderNotionalUsd)
-            : sizing.NotionalUsd;
-
-        // ── What this account's own history says about this exact candidate ──
-        //
-        // The gate approved 45 of 45 and refused none, because all four of its grounds
-        // were unreachable: dispersion has no ceiling configured, neither surviving rule
-        // scores venues, the daily-loss ground needs $2.25 against a worst day of $0.65,
-        // and the concentration ground needs two open positions while the per-side limit
-        // is checked before the gate is called. The model reported exactly that on every
-        // call — "is not subject to any grounds for skipping" — so the defect was the
-        // ground list, not the model.
-        //
-        // Failure is not allowed to make the gate stricter: GateEvidence.Unknown marks
-        // every ground unavailable, so a database hiccup leaves the gate exactly as
-        // permissive as it was rather than turning into a refusal.
-        GateEvidence evidence;
-        try
-        {
-            evidence = await repo.GetGateEvidenceAsync(
-                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE",
-                strategyName, decision.Side, decision.Flow?.EntryPath, ct: ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log.LogWarning("[Gate] Could not read the account's own record: {Err}. " +
-                           "Reviewing without it, which leaves every ground unavailable.", ex.Message);
-            evidence = GateEvidence.Unknown;
-        }
-
-        // The ledger is fetched separately and failure is swallowed the same way: the gate
-        // must be no stricter when a research query hiccups than when it succeeds.
-        IReadOnlyList<RecentTrade> recentTrades = [];
-        try
-        {
-            recentTrades = await repo.GetRecentTradesForRuleAsync(
-                opts.Symbol, opts.PaperMode ? "PAPER" : "LIVE", strategyName, ct: ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log.LogWarning("[Gate] Could not read this rule's recent trades: {Err}. " +
-                           "Reviewing without the ledger.", ex.Message);
-        }
-
-        // Counted across EVERY strategy, which is the number no limit in this loop
-        // holds. max_open_per_side is scoped to the proposing strategy, so
-        // CANDLE_REVERSAL and XVENUE_FLOW can each open a LONG on the same instrument
-        // and both per-side checks pass. That is the concentration question worth
-        // putting to the gate, and the old brief asked a different one that could never
-        // be true.
-        var openSameSide = state.GetOpenTrades()
-            .Count(t => string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase)
-                     && string.Equals(t.Side,   decision.Side, StringComparison.OrdinalIgnoreCase));
-
-        var candidate = new EntryCandidate(
-            Symbol:        opts.Symbol,
-            Side:          decision.Side,
-            Price:         price,
-            Flow:          flow,
-            Geometry:      geometry,
-            NotionalUsd:   briefNotional,
-            OpenPositions: openPositions,
-            TodayPnlUsd:   todayPnl,
-            Evidence:      evidence,
-            Strategy:      strategyName,
-            OpenSameSide:  openSameSide,
-            RecentTrades:  recentTrades,
-
-            // The four thresholds the gate is allowed to refuse against, carried in so
-            // the brief can state each value next to the limit it was judged by. The
-            // gate refused eight entries in one day for "wide dispersion" at 2.8-13.2
-            // bps while the scorer's ceiling — already enforced, so nothing above it
-            // can reach the gate — is 25 bps. A number handed over without its scale
-            // is an invitation to invent one.
-            CapitalUsd:        opts.CapitalUsd,
-            DailyLossLimitPct: opts.DailyLossLimitPct,
-            MaxOpenPositions:  opts.MaxOpenTradesPerStrategy);
-
-        // One verdict per side per 15-minute bucket. The evidence cannot change
-        // until the next bar closes, so asking again inside the same bucket is
-        // asking an identical question and accepting a different answer.
-        // Same helper the signal row is bucketed with, not a second copy of the
-        // arithmetic. There *were* two identical private implementations, and the
-        // comment in SafeSignalAsync already claimed they were one — which is the
-        // shape of a drift nobody would notice until the gate cache and the signal
-        // table disagreed about which bucket a decision belonged to.
-        (string Strategy, string Symbol, string Side, DateTime Bucket) key =
-            (strategyName, opts.Symbol, decision.Side, SignalOutcomeRepository.BucketOf(DateTime.UtcNow));
-
-        if (_declinedThisBucket.TryGetValue(key, out var cached))
-        {
-            log.LogDebug(
-                "[Gate] Already declined {Strat} {Side} {Symbol} for the {Bucket:HH:mm} bucket: {Reason}",
-                strategyName, decision.Side, opts.Symbol, key.Bucket, cached.Reason);
-            return cached;
-        }
-
-        var verdict = await gate.ReviewAsync(candidate, ct);
-
-        // Only a refusal ON THE MERITS is cached. A failure is not a verdict, and
-        // caching one turned a single Ollama hiccup into a fifteen-minute blackout:
-        // the bucket was marked declined, every later cycle in that bucket served the
-        // cached failure without retrying, and the gate could be healthy again within
-        // seconds with nothing to notice it. The cache exists because the evidence
-        // cannot change inside a bucket — that argument applies to a judgement about
-        // the evidence, and not at all to the model having been unreachable.
-        if (!verdict.Approved && !verdict.Unavailable)
-        {
-            // Bounded by dropping everything older than the current bucket. The
-            // loop runs for weeks, so an unpruned dictionary keyed on a timestamp
-            // is a slow leak rather than a cache.
-            foreach (var stale in _declinedThisBucket.Keys.Where(k => k.Bucket < key.Bucket).ToList())
-                _declinedThisBucket.Remove(stale);
-
-            _declinedThisBucket[key] = verdict;
-        }
-
-        if (verdict.Approved || !opts.AllowEntryWithoutGate) return verdict;
-
-        // The gate having an opinion and the gate being absent are different facts, and
-        // only the second one may be overridden. That distinction now travels on the
-        // decision as GateDecision.Unavailable rather than being recovered by matching
-        // the first two words of the reason string — which silently missed four of the
-        // six failure paths, including the empty answer that actually occurred.
-        if (verdict.Unavailable)
-        {
-            log.LogWarning(
-                "[Gate] {Reason} allow_entry_without_gate is set, so this entry proceeds " +
-                "unreviewed and is recorded as APPROVED_DEGRADED.", verdict.Reason);
-
-            return GateDecision.Degraded(verdict.Reason);
-        }
-
-        return verdict;
     }
 
     private async Task EvalCycleAsync(BotOptions opts, CancellationToken ct)
@@ -1166,54 +915,9 @@ public sealed class TradingBotService(
                             }
                         }
 
-                        // ── The gate has the only veto on entry ────────────────
-                        //
-                        // Everything about the trade is already fixed: direction from
-                        // cross-venue flow consensus, stop and target from measured
-                        // volatility, size from the position sizer. The gate is asked
-                        // one question about a finished proposal, and it can only ever
-                        // answer no.
-                        //
-                        // That asymmetry is the safety property. Every failure mode —
-                        // Ollama down, timed out, unparseable, ambiguous — resolves to
-                        // "no entry", which costs an opportunity and never a position.
-                        // The arrangement this replaces blended the model's output into
-                        // a composite score, where a wrong answer moved real money in
-                        // the wrong direction.
-                        var gate = await ReviewEntryAsync(
-                            opts, strat, decision, currentPrice.Value, stratTrades.Count, ct);
-
-                        if (signalId is { } refusedId)
-                            await SafeRecordAsync(
-                                signals.StampGateAsync(
-                                    refusedId, gate.Verdict, gate.Reason, gateOptions.Model,
-                                    gate.LatencyMs, ct),
-                                "gate verdict on the signal row");
-
-                        if (!gate.Approved)
-                        {
-                            log.LogInformation(
-                                "[TradingBot] {Strat} {Side} was proposed and the gate declined it: {Reason}",
-                                strat, decision.Side, gate.Reason);
-
-                            // Persisted, because a declined entry is the outcome an
-                            // operator is least able to see. A bot that refused every
-                            // entry for hours looked identical to one waiting for a
-                            // signal, and the only trace was in a container log that
-                            // did not survive the container.
-                            await SafeRecordAsync(
-                                configRepo.RecordEntryRefusalAsync(
-                                    $"gate declined {strat} {decision.Side}: {gate.Reason}", ct),
-                                "gate refusal");
-
-                            // No cooldown stamp: nothing was opened, so nothing should
-                            // pace the next attempt.
-                            continue;
-                        }
-
-                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0} gate={Gate}{Rationale}",
+                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0}{Rationale}",
                             strat, decision.Side, stratTrades.Count + 1, opts.MaxOpenTradesPerStrategy, opts.Symbol,
-                            decision.Confidence, gate.Verdict,
+                            decision.Confidence,
                             decision.Rationale != null ? $" [{decision.Rationale}]" : "");
 
                         try
@@ -1294,12 +998,10 @@ public sealed class TradingBotService(
                                 {
                                     await repo.RecordEntryGeometryAsync(
                                         trade.Id, geometry.StopPrice, geometry.TargetPrice,
-                                        (decimal)geometry.AtrPctUsed, gate.Verdict, gate.Reason, ct);
+                                        (decimal)geometry.AtrPctUsed, ct);
 
                                     trade.StopPrice   = geometry.StopPrice;
                                     trade.TargetPrice = geometry.TargetPrice;
-                                    trade.GateVerdict = gate.Verdict;
-                                    trade.GateReason  = gate.Reason;
                                 }
                                 catch (Exception ex) when (ex is not OperationCanceledException)
                                 {

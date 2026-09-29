@@ -385,47 +385,6 @@ public sealed record BotOptions
     /// <summary>Enable AI-based position sizing: higher confidence = larger position.</summary>
     public bool    UseAiSizing         { get; set; } = false;
 
-    // ── Entry gate ──
-
-    /// <summary>
-    /// Require the AI gate to approve before any entry is placed.
-    ///
-    /// Defaults to true, unlike every other AI switch above, and the asymmetry is the
-    /// reason. The others add the model's opinion to a decision that happens anyway,
-    /// so off is the conservative default. This one can only ever *prevent* an entry,
-    /// so on is the conservative default — and it is the switch that makes the
-    /// discipline real: no position is opened that the gate did not approve, while
-    /// sizing, stops, exits and circuit breakers stay entirely deterministic and out
-    /// of the model's reach.
-    /// </summary>
-    public bool    RequireAiGate          { get; set; } = true;
-
-    /// <summary>
-    /// Whether an unreachable gate falls back to the deterministic signal alone.
-    ///
-    /// TRUE, because that is what production runs — and it is the one default in this
-    /// record that is worse than the value it replaces. The argument for false is
-    /// unchanged and still correct: a gate that cannot be reached should stop entries
-    /// rather than silently revert to ungated trading, because a deployment where the
-    /// gate has been dead for a week and nothing looks different is the exact shape of
-    /// every expensive bug in this codebase so far.
-    ///
-    /// What it costs, stated plainly: with this on, an unreachable, timed-out, empty or
-    /// unparseable gate no longer blocks the entry. The trade is placed and the row
-    /// records APPROVED_DEGRADED, so the fact is queryable rather than invisible —
-    /// that is the whole reason GateDecision.Unavailable exists as a field. A refusal
-    /// ON THE MERITS is still never overridable.
-    ///
-    /// The reading that makes this defensible is that the gate has approved 10 of 10
-    /// entries under the deployed rule and has never once refused on the merits, so
-    /// what this flag actually overrides is a veto that has never been exercised.
-    /// The reading that does not is that this was switched on while the gate was
-    /// failing, and the failure is what wanted investigating. Set it false in
-    /// bot_config to restore the conservative behaviour; nothing in code needs to
-    /// change.
-    /// </summary>
-    public bool    AllowEntryWithoutGate  { get; set; } = true;
-
     /// <summary>
     /// Hard ceiling on entries opened per UTC day, for this symbol and execution mode.
     /// Zero disables the cap.

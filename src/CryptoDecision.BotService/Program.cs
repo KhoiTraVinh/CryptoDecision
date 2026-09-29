@@ -98,23 +98,8 @@ builder.Services.AddSingleton<ITradingStrategy>(sp =>
         sp.GetRequiredService<IExitReviewer>());
 });
 
-// The entry gate. This is the only place a language model can affect whether real
-// funds move, and it can only ever prevent a trade — see AiEntryGate.
-//
-// GateRetrieval controls whether the gate is shown resolved past signals near the one
-// it is judging. Its own section, so switching it off is one config line: it is the
-// newest input to a live veto and therefore the first thing to disable if the gate
-// starts behaving oddly.
-builder.Services.AddSingleton<GateRetrievalOptions>(sp =>
-{
-    var options = new GateRetrievalOptions();
-    builder.Configuration.GetSection(GateRetrievalOptions.Section).Bind(options);
-    return options;
-});
-builder.Services.AddSingleton<IEntryGate, AiEntryGate>();
-
-// The exit reviewer shares the Ollama client, the model and the timeout with the entry
-// gate. One model is loaded on this host (OLLAMA_MAX_LOADED_MODELS=1) and calls serialise
+// The exit reviewer owns the Ollama client, the model and the timeout now that the entry
+// gate is gone. One model is loaded on this host (OLLAMA_MAX_LOADED_MODELS=1) and calls serialise
 // (NUM_PARALLEL=1), so a second model here would not be servable even if it were wanted.
 builder.Services.AddSingleton<IExitReviewer, AiExitReviewer>();
 
@@ -185,7 +170,7 @@ builder.Services.AddSingleton<PriceFeedResolver>();
 // lines of tool plumbing nothing reached is 853 lines that can still break a
 // build and still has to be read before every change.
 //
-// What remains is one call with no tools array: AiEntryGate hands the model a
+// What remains is one call with no tools array: AiExitReviewer hands the model a
 // finished proposal and takes APPROVE or SKIP. Giving it tools would give it a
 // way to act, which is the property being deliberately withheld.
 var agentOptions = new AgentOptions

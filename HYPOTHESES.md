@@ -3541,3 +3541,50 @@ one H28 shortened to an hour and which now has the whole budget to itself.
 ### Result
 
 _Open._
+
+## H30 amendment — the gate is DELETED, not switched off. 2026-09-29.
+
+Hours after H30 turned `require_ai_gate` off, the operator asked for the code to go too.
+1,604 lines removed: `AiEntryGate.cs` entire (856), `ReviewEntryAsync` and the call site in
+`TradingBotService`, `GateEvidence` and `GetGateEvidenceAsync` and the recent-trade ledger in
+`BotRepository`, `StampGateAsync`, the DI registration, `GateRetrievalOptions`, the
+`GateRetrieval` config section, and `require_ai_gate` / `allow_entry_without_gate`
+(sql/044). `GateOptions.cs` became `AgentOptions.cs` — the type in it is the exit reviewer's.
+
+### What this costs, said before it is forgotten
+
+**H30's decision rule said "restore the gate if mean R over the window is below -0.10R."
+That is no longer a config change. It is a rewrite.** The rule is not withdrawn — the window
+still runs and the judgement will still be made — but the remedy it names has become
+expensive, and that has to be stated rather than discovered later.
+
+This is the second time in two days that a reversible decision was made irreversible on
+request. The first, XVENUE_FLOW, was left reversible deliberately for exactly this reason.
+
+### What was deliberately kept, and why it matters more than what went
+
+Every gate column on `signal_outcomes` — `gate_decision`, `gate_reason`, `gate_model`,
+`gate_latency_ms` — and `bot_trades.gate_verdict` / `gate_reason`, with all their rows.
+`signal_gate_report` and its two functions with them.
+
+**H30 is judged from those columns.** Dropping them to tidy up would have deleted the
+evidence for the decision the entry commits to making. sql/044 asserts all four survive and
+fails the migration if they do not.
+
+New rows carry NULL. NULL used to mean "the gate never ran on this signal" — a cap or
+cooldown stopped the entry first — and now means "no gate exists". Both readings are true of
+the rows they apply to; the date on sql/044 is what separates them.
+
+### What is left that can refuse an entry
+
+Only arithmetic: the per-side limit, the per-strategy and account position caps, the daily
+entry cap, the cooldown, the daily loss limit and the consecutive-loss breaker. Nothing now
+weighs a proposal on judgement. That was the design intent the project started from —
+*AI for discipline, not prediction* — and it is gone from the entry path. The model still
+decides early exits.
+
+### Unchanged
+
+The decision rule, the window shared with H29, and the live-money bar: a positive mean R
+whose confidence interval excludes zero, over a window not used to choose the configuration
+— roughly 100 trades, about 25 days from 2026-09-28.

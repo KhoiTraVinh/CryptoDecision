@@ -177,36 +177,6 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
     }
 
     /// <summary>
-    /// Attach the gate's verdict to a recorded signal.
-    ///
-    /// Overwrites rather than appends: the gate is asked once per bucket, and a
-    /// second verdict for the same bucket means the cache was bypassed — in which
-    /// case the newest answer is the one that decided whether an order was placed.
-    /// </summary>
-    public async Task StampGateAsync(
-        long id, string decision, string reason, string model, int latencyMs,
-        CancellationToken ct = default)
-    {
-        const string sql = """
-            UPDATE signal_outcomes
-            SET gate_decision   = @decision,
-                gate_reason     = @reason,
-                gate_model      = @model,
-                gate_latency_ms = @latency
-            WHERE id = @id
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("id",       id);
-        cmd.Parameters.AddWithValue("decision", decision);
-        cmd.Parameters.AddWithValue("reason",   reason.Length > 1000 ? reason[..1000] : reason);
-        cmd.Parameters.AddWithValue("model",    model);
-        cmd.Parameters.AddWithValue("latency",  latencyMs);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    /// <summary>
     /// Link the signal to the trade it became, once the order actually filled.
     ///
     /// Only approved signals get one, which is what makes "approved but never

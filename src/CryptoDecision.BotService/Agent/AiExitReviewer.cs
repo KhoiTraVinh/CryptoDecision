@@ -61,7 +61,7 @@ public interface IExitReviewer
 ///
 /// THE ASYMMETRY THAT PROTECTS THE ENTRY GATE DOES NOT EXIST HERE
 /// --------------------------------------------------------------
-/// <see cref="AiEntryGate"/> is safe to hand to a 3B model because every failure mode
+/// The deleted entry gate was safe to hand to a 3B model because every failure mode
 /// resolves to "no entry", which costs an opportunity and never a position. An exit has no
 /// such default: silence must mean either hold — risking a position with no early exit —
 /// or cut, which pays a round trip every time Ollama hiccups. Neither is free, so the
@@ -310,7 +310,7 @@ public sealed class AiExitReviewer(
     /// <summary>
     /// Does the stated reason assert something the brief showed to be false?
     ///
-    /// The same shape as <c>AiEntryGate.ContradictsBrief</c>, and here for the same reason:
+    /// The same shape as the deleted entry gate's ContradictsBrief, and here for the same reason:
     /// the model's first three reviews all produced a defensible DECISION with a recited or
     /// false PREMISE, and the premise is the only part that survives into the log. Review #2
     /// claimed "the 1-hour and 4-hour price moves both run against it" when 4h was +0.75%,
