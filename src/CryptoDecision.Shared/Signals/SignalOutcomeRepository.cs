@@ -15,33 +15,6 @@ public sealed record SignalRecord(
     decimal      SignalPrice,
     decimal      Confidence);
 
-/// <summary>
-/// A past signal similar to the one being judged, with what actually happened to it.
-///
-/// <see cref="Distance"/> is the weighted feature distance that selected it, carried
-/// through so a reader can see how close "similar" actually was. A neighbourhood
-/// that is empty is reported as empty rather than padded with distant cases.
-/// </summary>
-public sealed record SimilarCase(
-    DateTime SignalAt,
-    string   Side,
-    double   AggregateZ,
-    int      AgreeingVenues,
-    int      ParticipatingVenues,
-    double   DispersionBps,
-    decimal  StopPct,
-    string   Outcome,
-    decimal  OutcomeR,
-    int?     MinutesToOutcome,
-    string?  GateDecision,
-    double   Distance,
-
-    /// <summary>
-    /// How hard that past signal fired, in its rule's own units — percent move for
-    /// CandleReversal, volume ratio for FlowRatio. NULL on rows written before sql/039.
-    /// </summary>
-    decimal? TriggerValue);
-
 /// <summary>How much of the table is labelled, and over what span.</summary>
 public sealed record OutcomeCoverage(int Decided, int Pending, DateTime? First, DateTime? Last)
 {
@@ -371,105 +344,6 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
     /// most useful thing the neighbourhood has to say — if eleven of twelve similar
     /// setups lost, the gate should see eleven losses.
     /// </summary>
-    /// <summary>
-    /// THE STRATEGY IS PART OF THE FILTER, and the distance is measured on quantities
-    /// that vary. Neither was true until 2026-09-19, and between them they made this
-    /// method return something other than what it claims.
-    ///
-    /// The old distance summed four terms — |z|, the venue agreement ratio, dispersion
-    /// and stop width. Measured on the production table: CANDLE_REVERSAL has exactly ONE
-    /// distinct value on all four, and XVENUE_FLOW has one on the first three and two on
-    /// the fourth. Both surviving rules leave z, agreement and dispersion structurally
-    /// zero because neither computes them. So the distance was a constant, and
-    /// `ORDER BY distance, signal_at DESC` degenerated to "the five most recent signals
-    /// on this side" — recency wearing similarity's label.
-    ///
-    /// Without the strategy filter it was worse than that: a CANDLE_REVERSAL candidate
-    /// was shown XVENUE_FLOW outcomes and told they were similar setups. Two rules that
-    /// read different inputs and enter on opposite signs do not have a shared
-    /// neighbourhood.
-    ///
-    /// What is left that genuinely varies is ATR at signal time and, for the flow rule,
-    /// the imbalance itself. That is a thinner key than the original claimed to be, and
-    /// it is the honest one.
-    /// </summary>
-    public async Task<IReadOnlyList<SimilarCase>> FindSimilarAsync(
-        string symbol, string side, string strategy, double atrPct, double aggregateOfi,
-        decimal stopPct, DateTime asOfUtc, double triggerValue = 0.0, int k = 5,
-        CancellationToken ct = default)
-    {
-        const string sql = """
-            SELECT signal_at, side, aggregate_z, agreeing_venues, participating_venues,
-                   dispersion_bps, stop_pct, outcome, outcome_r, minutes_to_outcome,
-                   gate_decision, trigger_value,
-                   -- Rank on how hard the rule fired, relative to the candidate, which is
-                   -- the only axis that means anything within one rule. The old three-term
-                   -- distance survives ONLY for rows predating sql/039, and the +10 puts
-                   -- every such row behind every comparable one: a neighbour we can
-                   -- actually compare beats one we cannot, and they still fill the list
-                   -- while the new column is sparse.
-                   CASE
-                       WHEN trigger_value IS NOT NULL AND @trigger IS NOT NULL
-                           THEN abs(trigger_value - @trigger) / GREATEST(@trigger, 0.5)
-                       ELSE 10 + sqrt(
-                               pow((COALESCE(atr_pct, 0) - @atr) / 0.15, 2) +
-                               pow((abs(COALESCE(aggregate_ofi, 0)) - @absOfi) / 0.10, 2) +
-                               pow((stop_pct - @stopPct) / 0.004, 2))
-                   END AS distance
-            FROM signal_outcomes
-            WHERE symbol = @symbol
-              AND side = @side
-              AND strategy = @strategy
-              AND outcome IN ('WIN', 'LOSS', 'TIMEOUT')
-              -- Resolved strictly before the signal being judged. Both halves are
-              -- needed: labeled_at guards against reading a row the labeler wrote
-              -- after the fact, and the stop/target timestamps guard against a case
-              -- whose own outcome landed after this signal fired.
-              AND signal_at < @asOf
-              AND COALESCE(GREATEST(stop_hit_at, target_hit_at),
-                           signal_at + make_interval(mins => COALESCE(horizon_minutes, 720))) < @asOf
-            ORDER BY distance ASC, signal_at DESC
-            LIMIT @k
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("symbol",     symbol);
-        cmd.Parameters.AddWithValue("side",       side);
-        cmd.Parameters.AddWithValue("strategy",   strategy);
-        cmd.Parameters.AddWithValue("atr",        (decimal)atrPct);
-        cmd.Parameters.AddWithValue("absOfi",     (decimal)Math.Abs(aggregateOfi));
-        cmd.Parameters.AddWithValue("stopPct",    stopPct);
-        cmd.Parameters.AddWithValue("asOf",       asOfUtc);
-        // NULL, not 0, when the caller has no trigger to compare: the CASE above then
-        // falls through to the legacy distance for every row instead of ranking them all
-        // against a value that means "not recorded".
-        cmd.Parameters.AddWithValue("trigger",
-            triggerValue != 0.0 ? (decimal)triggerValue : (object)DBNull.Value);
-        cmd.Parameters.AddWithValue("k",          k);
-
-        var cases = new List<SimilarCase>(k);
-        await using var r = await cmd.ExecuteReaderAsync(ct);
-        while (await r.ReadAsync(ct))
-        {
-            cases.Add(new SimilarCase(
-                SignalAt:            r.GetDateTime(0),
-                Side:                r.GetString(1),
-                AggregateZ:          (double)r.GetDecimal(2),
-                AgreeingVenues:      r.GetInt16(3),
-                ParticipatingVenues: r.GetInt16(4),
-                DispersionBps:       r.IsDBNull(5) ? 0.0 : (double)r.GetDecimal(5),
-                StopPct:             r.GetDecimal(6),
-                Outcome:             r.GetString(7),
-                OutcomeR:            r.IsDBNull(8) ? 0m : r.GetDecimal(8),
-                MinutesToOutcome:    r.IsDBNull(9) ? null : r.GetInt32(9),
-                GateDecision:        r.IsDBNull(10) ? null : r.GetString(10),
-                TriggerValue:        r.IsDBNull(11) ? null : r.GetDecimal(11),
-                Distance:            r.GetDouble(12)));
-        }
-
-        return cases;
-    }
 
     /// <summary>
     /// How much labelled evidence exists, so a caller can say "not enough yet"

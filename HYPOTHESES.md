@@ -3588,3 +3588,33 @@ decides early exits.
 The decision rule, the window shared with H29, and the live-money bar: a positive mean R
 whose confidence interval excludes zero, over a window not used to choose the configuration
 — roughly 100 trades, about 25 days from 2026-09-28.
+
+## Removed 2026-09-29, second pass — what the gate's deletion orphaned
+
+`FindSimilarAsync` and the `SimilarCase` record, ~127 lines. The neighbour search that showed
+the gate five resolved past signals near the one it was judging — the retrieval half of H19.
+Its only caller was the gate brief; with that gone it had no producer and no consumer.
+
+`signal_outcomes.trigger_value` is NOT dropped with it. The column is still WRITTEN on every
+signal by `RecordSignalAsync`, and it is the per-rule strength figure — percent move for
+CandleReversal — that makes one signal comparable to another later. Only the read side went.
+
+The stale `strategy_verdicts` row for XVENUE_FLOW was deleted from production: frozen at
+2026-09-28 13:18 since the strategy stopped being evaluated, and `health.sh` would have gone
+on printing it as though it were current. Runtime data, not schema, so no migration — the bot
+rewrites the row each cycle for whatever is in `active_strategies`.
+
+### Checked and deliberately NOT deleted
+
+- **`BotTrade.GateVerdict` / `GateReason`.** Dead by this repository's usual standard, but the
+  reader that populates them maps by ORDINAL, and removing two columns from that SELECT shifts
+  every ordinal after them. `BotConfigRepository` carries a comment about exactly this class of
+  bug — "an off-by-one here feeds the wrong number into a live trading parameter". Two dead
+  properties are cheaper than that risk, and they map 92 rows of real history.
+- **`FeatureRepository` and `daily_feature_table`.** Reached only when a position has no stored
+  geometry, which every current entry does have. It is a fallback for the case the exit code
+  explicitly handles — "positions whose geometry write failed" — not dead code.
+- **`RiskEngine` and its five types**, `FlowBarSet`, `VolatilityRead`, `SizedEntry`,
+  `VenueWindow`. A naive "no reference outside its own file" sweep flagged all of them; every
+  one is used through `var`, and `RiskEngine.Validate` and `CheckCircuitBreakers` are both
+  called from the live loop. Recorded because the sweep will flag them again next time.
