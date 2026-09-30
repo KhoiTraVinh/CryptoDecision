@@ -3740,3 +3740,69 @@ The XVENUE_FLOW ratio-path code is also kept although `RatioMinimum` is now 999 
 is unreachable. Deleting it would make that 999 permanent, and H31 is a one-event hypothesis
 with a 21-day window — the configuration it disables has to stay recoverable by changing a
 number, not by restoring a file.
+
+## H32 — LIVE. `paper_mode = false`, 2026-09-30 ~16:20 UTC.
+
+    UPDATE bot_config SET paper_mode = FALSE WHERE id = 1;
+
+All three gates are now open. `Okx__EnableLiveTrading = true` and `Okx__DemoTrading = false`
+have been open since deployment; `paper_mode` was the last one and it is off.
+
+Operator's decision, taken with the figures below stated and after an explicit confirmation
+step. This entry exists so the basis is on the record, not so the decision can be revisited.
+
+### What is at risk, per the configuration as armed
+
+    capital                100 USD
+    risk_pct_per_trade     0.60 %      ->  1R = $0.60
+    per-order ceiling      $30
+    daily_loss_limit_pct   15 %        ->  $15 a day
+    max_entries_per_day    20
+    max_consecutive_losses 15
+
+A full stop-out costs $0.60. The bounded downside is what makes this a cheap live test, and
+it is the strongest argument for doing it.
+
+### What the evidence says, unchanged
+
+    87 closed trades, lifetime      -$2.4943    mean -0.0478 R
+    no sub-population has ever shown positive expectancy
+    H31 rests on one event; removing its single best trade makes it -0.067 R
+    73-bucket forward test          median -0.0941 % at 15 min, negative after fees at
+                                    every horizon, second half negative throughout
+    FATAL IN A TREND                unresolved; no trend filter has ever been proven
+
+**The bar this entry does not meet, stated when it was set on 2026-09-28:** a positive mean R
+whose confidence interval excludes zero, over a window not used to choose the configuration —
+roughly 100 trades, about 25 days from the last configuration change. That change was **today**:
+H31 reopened the waiver, `RatioMinimum` went to 999, and the wave-catching leash went to 60
+minutes. **Closed trades under the configuration now running: zero.**
+
+### The first live order is also a test of something never exercised
+
+`Okx.TimeoutSeconds` aside, the API key is IP-bound. Code 50110 — caller IP not on the
+allowlist — has appeared zero times in seven days, but **paper mode never calls the order
+endpoints**, so that zero is not evidence. A default EC2 public IP also changes on stop/start;
+the host is currently 3.107.91.212.
+
+The first live entry is therefore the first real test of the trading path. Watch for 50110 and
+for an order that reports placed but does not fill.
+
+### Routing was checked before the switch
+
+`RoutingOrderEngine.CloseTradeAsync` and `ReconcileAsync` route by `trade.IsLive`, not by the
+current configuration, and the code says why: "asking the current configuration whether a
+position was closed elsewhere would check the wrong venue the moment paper_mode changes." The
+one PAPER position open at the switch (trade 154) will close through the paper engine. Only
+new positions go live.
+
+### How to stop it
+
+    UPDATE bot_config SET paper_mode = TRUE WHERE id = 1;    -- back to simulation
+    UPDATE bot_config SET enabled    = FALSE WHERE id = 1;   -- stop opening anything at all
+
+Neither needs a deploy. `enabled = false` leaves open positions managed.
+
+### Result
+
+_Open. There is no decision rule here — this is not an experiment, it is a change of stake._
