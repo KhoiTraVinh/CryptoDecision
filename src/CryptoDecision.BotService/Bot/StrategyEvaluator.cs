@@ -1,5 +1,6 @@
 using CryptoDecision.BotService.Strategies;
 using CryptoDecision.Shared.Bot;
+using CryptoDecision.Shared.Signals;
 
 namespace CryptoDecision.BotService.Bot;
 
@@ -111,9 +112,33 @@ public sealed class StrategyEvaluator
         var changePct = trade.Side == "SHORT" ? -rawChange : rawChange;
         var held = DateTime.UtcNow - trade.OpenedAt;
 
-        // Timeout is universal across all strategies, and is the only exit here that
-        // is decided by the clock rather than by a price.
+        // Timeout is the only exit here decided by the clock rather than by a price.
         //
+        // ── H31: the wave-catching entry gets a much shorter leash ────────────
+        //
+        // A position opened through the $20M news-print waiver is closed after
+        // HighVolumeMaxHoldMinutes — 60 by default — instead of the account-wide
+        // MaxHoldMinutes of 720. The operator's reason, and it matches the measurement:
+        // the move that the print detects is over inside the hour, and what follows is
+        // as likely to be the reversal as the continuation.
+        //
+        // The 73-bucket forward test says the same thing from the other side: signed to
+        // the heavy side and entered where the bot enters, the mean is +0.0593% at 15
+        // minutes, +0.0611% at 60, and turns negative by 120. There is nothing after the
+        // first hour worth holding for.
+        //
+        // Keyed on the ENTRY PATH, not on the strategy. XVENUE_FLOW happens to have only
+        // the waiver path enabled today, but the short leash belongs to the news-print
+        // entry itself, and would still be right if the ratio path were ever reopened
+        // beside it.
+        //
+        // Closed as HV_TIMEOUT rather than TIMEOUT so H31 can be judged without having to
+        // infer which cap fired from the hold time.
+        var isWave  = string.Equals(trade.EntryPath, EntryPaths.HighVolume, StringComparison.Ordinal);
+        var maxHold = isWave && opts.HighVolumeMaxHoldMinutes > 0
+            ? opts.HighVolumeMaxHoldMinutes
+            : opts.MaxHoldMinutes;
+
         // A negative hold is checked separately from the untrusted-clock case because
         // it is unambiguous: a position cannot have been opened in the future, so the
         // timestamp or the clock is wrong and neither is a reason to close a position.
@@ -125,16 +150,17 @@ public sealed class StrategyEvaluator
                 "wrong, and neither is a reason to close a real position. Price-based exits still apply.",
                 trade.Id, held.TotalMinutes, trade.OpenedAt, DateTime.UtcNow);
         }
-        else if (held.TotalMinutes >= opts.MaxHoldMinutes)
+        else if (held.TotalMinutes >= maxHold)
         {
             if (clockTrusted)
-                return new ExitDecision(true, "TIMEOUT", currentPrice, changePct);
+                return new ExitDecision(
+                    true, isWave ? "HV_TIMEOUT" : "TIMEOUT", currentPrice, changePct);
 
             _log.LogError(
                 "[Exit] Trade {Id} would time out at {Held:F1} min against a {Max} min limit, but " +
                 "the eval clock jumped this cycle so that figure is not trustworthy. Holding. If the " +
                 "position really is this old it will time out next cycle, once the clock is sane.",
-                trade.Id, held.TotalMinutes, opts.MaxHoldMinutes);
+                trade.Id, held.TotalMinutes, maxHold);
         }
 
         // The breakeven stop lived here, ahead of the strategy, and was deleted on

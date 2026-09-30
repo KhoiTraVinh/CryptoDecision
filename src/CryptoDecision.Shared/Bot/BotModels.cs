@@ -326,6 +326,20 @@ public sealed record BotOptions
         (int)(Signals.FlowGeometryDefaults.MaxHoldHours * 60);   // 720 — 12 hours
 
     /// <summary>
+    /// Minutes a position opened through the $20M news-print waiver may be held, in place
+    /// of <see cref="MaxHoldMinutes"/>. 0 falls back to that one.
+    ///
+    /// **60, H31, 2026-09-30, the operator's rule**: "lệnh bắt sóng phải chốt trong 1 giờ,
+    /// vì hết sóng sẽ dễ bị đảo chiều." The 73-bucket forward test agrees — signed to the
+    /// heavy side and entered where the bot enters, the mean is +0.0593% at 15 minutes,
+    /// +0.0611% at 60, and negative by 120. There is nothing past the first hour to hold for.
+    ///
+    /// Applies to the ENTRY PATH, not the strategy, so it stays correct if the ratio path is
+    /// ever reopened beside the waiver. Closes as HV_TIMEOUT so H31 is measurable.
+    /// </summary>
+    public int     HighVolumeMaxHoldMinutes { get; set; } = 60;
+
+    /// <summary>
     /// Cooldown between entries in seconds.
     ///
     /// 900 = 15 minutes, one bucket. The signal cannot change until the next bucket

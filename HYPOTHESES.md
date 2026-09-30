@@ -3706,3 +3706,37 @@ Written here so it does not have to be reconstructed later.
 ### Result
 
 _Open._
+
+### H31 amendment — the wave-catching entry is capped at one hour
+
+`bot_config.high_volume_max_hold_minutes = 60` (sql/046). A position opened through the
+$20M waiver closes after 60 minutes instead of the account-wide 720, as `HV_TIMEOUT`.
+
+Operator's rule: *"lệnh bắt sóng phải chốt trong 1 giờ, vì hết sóng sẽ dễ bị đảo chiều."*
+
+The 73-bucket forward test supports the SHAPE of that, and it is worth being precise about
+what it does and does not say. Signed to the heavy side, entered 18 minutes after the bucket
+opens which is where the bot actually enters:
+
+    15 min   +0.0593 %          60 min   +0.0611 %
+    30 min   -0.0439 %         120 min   +0.0573 %
+
+Whatever exists is inside the first hour, and 120 minutes is where the second-half figure is
+worst (-0.1755%). **But every horizon is negative after the 10 bps round trip, and the second
+half of the sample is negative at all of them.** The leash bounds the damage; it does not
+create an edge. That distinction is the whole of H31's risk.
+
+Keyed on `entry_path = HIGH_VOLUME`, not on the strategy, so it stays correct if the ratio
+path is ever reopened beside the waiver. `HV_TIMEOUT` rather than `TIMEOUT` so the cap is
+visible in the data without inferring it from hold times.
+
+### Cleanup pass after H31 — nothing further was removed, and why
+
+The sweep found only `BotTrade.GateVerdict` and `GateReason`, which are kept for the reason
+already recorded: the reader that populates them maps by ordinal, and dropping two columns
+from that SELECT shifts every ordinal after them.
+
+The XVENUE_FLOW ratio-path code is also kept although `RatioMinimum` is now 999 and the path
+is unreachable. Deleting it would make that 999 permanent, and H31 is a one-event hypothesis
+with a 21-day window — the configuration it disables has to stay recoverable by changing a
+number, not by restoring a file.
