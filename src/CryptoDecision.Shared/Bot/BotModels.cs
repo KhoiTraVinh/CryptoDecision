@@ -236,6 +236,17 @@ public sealed record BotOptions
     /// </summary>
     public int          MaxOpenHighVolume        { get; set; } = 1;
 
+    /// <summary>
+    /// While a high-volume-waiver position is open, close and suspend every OTHER strategy.
+    ///
+    /// H26, deleted 2026-09-28 when XVENUE_FLOW went off, restored 2026-09-30 as part of H31.
+    /// Keyed on the strategy HOLDING the position, never on a strategy name.
+    ///
+    /// Set false to remove it, live, with an UPDATE. That matters more than usual here: H31
+    /// ships on a single event, and the switch is the whole of the exit route.
+    /// </summary>
+    public bool         SuspendOnHighVolume      { get; set; } = true;
+
 
     /// <summary>
     /// Concurrent open positions across EVERY strategy, for the configured symbol.

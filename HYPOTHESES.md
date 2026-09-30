@@ -3618,3 +3618,91 @@ rewrites the row each cycle for whatever is in `active_strategies`.
   `VenueWindow`. A naive "no reference outside its own file" sweep flagged all of them; every
   one is used through `var`, and `RiskEngine.Validate` and `CheckCircuitBreakers` are both
   called from the live loop. Recorded because the sweep will flag them again next time.
+
+## H31 — News-print wave catching, with the other rule suspended. 2026-09-30.
+
+Operator's decision, taken after the measurements below were put in front of them and with
+"đừng đo hay làm gì nữa cả, tôi muốn làm như vậy". Shipped whole.
+
+### The configuration
+
+    active_strategies      {XVENUE_FLOW, CANDLE_REVERSAL}
+    RatioMinimum           2.5 -> 999.0      the RATIO path is now unreachable
+    ShortRatioMinimum      2.5 -> 999.0
+    RatioHighVolumeUsd     20,000,000        unchanged — the ONLY XVENUE entry left
+    max_open_high_volume   1                 unchanged
+    suspend_on_high_volume TRUE              restored, sql/045
+    ratchet                arm 0.25R / 40%   unchanged
+
+The waiver branch returns before the ratio test is read, so raising `RatioMinimum` to 999
+removes the RATIO path — which lost 1.736R over 19 trades — while leaving the $20M waiver
+untouched. XVENUE_FLOW is now a news-print rule and nothing else.
+
+While a waiver position is live, every position belonging to another strategy is closed as
+`HV_REGIME` and that strategy opens nothing until it closes.
+
+### What was measured on the 2026-09-30 CPI event
+
+Four buckets cleared $20M. They changed side in the middle, which is the whole result:
+
+    12:30  $40.64M  buy-heavy 1.60  -> LONG  @121.73   +0.084 R
+    12:45  $21.19M  buy-heavy 1.03  -> LONG  @122.12   +0.047 R
+    13:30  $24.85M  sell-heavy 1.24 -> SHORT @120.90   +0.627 R
+    14:15  $25.77M  sell-heavy 1.02 -> skipped, one waiver position at a time
+
+    HV side  +0.758 R
+
+**The CPI print itself was the bad trade.** It was buy-heavy, so it entered LONG with 0.9%
+left to run before a 3.9% collapse. The money came from the 13:30 sell-heavy print — the
+reversal, not the news.
+
+The suspension, against the three CANDLE positions that really traded:
+
+    152 SHORT  cut  12:48   -0.121 R   (it actually made +0.323)   cost   0.444
+    153 LONG   cut  13:48   -0.076 R   (it actually lost  -1.002)  saved  0.926
+    154 LONG   blocked       0.000 R   (currently +0.337)          cost   0.337
+                            --------
+                            -0.198 R   against -0.342 actual       net   +0.144
+
+    TOTAL  +0.560 R   against the -0.342 R that actually happened
+
+Exit rules compared on the same event: current ratchet +0.560, fixed 30 min +0.390, fixed
+60 min +0.311, fixed 15 min +0.012, no-arm 0.15R floor -0.278, fixed 120 min -1.288. The
+ratchet stays because it won here.
+
+### The four objections, recorded because they were raised before this shipped
+
+1. **n = 1.** One event. This repository has a long file about what optimising on one
+   observation does.
+2. **One trade carries it.** Remove the 13:30 SHORT (+0.627R) and the whole configuration is
+   **-0.067R** — negative.
+3. **It contradicts the 73-bucket measurement.** Forward return after a >=$20M print, signed
+   to the heavy side, entered where the bot actually enters: +0.0593% at 15 min, **median
+   -0.0941%**, negative after the 10 bps round-trip fee at EVERY horizon tested, and the
+   second half of the sample negative at every horizon. Today is one draw from a distribution
+   whose mean is around zero.
+4. **The suspension is near-neutral even here.** +0.144R, from saving one disaster and killing
+   two winners. Its block also lasts only as long as the waiver position, which the ratchet
+   closes in minutes — the flaw that made H26 useless on this very event is unchanged.
+
+### Decision rule, fixed in advance
+
+Judge at **10 waiver positions** or **21 days**.
+
+- **Reject** if waiver positions show a mean R below 0.
+- **Reject** if positions cut by `HV_REGIME` show a mean R below CANDLE_REVERSAL positions
+  closed in the same window that were not cut — the test H26 was already failing.
+- **Reject** if total mean R across all closed trades is below **-0.10R**.
+- Expect the waiver to fire roughly **0.6 times a day** on the historical rate of 73 buckets
+  over ~40 days, so 21 days is the binding term, not 10 positions.
+
+### The way out, without a deploy
+
+    UPDATE bot_config SET suspend_on_high_volume = FALSE WHERE id = 1;          -- stop cut/block
+    UPDATE bot_config SET active_strategies = '{CANDLE_REVERSAL}' WHERE id = 1; -- stop the waiver
+
+Written here so it does not have to be reconstructed later.
+
+### Result
+
+_Open._
