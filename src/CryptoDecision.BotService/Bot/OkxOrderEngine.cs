@@ -640,7 +640,21 @@ public sealed class OkxOrderEngine(
                 trade.Id);
         }
 
-        if (history?.RealisedPnl is { } realised)
+        // The same attribution check as ReconcileRealisedPnlAsync, and it matters more
+        // here: this path does not merely adjust a number, it sets the exit price, the
+        // P&L and the close reason from the history entry outright. Taking the previous
+        // position's row would close this trade at another trade's price.
+        //
+        // openAvgPx is this position's own entry fill. A mismatch means the entry belongs
+        // to something else, and the honest outcome is the _UNCONFIRMED path below — a
+        // row that says plainly the real result was not recorded, rather than one that
+        // quietly reports someone else's.
+        var attributable =
+            history?.OpenAvgPx is { } histOpen
+            && trade.EntryPrice > 0m
+            && Math.Abs(histOpen - trade.EntryPrice) / trade.EntryPrice <= 0.001m;
+
+        if (history?.RealisedPnl is { } realised && attributable)
         {
             // The exchange figure already nets fees and funding, so it replaces the
             // computed P&L outright instead of being adjusted by it.
@@ -670,14 +684,20 @@ public sealed class OkxOrderEngine(
             return;
         }
 
-        // No history to read. The row still has to close or it is retried forever,
-        // but the number is a guess and the close reason says so — nothing should
-        // read _UNCONFIRMED as a settled result.
+        // No usable history — either none at all, or one that belongs to a different
+        // position. The row still has to close or it is retried forever, but the number
+        // is a guess and the close reason says so — nothing should read _UNCONFIRMED as
+        // a settled result.
         log.LogError(
-            "[OKX] Trade {Id} has no position on {InstId} and no history entry to settle it from. " +
-            "Closing at the entry price with zero P&L so it stops being retried; the real result is " +
-            "not recorded. Reconcile this row against the exchange by hand.",
-            trade.Id, instrument.InstId);
+            "[OKX] Trade {Id} has no position on {InstId} and no history entry that can be " +
+            "attributed to it ({Why}). Closing at the entry price with zero P&L so it stops being " +
+            "retried; the real result is NOT recorded. Reconcile this row against the exchange by " +
+            "hand.",
+            trade.Id, instrument.InstId,
+            history is null       ? "no entry returned"
+            : !attributable       ? $"entry opened at {history.OpenAvgPx} against this position's " +
+                                    $"{trade.EntryPrice}"
+                                  : "entry carried no realised P&L");
 
         trade.ExitPrice   = trade.EntryPrice;
         trade.PnlUsd      = 0m;
@@ -987,6 +1007,57 @@ public sealed class OkxOrderEngine(
             log.LogWarning(
                 "[OKX] Trade {Id}: no position-history entry on {InstId}, so P&L stays derived and " +
                 "EXCLUDES funding.",
+                trade.Id, instrument.InstId);
+            return;
+        }
+
+        // ── Is this entry actually THIS position? ─────────────────────────────
+        //
+        // positions-history is read immediately after the close and returns the most
+        // recent SETTLED entry, which is not the one just closed — OKX takes a moment to
+        // finalise it. Without this check the method took the PREVIOUS trade's realised
+        // P&L and wrote it onto this row, every time.
+        //
+        // Measured on the first four live trades, 2026-09-30 to 10-01. The reconciliation
+        // log is unambiguous:
+        //
+        //     trade 156   realised -0.2507695   vs trade 155's derived -0.2508
+        //     trade 157   realised +0.10183075  vs trade 156's derived +0.1018
+        //     trade 158   realised -0.211638    vs trade 157's derived -0.2106
+        //
+        // Five decimal places. Two winners were recorded as losses and one loser as a
+        // win, and the last trade of any sequence never got its own figure at all.
+        //
+        // This is not a reporting nuisance. `SUM(pnl_usd)` is what feeds todayPnlUsd into
+        // RiskEngine.CheckCircuitBreakers, so the daily loss limit was being evaluated on
+        // the wrong numbers while real money was at risk.
+        //
+        // openAvgPx is the discriminator: it is this position's own entry fill, and a
+        // different position almost never opened at the same price. A mismatch means the
+        // entry is stale, and the derived figure — which is computed from the fills this
+        // trade actually got — is the better number. It excludes funding, which the log
+        // below says out loud.
+        if (history.OpenAvgPx is { } openPx && trade.EntryPrice > 0m)
+        {
+            var drift = Math.Abs(openPx - trade.EntryPrice) / trade.EntryPrice;
+
+            if (drift > 0.001m)
+            {
+                log.LogWarning(
+                    "[OKX] Trade {Id}: the latest position-history entry on {InstId} opened at " +
+                    "{HistOpen:F4} but this position opened at {Entry:F4} ({Drift:P2} apart), so it " +
+                    "belongs to a different position and has been IGNORED. P&L stays derived from " +
+                    "this trade's own fills and EXCLUDES funding. This is the expected case right " +
+                    "after a close — the exchange has not settled the entry yet.",
+                    trade.Id, instrument.InstId, openPx, trade.EntryPrice, drift);
+                return;
+            }
+        }
+        else
+        {
+            log.LogWarning(
+                "[OKX] Trade {Id}: position-history entry on {InstId} carries no openAvgPx, so it " +
+                "cannot be attributed to this position. P&L stays derived and EXCLUDES funding.",
                 trade.Id, instrument.InstId);
             return;
         }

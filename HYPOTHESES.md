@@ -3806,3 +3806,56 @@ Neither needs a deploy. `enabled = false` leaves open positions managed.
 ### Result
 
 _Open. There is no decision rule here — this is not an experiment, it is a change of stake._
+
+## Defect fixes, 2026-10-01 — the first day on real money
+
+### 1. Live P&L was the PREVIOUS trade's figure
+
+`ReconcileRealisedPnlAsync` read `/api/v5/account/positions-history` immediately after a
+close and took the most recent entry. OKX has not settled the just-closed position at that
+moment, so the entry returned is the one before it. The reconciliation log says it plainly:
+
+    trade 156   realised -0.2507695    = trade 155's derived -0.2508
+    trade 157   realised +0.10183075   = trade 156's derived +0.1018
+    trade 158   realised -0.211638     = trade 157's derived -0.2106
+
+Five decimal places. **Two winners were recorded as losses and one loser as a win**, and the
+last trade of any sequence never received its own figure at all.
+
+Not a reporting nuisance: `SUM(pnl_usd)` feeds `todayPnlUsd` into
+`RiskEngine.CheckCircuitBreakers`, so the daily loss limit was being evaluated on the wrong
+numbers while real money was at risk.
+
+Fixed by attributing the history entry before trusting it — `openAvgPx` is this position's
+own entry fill, and a mismatch beyond 0.1% means the entry belongs to something else. On a
+mismatch the derived figure stands, which is correct from this trade's own fills and excludes
+funding, and the log says so. The same guard is applied in `SettleVanishedPositionAsync`,
+where it matters more: that path sets the exit price and close reason from the history entry
+outright, so a stale row would close a trade at another trade's price. There it falls through
+to the existing `_UNCONFIRMED` path, which states that the real result was not recorded.
+
+The four affected rows were repaired in place from their own stored fills.
+
+### 2. `health.sh` raised a false whitelist alarm on the real-money panel
+
+`log_has bot 24h '50110'` matched the fractional seconds in Serilog timestamps —
+`21:41:01.9501102` and `00:45:17.5011054` both contain the string — and printed "this host's
+IP is NOT on the API key whitelist" while four live orders were filling normally. The script
+had already learned this lesson once, with `42883`. Now matched on `"sCode":"50110"`.
+
+A false alarm on the panel an operator reads for live trading is worse than no panel: it
+teaches them to ignore the line that matters.
+
+### Checked and NOT a defect
+
+**`exit_algo_id` NULL on all closed live trades.** It is written when the OCO is placed and
+deliberately cleared on close — `BotRepository` carries the reason: a stale algoId on a closed
+row would make the next reconciliation pass think there is still something to check. The OCO
+itself was placed on all four trades, with TP/SL logged.
+
+**TP and SL are not inverted.** Every trade carries stop 2.000% and target 4.000%, R:R 2.00,
+correctly signed per side. What the operator observed — the realised take being smaller than
+the realised loss — is real but has a different cause: across the 38 trades since the ratchet
+shipped the average winner is **+0.51%** and the average loser **−0.78%**, a realised 0.65:1,
+because neither stored barrier is ever reached. The ratchet and the hourly review close
+everything first. The stored geometry is not what the account trades.

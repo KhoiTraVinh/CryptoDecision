@@ -359,7 +359,14 @@ for svc in bot processor ingestion; do
 done
 # 50110 is Fatal at startup but harmless until paper_mode = false, so it is
 # reported as a warning with that caveat rather than as a failure.
-if log_has bot 24h '50110'; then
+#
+# Matched on the JSON FIELD, not the bare number. `grep -c 50110` matched the
+# fractional seconds in Serilog timestamps -- 21:41:01.9501102 and 00:45:17.5011054
+# both contain it -- and raised "this host's IP is NOT whitelisted" on 2026-10-01
+# while four live orders were filling normally. This script already had to learn the
+# same lesson once with 42883. A false alarm on the real-money panel is worse than no
+# panel: it teaches the operator to ignore the line that matters.
+if log_has bot 24h '"sCode":"50110"'; then
     warn "OKX 50110: this host's IP is NOT on the API key whitelist."
     printf '        Harmless while paper_mode = true. Blocks every order the moment it is false.\n'
 fi
