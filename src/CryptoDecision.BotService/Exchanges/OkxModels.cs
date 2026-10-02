@@ -275,6 +275,18 @@ public sealed record OkxPositionHistory(
     public decimal? CloseAvgPx   => OkxNum.ParseOrNull(CloseAvgPxRaw);
 
     /// <summary>
+    /// The position's own entry fill, parsed. `openAvgPx` was carried as a raw string
+    /// with no accessor until 2026-10-02, which is why the P&amp;L attribution check that
+    /// needs it would not compile.
+    ///
+    /// It is the discriminator for "is this history row actually the position that just
+    /// closed". positions-history is read immediately after a close and OKX has not
+    /// settled the new entry yet, so the row returned is usually the PREVIOUS one — and
+    /// without this check its realised P&amp;L was being written onto the wrong trade.
+    /// </summary>
+    public decimal? OpenAvgPx    => OkxNum.ParseOrNull(OpenAvgPxRaw);
+
+    /// <summary>
     /// OKX close-type code. "3" is partial liquidation and "4" full liquidation;
     /// "2" is a full close by the trader. Surfaced so a liquidation is named as one
     /// in the trade record rather than filed as an ordinary close.
