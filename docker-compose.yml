@@ -462,7 +462,37 @@ services:
     # limit at all — it exceeded the VM, so the kernel OOM killer decided the outcome
     # instead of Docker, and what it reaches for is whatever is largest at the time.
     # That is how Docker Desktop was killed here before.
-    mem_limit: 3500m
+    # 3500m -> 4096m on 2026-10-06, because the old ceiling was reached and enforced:
+    #
+    #   Fri Sep 25 14:03:13  llama-server invoked oom-killer
+    #   oom-kill: constraint=CONSTRAINT_MEMCG
+    #   Killed process 4031001 (llama-server) anon-rss:3,557,844 kB
+    #
+    # 3,474 MB against a 3,500 MB limit. The cgroup killed the MODEL RUNNER, not the
+    # container: ollama itself survived, so RestartCount stayed 0, the healthcheck
+    # (`ollama list`) kept passing, and it has reported "Up 4 weeks (healthy)" ever
+    # since. The only visible symptom would have been one exit review answering
+    # nothing, which the bot handles by falling back to the OFI rule and logging
+    # ExitReview.Unavailable. Green stack, silent loss.
+    #
+    # Why a 1.9 GB model needed 3.5 GB: the rest is KV cache, and the exit-review
+    # brief grows with how long the position has been held — one line per 15m bucket
+    # since entry, capped at 96 by `needed` in ReviewExitAsync. So peak memory is a
+    # function of HOLD TIME, not of call rate.
+    #
+    # H33 interacts with this, and not in the obvious way. Doubling the cadence does
+    # not raise the peak — calls serialise at NUM_PARALLEL=1 — but a long-held
+    # position is now reviewed at 60/90/120/150 min instead of 60/120/180, so there
+    # are more attempts at the largest briefs. More rolls, same dice.
+    #
+    # Budget: host is 7779 MB; limits were 5804 MB, leaving 1975 MB unallocated. At
+    # 4096 the allocation is 6400 MB with 1379 MB spare, and 622 MB (18%) of headroom
+    # over the observed kill. Limits are caps rather than reservations — postgres sits
+    # at 525 of 1024, kafka at 359 of 512 — so this costs nothing until it is used.
+    #
+    # The bounded fix is a context cap rather than more RAM, but num_ctx changes what
+    # the model is shown, and that is a behaviour change while H33 is open.
+    mem_limit: 4096m
     environment:
       # Keep the model resident between gate calls. The default 5m would
       # unload it between runs and pay the multi-second load cost every time.
