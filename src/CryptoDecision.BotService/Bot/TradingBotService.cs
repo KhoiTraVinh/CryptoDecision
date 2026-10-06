@@ -719,7 +719,9 @@ public sealed class TradingBotService(
             {
                 trade.LastExitReviewAt = reviewedAt;
                 await SafeRecordAsync(
-                    repo.StampExitReviewAsync(trade.Id, reviewedAt, ct), "exit review stamp");
+                    repo.StampExitReviewAsync(
+                        trade.Id, reviewedAt, decision.ExitReviewNote, ct),
+                    "exit review stamp");
             }
 
             if (decision.DynamicStopPrice   != trade.DynamicStopPrice ||
@@ -1132,9 +1134,20 @@ public sealed class TradingBotService(
                             // the exchange minimum. Caught per strategy so one refusal
                             // does not skip the remaining strategies, and the cooldown
                             // is deliberately not stamped — nothing was opened.
-                            log.LogError(ex,
-                                "[TradingBot] Entry for {Strat} ({Side}) was not placed: {Message}",
-                                strat, decision.Side, ex.Message);
+                            // A maker entry that rested its window and never filled is the
+                            // advertised cost of the entry style, and logging it at Error
+                            // put three non-faults in the error channel over 48h with
+                            // nothing to separate them from a real one. Everything else
+                            // here — a rejected order, an unreachable exchange, a
+                            // post-only the exchange killed for crossing — stays Error.
+                            if (ex is MakerEntryNotFilledException)
+                                log.LogWarning(
+                                    "[TradingBot] Entry for {Strat} ({Side}) did not fill: {Message}",
+                                    strat, decision.Side, ex.Message);
+                            else
+                                log.LogError(ex,
+                                    "[TradingBot] Entry for {Strat} ({Side}) was not placed: {Message}",
+                                    strat, decision.Side, ex.Message);
 
                             // Normal does not mean invisible. Logging alone left a bot
                             // that had refused every entry for hours looking identical

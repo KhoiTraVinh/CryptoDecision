@@ -278,14 +278,32 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// slot. Without that, an Ollama outage would make the bot retry every 30 seconds and
     /// spend the whole cycle budget on a service that is down.
     /// </summary>
+    /// <summary>
+    /// Stamp the review time, and keep what the reviewer said.
+    ///
+    /// The note rides on the UPDATE that was already happening, so persisting the
+    /// reasoning costs no extra round trip. It used to live only in `docker logs`,
+    /// which a deploy destroys because the container is recreated rather than
+    /// restarted — see sql/047.
+    /// </summary>
     public async Task StampExitReviewAsync(
-        long tradeId, DateTime reviewedAt, CancellationToken ct = default)
+        long tradeId, DateTime reviewedAt, string? note = null, CancellationToken ct = default)
     {
-        const string sql = "UPDATE bot_trades SET last_exit_review_at = @at WHERE id = @id";
+        const string sql = """
+            UPDATE bot_trades
+               SET last_exit_review_at   = @at,
+                   -- COALESCE so a reviewer that answered with nothing cannot erase the
+                   -- previous answer. A review that could not answer at all does not
+                   -- reach here; it keeps its slot but leaves the note alone.
+                   last_exit_review_note = COALESCE(@note, last_exit_review_note)
+             WHERE id = @id
+            """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("at", reviewedAt);
+        cmd.Parameters.AddWithValue("note",
+            string.IsNullOrWhiteSpace(note) ? DBNull.Value : note);
         cmd.Parameters.AddWithValue("id", tradeId);
         await cmd.ExecuteNonQueryAsync(ct);
     }

@@ -826,12 +826,21 @@ public sealed class CrossVenueFlowStrategy(
         // Ollama outage turns into a retry every 30 seconds against a service that is down.
         var reviewedAt = DateTime.UtcNow;
 
+        // The reason travels with the stamp from here on. It used to be logged and
+        // dropped, and `docker logs` does not survive a deploy — the container is
+        // recreated, not restarted — so a redeploy destroyed the reasoning behind every
+        // LLM_EXIT that preceded it. Trade 164, the worst LIVE trade so far, was cut at
+        // its first review and why is no longer recoverable. H33 is judged on this.
         if (review is { Unavailable: false, Cut: true })
-            return Exit("LLM_EXIT", currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt);
+            return Exit("LLM_EXIT", currentPrice, changePct, dynamicStop, dynamicTarget,
+                        reviewedAt, review.Reason);
 
+        // A HOLD is kept too. The sequence of HOLDs before a CUT is what shows whether
+        // an extra look changed anything, which is the whole question H33 asks.
         if (review is { Unavailable: false })
             return new ExitDecision(
-                false, null, currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt);
+                false, null, currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt,
+                review.Reason);
 
         // ── Fallback: the rule that was already earning ───────────────────────
         //
@@ -1052,8 +1061,8 @@ public sealed class CrossVenueFlowStrategy(
     private static ExitDecision Exit(
         string reason, decimal price, decimal changePct,
         decimal? dynamicStop = null, decimal? dynamicTarget = null,
-        DateTime? reviewedAt = null) =>
-        new(true, reason, price, changePct, dynamicStop, dynamicTarget, reviewedAt);
+        DateTime? reviewedAt = null, string? reviewNote = null) =>
+        new(true, reason, price, changePct, dynamicStop, dynamicTarget, reviewedAt, reviewNote);
 }
 
 /// <summary>

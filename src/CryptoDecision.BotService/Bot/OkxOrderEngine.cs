@@ -6,6 +6,18 @@ using CryptoDecision.Shared.Signals;
 namespace CryptoDecision.BotService.Bot;
 
 /// <summary>
+/// A post-only entry rested its full window and nobody crossed it.
+///
+/// This is the advertised cost of maker entries, not a fault, and it exists so the
+/// caller can say so with a Warning instead of an Error. It is deliberately NOT
+/// thrown when the exchange cancels a post-only order moments after accepting it —
+/// that means the limit was on the wrong side of the book and is a real defect, so
+/// it stays a plain exception and keeps Error severity.
+/// </summary>
+public sealed class MakerEntryNotFilledException(string message)
+    : InvalidOperationException(message);
+
+/// <summary>
 /// Places real orders on OKX USDT-margined perpetual swaps.
 ///
 /// Perps rather than spot because the strategy's signal is symmetric — it scores
@@ -392,17 +404,67 @@ public sealed class OkxOrderEngine(
 
         var orderId = placement.OrdId!;
 
+        var restedFrom = DateTime.UtcNow;
+
         var fill = await trading.WaitForRestingFillAsync(
             instrument.InstId, orderId,
             okxOptions.MakerFillPollAttempts, okxOptions.MakerFillPollDelayMs, ct);
 
         if (fill is null)
         {
-            var waited = okxOptions.MakerFillPollAttempts * okxOptions.MakerFillPollDelayMs / 1000.0;
-            throw new InvalidOperationException(
-                $"Post-only {entrySide} on {instrument.InstId} rested at {limitPrice} for " +
-                $"{waited:F0}s without filling and was cancelled. No position was opened. This is " +
-                "the expected cost of maker entries — the next cycle will re-decide.");
+            // Two different things reach here and they used to be reported as one.
+            //
+            // `waited` was computed from MakerFillPollAttempts * MakerFillPollDelayMs —
+            // a CONSTANT — so the message always claimed the full window. But
+            // WaitForRestingFillAsync breaks out the moment the order is terminal, and
+            // OKX cancels a post-only order it accepted if it would have crossed. On
+            // 2026-10-02 an order was placed at 18:45:18.301 and reported canceled at
+            // 18:45:18.421, and the log said it "rested for 60s". Same on 2026-10-05.
+            // Two of five cancellations were this, not timeouts.
+            //
+            // The distinction matters because the fixes diverge. A real 60s no-fill means
+            // the market moved away and re-deciding next cycle is right. An instant
+            // rejection means the limit was computed on the wrong side of the book — with
+            // MakerPriceOffsetTicks at 0 the order rests exactly at the touch, and
+            // CANDLE_REVERSAL fires while price is falling fast, which is precisely when
+            // the ask can drop through the limit in the ~350 ms before OKX sees it. The
+            // retry only works by luck, and nothing would have said so.
+            //
+            // This is the same class as the cycle-budget message that named an innocent
+            // mechanism and nearly rolled back H28: one handler, two causes, one sentence.
+            var waited  = DateTime.UtcNow - restedFrom;
+            var budget  = TimeSpan.FromMilliseconds(
+                (double)okxOptions.MakerFillPollAttempts * okxOptions.MakerFillPollDelayMs);
+
+            // Anything that ends in well under one poll interval was not waited out; the
+            // exchange ended it. One interval is the smallest gap a genuine timeout can
+            // produce, so it is the discriminator rather than a tuned threshold.
+            var instant = waited < TimeSpan.FromMilliseconds(
+                Math.Max(50, okxOptions.MakerFillPollDelayMs));
+
+            // Severity splits here, not at the log site. A genuine no-fill is the
+            // advertised cost of maker entries and carries its own type so the caller can
+            // log it as a Warning; the exchange-cancelled case is a pricing fault and
+            // stays a plain exception, which the caller logs as an Error. Before this,
+            // every post-only miss was an Error: three of three in 48h, none of them a
+            // fault, and a real one would have been read as more of the same.
+            if (!instant)
+                throw new MakerEntryNotFilledException(
+                    $"Post-only {entrySide} on {instrument.InstId} rested at {limitPrice} for " +
+                    $"{waited.TotalSeconds:F0}s of a {budget.TotalSeconds:F0}s window without " +
+                    "filling and was cancelled. No position was opened. This is the expected " +
+                    "cost of maker entries — the next cycle will re-decide.");
+
+            throw new InvalidOperationException(instant
+                ? $"Post-only {entrySide} on {instrument.InstId} at {limitPrice} was accepted and " +
+                  $"then CANCELLED BY THE EXCHANGE after {waited.TotalMilliseconds:F0}ms — it did " +
+                  "not rest and did not time out. A post-only order is killed when it would have " +
+                  "crossed, so the limit was on the wrong side of the book by the time OKX saw it. " +
+                  "No position was opened. This is a pricing problem, not the cost of maker entries."
+                : $"Post-only {entrySide} on {instrument.InstId} rested at {limitPrice} for " +
+                  $"{waited.TotalSeconds:F0}s of a {budget.TotalSeconds:F0}s window without filling " +
+                  "and was cancelled. No position was opened. This is the expected cost of maker " +
+                  "entries — the next cycle will re-decide.");
         }
 
         // ── Partial fills ─────────────────────────────────────────────────────
