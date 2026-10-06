@@ -342,6 +342,52 @@ services:
       # healthy and then refused every entry on a chat call for a missing tag.
       Agent__Model:                    "${OLLAMA_MODEL:-qwen2.5:3b}"
 
+      # ── H33: exit-review cadence 1h -> 30m ──────────────────────────────────
+      #
+      # The perfect-reviewer ceiling by cadence, already measured and recorded on
+      # FlowStrategyOptions.ExitReviewAfter: 120m +0.883R, 60m +2.052R, 30m +2.655R,
+      # against +3.682R for the paths as offered. This buys the 60m -> 30m step.
+      #
+      # H28 paced 60m against "42-43s per call inside a 120s cycle budget shared with
+      # the entry gate", and called the worst case tight. Both halves of that have
+      # changed and were re-measured on 2026-10-06 before this was set:
+      #   - the entry gate was DELETED by H30 on 09-29, so it no longer competes
+      #   - four LIVE calls took 22.5 / 21.5 / 25.7 / 20.7 s, not 42-43
+      #   - max concurrent open positions ever observed is 1, not 2
+      # Worst case now is 2 positions x 26s = 52s against the same 120s budget.
+      # Over 4 days of LIVE the two warning signs H28 named are both at zero:
+      # "not evaluated this cycle" 0, exit review Unavailable 0.
+      #
+      # Set on BOTH sections deliberately. Leaving one on the code default is how
+      # three parameters drifted before; CANDLE_REVERSAL is 13 of the 16 LIVE trades
+      # and is bound from DipStrategy, not FlowStrategy.
+      #
+      # ExitReviewAfter is left at 1h. It is the companion knob and moving it is a
+      # separate question: Q1 of time-to-peak is 18.6 min, so an earlier first look
+      # has its own case to make and its own cost.
+      #
+      # STAGED, NOT LIVE. The default below is the CURRENT value, so a deploy does not
+      # apply this. HYPOTHESES.md rule: "One live change at a time. Two at once and
+      # neither can be attributed." H34 goes first. To run H33 afterwards, set
+      # EXIT_REVIEW_EVERY=00:30:00 in .env and redeploy -- no code change needed.
+      DipStrategy__ExitReviewEvery:    "${EXIT_REVIEW_EVERY:-01:00:00}"
+      FlowStrategy__ExitReviewEvery:   "${EXIT_REVIEW_EVERY:-01:00:00}"
+
+      # ── H34: ratchet giveback 40% -> 25% ────────────────────────────────────
+      #
+      # Measured 2026-10-06 on the 16 LIVE trades: winners keep 60.5% of their own
+      # best excursion, which is exactly 1 - 0.40 and so is this parameter, not luck.
+      # Avg win +0.503% against avg loss -0.616% needs a 55.0% win rate to break even
+      # and the bot delivers 50.0%.
+      #
+      # Holding peaks fixed, 75% capture would lift the average win to ~0.642% and
+      # drop the break-even rate to 49.0%. That is an UPPER BOUND, not a forecast: a
+      # tighter trail also cuts some positions before they reach the peak they would
+      # have reached, and nothing here measures that. The 40/50/60 grid on
+      # RatchetGivebackPct never tested a cell below 40, so this is an untested cell.
+      DipStrategy__RatchetGivebackPct:  "${RATCHET_GIVEBACK:-0.25}"
+      FlowStrategy__RatchetGivebackPct: "${RATCHET_GIVEBACK:-0.25}"
+
     depends_on:
       postgres:
         condition: service_healthy

@@ -3859,3 +3859,148 @@ the realised loss — is real but has a different cause: across the 38 trades si
 shipped the average winner is **+0.51%** and the average loser **−0.78%**, a realised 0.65:1,
 because neither stored barrier is ever reached. The ratchet and the hourly review close
 everything first. The stored geometry is not what the account trades.
+
+---
+
+## H34 — Ratchet giveback 40% → 25%. 2026-10-06. **LIVE.**
+
+- **Opened** 2026-10-06
+- **Change** `FlowStrategyOptions.RatchetGivebackPct` 0.40 → **0.25**, on **both**
+  sections (`DipStrategy__RatchetGivebackPct` and `FlowStrategy__RatchetGivebackPct`
+  in docker-compose). Config-bound, so this is a redeploy, not a code change.
+- **Purpose** The operator observed that losing trades lose more than winning trades
+  gain. They do, and this parameter is why.
+
+### What was measured first
+
+16 LIVE trades, excursions reconstructed from `klines_1m` over each hold window:
+
+```
+avg win   +0.503%        avg loss  -0.616%       ratio 1.23:1 against
+win rate  50.0%          break-even win rate needed  55.0%
+```
+
+Winners keep **60.5%** of their own best excursion. That is not a coincidence or a
+small sample talking — it is `1 - RatchetGivebackPct` and the ratchet is doing exactly
+what it is configured to do. Per-trade capture on the eight LIVE winners: 93, 83, 70,
+66, 51, 44, 40, 37 percent.
+
+Losers, for contrast, absorb about 85% of their worst excursion before being closed.
+That gap *is* the 1.23:1 asymmetry.
+
+### Why 25 and not something inside the tested grid
+
+The grid on record tested 40 / 50 / 60 and could not rank them on eleven trades. It
+never tested a cell **below** 40. Every cell it did test gives back *more* of the peak,
+which moves the wrong way for the defect measured here. 25 is therefore an untested
+cell, chosen as one clear step in the direction the measurement points, and registered
+here for that reason.
+
+### The arithmetic, stated as a bound and not a forecast
+
+Holding peaks fixed, 75% capture lifts the average win from 0.503% to **~0.642%** and
+drops the break-even win rate from 55.0% to **49.0%** — below the 50.0% actually
+delivered.
+
+**That is an upper bound.** A tighter trail also closes positions before they reach the
+peak they would otherwise have reached, turning some larger wins into smaller ones, and
+nothing measured here captures that. The bound is what makes the change worth trying;
+it is not a prediction of the result.
+
+### Decision rule — fixed before the change, not to be edited
+
+Judged at **25 closed trades opened after the deploy**, mode = LIVE, both strategies.
+
+**KEEP** if all three hold:
+
+1. Mean capture ratio on winners ≥ **70%** (it is 60.5% now). This is the mechanism
+   check: if capture does not rise, the parameter did not do what it says.
+2. Avg win / avg loss ratio improves — i.e. `avg_loss / avg_win` < **1.23**.
+3. Total R over the window ≥ the 25 closed trades immediately before the deploy.
+
+**REJECT** and return to 0.40 if any of:
+
+1. Capture ratio rises but total R falls — the trail is cutting winners before they
+   develop, which is the known risk and the thing the bound above does not cover.
+2. Win rate falls below **42%**. Keeping more of a smaller peak is not the trade.
+3. Mean R is negative **and** worse than the preceding 25.
+
+Ambiguous — capture up, R flat within noise — is **REJECT**. An untested cell outside
+a measured grid does not get the benefit of the doubt.
+
+### Watch for
+
+Trades that previously exited RATCHET at a healthy multiple now exiting RATCHET much
+earlier at a small one, and the RATCHET count rising while its total R does not. That
+is the failure mode, and it shows up in the exit mix before it shows up in the P&L.
+
+---
+
+## H33 — Exit-review cadence 1h → 30m. 2026-10-06. **STAGED, NOT RUNNING.**
+
+- **Opened** 2026-10-06, **not applied**. Held behind `EXIT_REVIEW_EVERY`, which
+  defaults to the current `01:00:00`. H34 is the live change; this one waits for it to
+  be judged, per the one-change-at-a-time rule at the top of this file.
+- **Change when run** `FlowStrategyOptions.ExitReviewEvery` 1h → **30m** on both
+  sections. `ExitReviewAfter` stays at 1h and is explicitly **not** part of this.
+- **Purpose** Buy the next step on a ceiling that is already measured.
+
+### The ceiling, already on record
+
+From `FlowStrategyOptions.ExitReviewAfter`, what a perfect reviewer could recover at
+each cadence:
+
+```
+every 120 min  +0.883 R        every 60 min  +2.052 R
+every  30 min  +2.655 R        the paths offered  +3.682 R
+```
+
+The 60 → 30 step is worth **+0.603 R** of headroom against a perfect reviewer. The
+real reviewer is not perfect, so this is a ceiling on the gain, not the gain.
+
+### Why H28's "this is the half that costs" no longer reads the same
+
+H28 paced 60m against a stated worst case of "two open positions falling due in the
+same cycle plus one gate call is roughly 135s against a 120s budget". Every input to
+that sentence was re-measured on 2026-10-06 before staging this:
+
+| H28's input | Now | Source |
+|---|---|---|
+| one call 42–43 s | **22.5 / 21.5 / 25.7 / 20.7 s** | four LIVE calls, `bot` logs |
+| plus one entry-gate call | **gate deleted** | H30, 2026-09-29 |
+| two positions due at once | **max concurrent ever = 1** | `bot_trades` |
+
+Worst case now is 2 × 26 s = **52 s** against the unchanged 120 s budget. At one open
+position the duty cycle on Ollama is roughly 50 s per hour, about 1.4%.
+
+The two warning signs H28 told the operator to watch are both at **zero** across four
+days of LIVE running: `not evaluated this cycle` = 0, exit review `Unavailable` = 0,
+cycle budget exceeded = 0.
+
+### Decision rule — fixed now, before it is run
+
+Judged at **25 closed trades opened after it is enabled**, LIVE, both strategies.
+
+**KEEP** if all three hold:
+
+1. `not evaluated this cycle` stays at **0** and exit-review `Unavailable` stays at
+   **0** over the whole window. H28 named these; they are the abort conditions and they
+   are checked first, before any P&L.
+2. LLM_EXIT total R over the window improves on the 25 before it. This is the only
+   channel the change can act through.
+3. Total R over the window ≥ the 25 before it.
+
+**REJECT** and return to 1h if any of:
+
+1. Either abort condition fires even once. The cadence bought Ollama's queue rather
+   than the model's judgement, which is exactly what H28 predicted would go wrong.
+2. LLM_EXIT total R is unchanged within noise — more looks that change nothing are
+   cost without benefit.
+3. Median exit review latency exceeds **35 s**, i.e. the queue is building.
+
+### Note for whoever runs it
+
+Max hold is 720 min, so at a 30-minute cadence from the first look at 60 min a single
+position can cost up to 22 calls — more than the ~16 the original note called "out of
+reach". Observed holds are far shorter (max 242 min in LIVE, so 6 calls), but if
+`max_hold_minutes` is ever raised, this interacts and should be re-checked.
