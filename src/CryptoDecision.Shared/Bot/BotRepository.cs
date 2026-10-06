@@ -42,12 +42,15 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     }
 
     /// <summary>
-    /// Attach the exit geometry and the gate's verdict to a freshly opened trade.
+    /// Attach the exit geometry to a freshly opened trade.
     ///
     /// A second statement rather than parameters on IOrderEngine.OpenPositionAsync,
     /// for the reason <see cref="RecordEntryEvidenceAsync"/> already gives: these are
-    /// facts the strategy and the gate own, and threading them through the engine
-    /// would touch three implementations to carry values none of them use.
+    /// facts the strategy owns, and threading them through the engine would touch
+    /// three implementations to carry values none of them use.
+    ///
+    /// It no longer writes a gate verdict — the gate went with H30, and the sentence
+    /// saying it did outlived the statement by a week.
     ///
     /// Unlike the evidence write, this one is <em>not</em> safe to swallow. The stop
     /// price is what the exit evaluation reads; a position whose geometry failed to
@@ -225,14 +228,36 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// trades, and a live position missed by a limit clause is a real holding with
     /// nothing evaluating its stop loss.
     /// </summary>
+    /// <summary>
+    /// The one column list every <see cref="BotTrade"/> query selects.
+    ///
+    /// It used to be written out twice, in two separate string literals, under a
+    /// comment claiming they "stay in step or neither compiles". Nothing checked
+    /// that — they were two literals kept identical by hand, feeding a mapper that
+    /// read by POSITION. Inserting a column anywhere but the end of one of them
+    /// would have silently shifted every read after it, and the shift lands on
+    /// whatever happens to have a compatible type. Now there is genuinely one list,
+    /// and <see cref="MapRow"/> reads by name, so neither hazard exists.
+    ///
+    /// gate_verdict and gate_reason are gone from here. H30 deleted the entry gate
+    /// on 2026-09-29; the follow-up removed FindSimilarAsync and SimilarCase but
+    /// missed these two, which were still fetched on every open-trade read and
+    /// mapped onto properties nothing ever looked at. The COLUMNS stay in the table
+    /// — 92 historical rows carry verdicts that recorded decisions refer to, and
+    /// dropping them would destroy that evidence to save two fetched strings.
+    /// </summary>
+    private const string TradeColumns = """
+        id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
+        pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
+        mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
+        leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
+        entry_path, last_exit_review_at
+        """;
+
     public async Task<IReadOnlyList<BotTrade>> GetOpenTradesAsync(CancellationToken ct = default)
     {
-        const string sql = """
-            SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
-                   pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
-                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
-                   leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason, entry_path, last_exit_review_at
+        const string sql = $"""
+            SELECT {TradeColumns}
             FROM bot_trades
             WHERE status = 'OPEN'
             ORDER BY opened_at ASC
@@ -330,12 +355,8 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     public async Task<IReadOnlyList<BotTrade>> GetRecentTradesAsync(
         int limit = 50, CancellationToken ct = default)
     {
-        const string sql = """
-            SELECT id, symbol, side, strategy, entry_price, exit_price, quantity, notional_usd,
-                   pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
-                   mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
-                   leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-                   gate_verdict, gate_reason, entry_path, last_exit_review_at
+        const string sql = $"""
+            SELECT {TradeColumns}
             FROM bot_trades
             ORDER BY opened_at DESC
             LIMIT @limit
@@ -388,41 +409,56 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
 
     // ── Mapper ────────────────────────────────────────────────────────────────
 
-    private static BotTrade MapRow(NpgsqlDataReader r) => new()
+    /// <summary>
+    /// Read a row by COLUMN NAME, not by position.
+    ///
+    /// The positional version broke silently by construction: a column inserted
+    /// anywhere but the end of <see cref="TradeColumns"/> shifts every read after
+    /// it, and the shift only throws if the types happen to disagree. A decimal
+    /// landing in a decimal is a wrong number with no error — exactly the failure
+    /// shape this bot keeps producing.
+    ///
+    /// GetOrdinal is resolved per field per row, which at a few hundred rows a day
+    /// is not worth caching to get back.
+    /// </summary>
+    private static BotTrade MapRow(NpgsqlDataReader r)
     {
-        Id          = r.GetInt64(0),
-        Symbol      = r.GetString(1),
-        Side        = r.GetString(2),
-        Strategy    = r.GetString(3),
-        EntryPrice  = r.GetDecimal(4),
-        ExitPrice   = r.IsDBNull(5)  ? null : r.GetDecimal(5),
-        Quantity    = r.GetDecimal(6),
-        NotionalUsd = r.GetDecimal(7),
-        PnlUsd      = r.IsDBNull(8)  ? null : r.GetDecimal(8),
-        PnlPct      = r.IsDBNull(9)  ? null : r.GetDecimal(9),
-        Status      = r.GetString(10),
-        OpenedAt    = r.GetDateTime(11),
-        ClosedAt    = r.IsDBNull(12) ? null : r.GetDateTime(12),
-        CloseReason = r.IsDBNull(13) ? null : r.GetString(13),
-        PeakPrice   = r.IsDBNull(14) ? null : r.GetDecimal(14),
-        Mode         = r.GetString(15),
-        Exchange     = r.GetString(16),
-        EntryOrderId = r.IsDBNull(17) ? null : r.GetString(17),
-        ExitOrderId  = r.IsDBNull(18) ? null : r.GetString(18),
-        FeeUsd       = r.IsDBNull(19) ? null : r.GetDecimal(19),
-        ExitAlgoId   = r.IsDBNull(20) ? null : r.GetString(20),
-        Leverage     = r.IsDBNull(21) ? null : r.GetDecimal(21),
-        MarginMode   = r.IsDBNull(22) ? null : r.GetString(22),
+        decimal? Dec(string c) => r.IsDBNull(r.GetOrdinal(c)) ? null : r.GetDecimal(r.GetOrdinal(c));
+        string?  Str(string c) => r.IsDBNull(r.GetOrdinal(c)) ? null : r.GetString(r.GetOrdinal(c));
+        DateTime? Dt(string c) => r.IsDBNull(r.GetOrdinal(c)) ? null : r.GetDateTime(r.GetOrdinal(c));
 
-        // Ordinals continue the SELECT list above. Positional rather than by name
-        // because every query in this class shares one column list, so the two stay
-        // in step or neither compiles.
-        StopPrice     = r.IsDBNull(23) ? null : r.GetDecimal(23),
-        TargetPrice   = r.IsDBNull(24) ? null : r.GetDecimal(24),
-        AtrPctAtEntry = r.IsDBNull(25) ? null : r.GetDecimal(25),
-        GateVerdict   = r.IsDBNull(26) ? null : r.GetString(26),
-        GateReason    = r.IsDBNull(27) ? null : r.GetString(27),
-        EntryPath     = r.IsDBNull(28) ? null : r.GetString(28),
-        LastExitReviewAt = r.IsDBNull(29) ? null : r.GetDateTime(29),
-    };
+        return new BotTrade
+        {
+            Id          = r.GetInt64(r.GetOrdinal("id")),
+            Symbol      = r.GetString(r.GetOrdinal("symbol")),
+            Side        = r.GetString(r.GetOrdinal("side")),
+            Strategy    = r.GetString(r.GetOrdinal("strategy")),
+            EntryPrice  = r.GetDecimal(r.GetOrdinal("entry_price")),
+            ExitPrice   = Dec("exit_price"),
+            Quantity    = r.GetDecimal(r.GetOrdinal("quantity")),
+            NotionalUsd = r.GetDecimal(r.GetOrdinal("notional_usd")),
+            PnlUsd      = Dec("pnl_usd"),
+            PnlPct      = Dec("pnl_pct"),
+            Status      = r.GetString(r.GetOrdinal("status")),
+            OpenedAt    = r.GetDateTime(r.GetOrdinal("opened_at")),
+            ClosedAt    = Dt("closed_at"),
+            CloseReason = Str("close_reason"),
+            PeakPrice   = Dec("peak_price"),
+
+            Mode         = r.GetString(r.GetOrdinal("mode")),
+            Exchange     = r.GetString(r.GetOrdinal("exchange")),
+            EntryOrderId = Str("entry_order_id"),
+            ExitOrderId  = Str("exit_order_id"),
+            FeeUsd       = Dec("fee_usd"),
+            ExitAlgoId   = Str("exit_algo_id"),
+            Leverage     = Dec("leverage"),
+            MarginMode   = Str("margin_mode"),
+
+            StopPrice        = Dec("stop_price"),
+            TargetPrice      = Dec("target_price"),
+            AtrPctAtEntry    = Dec("atr_pct_at_entry"),
+            EntryPath        = Str("entry_path"),
+            LastExitReviewAt = Dt("last_exit_review_at"),
+        };
+    }
 }

@@ -293,6 +293,15 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      # Added 2026-10-06 with the schema DDL removed from DatabaseInitializer.
+      #
+      # Processor used to create `trades`, `klines_1m` and `daily_feature_table`
+      # itself, so it did not care whether migrations had run. That made it a second
+      # schema authority which had already drifted three columns behind sql/. Now it
+      # only creates the daily partitions of `trades`, which needs the parent table
+      # to exist — so it has to wait for migrations the way `bot` already does.
+      db-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]

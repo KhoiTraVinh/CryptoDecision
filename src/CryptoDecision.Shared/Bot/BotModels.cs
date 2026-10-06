@@ -140,16 +140,11 @@ public sealed record BotTrade
     /// <inheritdoc cref="DynamicStopPrice"/>
     public decimal? DynamicTargetPrice { get; set; }
 
-    /// <summary>
-    /// How this entry got past the gate: APPROVED, APPROVED_DEGRADED, or NOT_GATED.
-    ///
-    /// Only ever set on entries that happened. A refused candidate produces no row —
-    /// the refusal trail on bot_config is where those live.
-    /// </summary>
-    public string? GateVerdict { get; set; }
-
-    /// <summary>What the gate said, in its own words.</summary>
-    public string? GateReason  { get; set; }
+    // GateVerdict and GateReason were removed on 2026-10-06. H30 deleted the entry
+    // gate on 2026-09-29 and the follow-up commit removed what it orphaned in the
+    // agent layer, but these two survived: still selected on every open-trade read,
+    // still mapped, and read by nothing since. The bot_trades columns are kept —
+    // 92 historical rows carry verdicts that recorded decisions cite.
 
     /// <summary>True when this trade committed real funds.</summary>
     public bool IsLive => Mode == "LIVE";
