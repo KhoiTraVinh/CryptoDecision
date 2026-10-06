@@ -4004,3 +4004,39 @@ Max hold is 720 min, so at a 30-minute cadence from the first look at 60 min a s
 position can cost up to 22 calls — more than the ~16 the original note called "out of
 reach". Observed holds are far shorter (max 242 min in LIVE, so 6 calls), but if
 `max_hold_minutes` is ever raised, this interacts and should be re-checked.
+
+### H33 — RUNNING from 2026-10-06 16:30 UTC. Operator override, recorded as one.
+
+The entry above staged this behind `EXIT_REVIEW_EVERY` and put H34 first, citing the
+rule at the top of this file: *one live change at a time, two at once and neither can
+be attributed*. The operator asked for the 30-minute cadence, was given that reason,
+and asked again. It is now live. The decision rule above is **unchanged** and was not
+edited; only this note is added.
+
+**The unmet condition, named.** H34 opened at 13:33 UTC with 0 of its 25 trades
+closed — one position, #171, was open when this was switched. H33's own KEEP test
+("LLM_EXIT total R over the window improves on the 25 before it") and H34's
+("capture ratio ≥ 70%", "total R ≥ the preceding 25") now measure overlapping
+windows.
+
+**How to still separate them.** The two act on disjoint exits, so the exit mix does
+the attribution that the total cannot:
+
+- a **RATCHET** close is H34's work — it fires on peak giveback, every cycle, no model
+- an **LLM_EXIT** close is H33's — it only happens at a review, and only past 1h
+- SL / TP / HV_* closes belong to neither
+
+So judge H34 on the RATCHET rows and H33 on the LLM_EXIT rows, and treat total R over
+the window as uninterpretable for either. This is weaker than two clean windows and
+is the price of running them together; it is recorded here so the weakness is not
+discovered at judgement time.
+
+**Also changed by this, and worth watching.** The cadence was paced against Ollama
+throughput. The re-measurement that justified 30m (calls at 20.7–25.7s, entry gate
+deleted, max 1 concurrent position) was taken with **one** position open. The abort
+conditions in the entry above — `not evaluated this cycle` and exit review
+`Unavailable`, both still at zero — are checked first on every watch run, and either
+one firing rejects H33 regardless of P&L.
+
+`ExitReviewAfter` stays at 1h. This changes the gap between reviews, not when the
+first one lands.
