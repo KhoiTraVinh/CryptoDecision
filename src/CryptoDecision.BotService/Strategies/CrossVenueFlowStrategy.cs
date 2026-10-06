@@ -158,10 +158,24 @@ public sealed class CrossVenueFlowStrategy(
             : reviewer is null
                 ? $"EARLY EXIT: the {tuning.FlowOfiBars}-bucket OFI rule, every cycle — no " +
                   "exit reviewer is wired into this instance. "
-                : $"EARLY EXIT: after {tuning.ExitReviewAfter.TotalHours:F0}h and then every " +
-                  $"{tuning.ExitReviewEvery.TotalHours:F0}h, the MODEL is asked whether force " +
+                : $"EARLY EXIT: after {Cadence(tuning.ExitReviewAfter)} and then every " +
+                  $"{Cadence(tuning.ExitReviewEvery)}, the MODEL is asked whether force " +
                   $"remains or the trend has turned; the {tuning.FlowOfiBars}-bucket OFI rule " +
                   "runs ONLY as the fallback when it cannot answer. ");
+
+    /// <summary>
+    /// Render a review interval without rounding it away.
+    ///
+    /// This was `TotalHours:F0` with a literal "h". H33 set the interval to 30
+    /// minutes on 2026-10-06 and the startup banner began reading "every 0h" — on
+    /// the one line the operator had been told to check the cadence against. The
+    /// value was right and the sentence describing it was not, which is the failure
+    /// this codebase keeps paying for.
+    /// </summary>
+    private static string Cadence(TimeSpan t) =>
+        t.TotalHours >= 1 && t.Minutes == 0
+            ? $"{t.TotalHours:F0}h"
+            : $"{t.TotalMinutes:F0}min";
 
     /// <summary>
     /// The ratchet, said at startup alongside the reviewer.
