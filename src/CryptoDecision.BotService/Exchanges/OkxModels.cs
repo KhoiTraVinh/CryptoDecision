@@ -287,6 +287,26 @@ public sealed record OkxPositionHistory(
     public decimal? OpenAvgPx    => OkxNum.ParseOrNull(OpenAvgPxRaw);
 
     /// <summary>
+    /// When OKX last updated this history row — in practice, when the position
+    /// settled. Millisecond epoch, UTC.
+    ///
+    /// Carried since this record existed and read by nothing, which is how trade 175
+    /// came to be paid trade 174's P&amp;L on 2026-10-07. openAvgPx alone was the
+    /// discriminator, on the stated assumption that "a different position almost
+    /// never opened at the same price" — 174 opened at 116.37 and 175 at 116.36, a
+    /// 0.0086% drift against a 0.1% tolerance, and the stale row was accepted.
+    ///
+    /// Price is a weak identity key for a mean-reversion rule that re-enters in a
+    /// range: near-identical entry prices are what it DOES. Settlement time is
+    /// monotonic, so a row that settled before this trade closed cannot be this
+    /// trade's, whatever it opened at.
+    /// </summary>
+    public DateTime? UpdatedAt =>
+        long.TryParse(UpdatedAtRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms)
+            ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime
+            : null;
+
+    /// <summary>
     /// OKX close-type code. "3" is partial liquidation and "4" full liquidation;
     /// "2" is a full close by the trader. Surfaced so a liquidation is named as one
     /// in the trade record rather than filed as an ordinary close.

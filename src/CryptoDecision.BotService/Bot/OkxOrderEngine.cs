@@ -711,10 +711,22 @@ public sealed class OkxOrderEngine(
         // to something else, and the honest outcome is the _UNCONFIRMED path below — a
         // row that says plainly the real result was not recorded, rather than one that
         // quietly reports someone else's.
+        // Settlement time is the second key, for the reason trade 175 demonstrated on
+        // 2026-10-07: two entries 0.0086% apart passed the price check and the earlier
+        // position's row was accepted. A row that settled BEFORE this position opened
+        // cannot be this position's, whatever it opened at — and in that case the stale
+        // row had settled five minutes before the next trade even started.
+        //
+        // OpenedAt rather than ClosedAt here: this path runs because the position
+        // vanished, so there is no close of our own to compare against yet.
+        var settledBeforeOpen =
+            history?.UpdatedAt is { } settled && settled < trade.OpenedAt;
+
         var attributable =
             history?.OpenAvgPx is { } histOpen
             && trade.EntryPrice > 0m
-            && Math.Abs(histOpen - trade.EntryPrice) / trade.EntryPrice <= 0.001m;
+            && Math.Abs(histOpen - trade.EntryPrice) / trade.EntryPrice <= 0.001m
+            && !settledBeforeOpen;
 
         if (history?.RealisedPnl is { } realised && attributable)
         {
@@ -756,10 +768,12 @@ public sealed class OkxOrderEngine(
             "retried; the real result is NOT recorded. Reconcile this row against the exchange by " +
             "hand.",
             trade.Id, instrument.InstId,
-            history is null       ? "no entry returned"
-            : !attributable       ? $"entry opened at {history.OpenAvgPx} against this position's " +
-                                    $"{trade.EntryPrice}"
-                                  : "entry carried no realised P&L");
+            history is null        ? "no entry returned"
+            : settledBeforeOpen    ? $"entry settled at {history.UpdatedAt:O}, before this position " +
+                                     $"opened at {trade.OpenedAt:O} — it is an earlier position"
+            : !attributable        ? $"entry opened at {history.OpenAvgPx} against this position's " +
+                                     $"{trade.EntryPrice}"
+                                   : "entry carried no realised P&L");
 
         trade.ExitPrice   = trade.EntryPrice;
         trade.PnlUsd      = 0m;
@@ -1124,8 +1138,84 @@ public sealed class OkxOrderEngine(
             return;
         }
 
+        // ── Second key: when did that row settle? ─────────────────────────────
+        //
+        // The price check above is not sufficient, and 2026-10-07 is the proof. Trade
+        // 174 opened at 116.37 and trade 175 at 116.36 — 0.0086% apart, inside the 0.1%
+        // tolerance — so 175 accepted 174's settled row and was credited +0.0946 while
+        // it had actually lost 0.1503. The comment justifying the price check says "a
+        // different position almost never opened at the same price". For a rule that
+        // buys dips and re-enters in a range, near-identical entries are not a rare
+        // coincidence; they are the normal case.
+        //
+        // uTime is monotonic: a row that settled BEFORE this position closed cannot be
+        // this position's, whatever price it opened at. The stale row this guard is
+        // built to reject is by definition an earlier settlement.
+        //
+        // The tolerance absorbs clock skew between the host and OKX only. It is not a
+        // grace period — a genuinely matching row settles at or after the close.
+        if (trade.ClosedAt is { } closedAt && history.UpdatedAt is { } settledAt)
+        {
+            var skew = TimeSpan.FromSeconds(30);
+
+            if (settledAt < closedAt - skew)
+            {
+                log.LogWarning(
+                    "[OKX] Trade {Id}: the position-history entry on {InstId} settled at {Settled:O} " +
+                    "but this position closed at {Closed:O} — {Behind:F0}s earlier, so it is a " +
+                    "PREVIOUS position and has been IGNORED even though its open price is within " +
+                    "tolerance ({HistOpen:F4} vs {Entry:F4}). P&L stays derived from this trade's " +
+                    "own fills and EXCLUDES funding.",
+                    trade.Id, instrument.InstId, settledAt, closedAt,
+                    (closedAt - settledAt).TotalSeconds,
+                    history.OpenAvgPx, trade.EntryPrice);
+                return;
+            }
+        }
+
         var derived = trade.PnlUsd ?? 0m;
         var delta   = realised - derived;
+
+        // ── Third key: is the gap even possible? ──────────────────────────────
+        //
+        // Both keys above compare identity. This one compares magnitude, because the
+        // line below calls the gap "funding and fee rounding" and that sentence has to
+        // be true for the number to be accepted.
+        //
+        // Funding on this account was measured at ~7 bps for short holds and 63 bps
+        // over 12 hours. It is a function of HOLD TIME, so the bound has to be one too.
+        //
+        // A flat bound does not work, and the first version of this guard proved it: at
+        // a flat 150 bps the trade 175 case — 0.2449 on 29.09 notional, 84 bps over one
+        // hour — sailed through, because 84 is less than 150. A probe replaying the real
+        // figures caught that before it shipped. Scaled, the same case is 84 bps against
+        // a 15 bps allowance and is rejected on magnitude alone, independently of the
+        // two identity keys above.
+        //
+        // 5 bps flat covers fee rounding; 10 bps per hour is ~2x the 63-bps-over-12h
+        // measurement, so a genuinely lumpy funding charge still lands inside it.
+        //
+        // Over the bound, the derived figure wins. It is computed from the fills this
+        // trade actually got, so it is never absurd; its only known flaw is that it
+        // omits funding, which is exactly what the warning says.
+        var heldHours = Math.Max(0, (DateTime.UtcNow - trade.OpenedAt).TotalHours);
+        var bound     = trade.NotionalUsd * (0.0005m + 0.0010m * (decimal)heldHours);
+
+        if (trade.NotionalUsd > 0m && Math.Abs(delta) > bound)
+        {
+            log.LogError(
+                "[OKX] Trade {Id}: the exchange figure {Realised:+0.0000;-0.0000} differs from the " +
+                "derived {Derived:+0.0000;-0.0000} by {Delta:+0.0000;-0.0000}, which is {Pct:P2} of " +
+                "${Notional:F2} notional over a {Hours:F1}h hold. Funding cannot account for that — " +
+                "it measured ~7 bps on short holds and 63 bps over 12 hours — so the exchange figure " +
+                "has been REJECTED and the derived one kept. Both keys passed, which means the " +
+                "attribution guards have a case they do not cover; read the two above before trusting " +
+                "this row.",
+                trade.Id, realised, derived, delta,
+                Math.Abs(delta) / trade.NotionalUsd, trade.NotionalUsd,
+                (DateTime.UtcNow - trade.OpenedAt).TotalHours);
+            return;
+        }
 
         trade.PnlUsd = Math.Round(realised, 4);
         trade.PnlPct = trade.NotionalUsd > 0m
