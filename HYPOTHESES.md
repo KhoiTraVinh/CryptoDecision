@@ -4211,3 +4211,83 @@ least separable in principle — it can only act through a TP exit, and no other
 hypothesis touches that — but if TP never fires, this window measures nothing about
 H36 and everything about the other three. **H34 should be judged and closed before
 anything else is opened.**
+
+---
+
+## H34 — RESULT: **REJECTED.** Judged 2026-10-08 at 11 closed trades.
+
+Judged early, at 11 of the stated 25, at the operator's request. That is a
+stopping-rule violation and it is recorded as one: stopping when the data is in hand
+inflates whatever answer you get. It is tolerable here only because no REJECT
+condition turns on a marginal call — the deciding evidence is the named failure mode
+firing, not a threshold crossed by a hair.
+
+### Did the mechanism work? Yes.
+
+Measured against `peak_price`, which is what the ratchet itself reads:
+
+| | n | capture vs peak (gross) | configured ceiling |
+|---|---|---|---|
+| before (giveback 0.40) | 5 | 57.1% | 60% |
+| after (giveback 0.25) | 6 | **66.1%** | 75% |
+
++9 percentage points, right direction, 88% of the theoretical effect. The parameter
+did what it says.
+
+**The 48.1% the watch script reports is a different and biased number.** It divides
+by max favourable excursion taken from 1-minute Binance kline highs, which include
+wicks the bot's own 30-second sampler never saw. As a denominator for "did the
+ratchet keep more of what it saw", it is systematically too large. Both figures are
+below 70%; only one of them is the mechanism test.
+
+### Against the pre-registered conditions
+
+| KEEP condition | result |
+|---|---|
+| 1. capture ≥ 70% | **NOT MET** — 66.1% on peak, 48.1% on MFE |
+| 2. avg_loss/avg_win < 1.23 | **NOT MET** — 1.441, against 1.390 before |
+| 3. total R ≥ the preceding window | **MET** — mean R −0.0420 → −0.0177 |
+
+No REJECT condition fires on its own terms: win rate is 54.5% (not under 42%), and
+mean R is negative but better than before, not worse.
+
+### What decides it
+
+The entry's own watch-for line: *"the RATCHET count rising while its total R does
+not. That is the failure mode, and it shows up in the exit mix before it shows up in
+the P&L."*
+
+```
+RATCHET   before  n=5   total +0.6071   mean R +0.2024   avg +0.413%
+          after   n=6   total +0.5708   mean R +0.1586   avg +0.326%
+```
+
+Count up, total R down, mean R down 22%. Exactly the shape the entry said to watch
+for. Capture went up and the winners got smaller: a tighter trail keeps a larger
+share of a peak it reaches sooner. The share is not the point; the dollars are.
+
+With the ambiguity clause — *"capture up, R flat within noise, is REJECT. An untested
+cell outside a measured grid does not get the benefit of the doubt"* — this is a
+reject on the rule as written.
+
+### Three defects in the rule itself, for whoever writes the next one
+
+1. **The 70% bar was arithmetically unreachable.** Giveback 0.25 caps gross capture at
+   75%. The average peak after H34 was 0.5995%, and a 0.070% round trip is 11.7% of
+   that, so net capture could not exceed ~63.3%. Condition 1 could never have been
+   met. A KEEP condition above its own ceiling is not a test.
+2. **"Capture ratio" never named its denominator.** Peak-price and kline-MFE are both
+   defensible and differ by 18 points. The next rule names the series.
+3. **It compared against "the 25 closed trades before the deploy" when only 16
+   existed.** Per-trade comparison was substituted; that should have been the wording
+   from the start on an account this young.
+
+### Action
+
+`RatchetGivebackPct` returns to **0.40** on both sections. H25's measured grid
+(40/50/60, unable to rank them on eleven trades) stands unchallenged — 0.25 was
+always outside it, and it has now been tried and did not pay.
+
+What is NOT concluded: that 0.40 is optimal, or that the ratchet is the problem. The
+ratchet remains the only exit in profit across the whole live book (+1.1779 over 11
+of 11 wins). This rejects one untested cell on six observations, nothing more.

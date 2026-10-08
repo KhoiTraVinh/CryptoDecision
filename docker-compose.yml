@@ -452,8 +452,20 @@ services:
       # tighter trail also cuts some positions before they reach the peak they would
       # have reached, and nothing here measures that. The 40/50/60 grid on
       # RatchetGivebackPct never tested a cell below 40, so this is an untested cell.
-      DipStrategy__RatchetGivebackPct:  "${RATCHET_GIVEBACK:-0.25}"
-      FlowStrategy__RatchetGivebackPct: "${RATCHET_GIVEBACK:-0.25}"
+      # H34 REJECTED 2026-10-08 at 11 trades. Back to 0.40.
+      #
+      # The parameter worked: capture against peak_price went 57.1% -> 66.1%, which is
+      # 88% of the theoretical effect. It is the dollars that did not follow. RATCHET
+      # went from 5 trades at +0.6071 to 6 at +0.5708, mean R 0.2024 -> 0.1586 — count
+      # up, total down, which is verbatim the failure the entry said to watch for. A
+      # tighter trail keeps a larger share of a peak it reaches sooner, and the share
+      # is not what pays.
+      #
+      # Judged at 11 of the stated 25 on the operator's call, recorded as the
+      # stopping-rule violation it is. Full result, including three defects in the
+      # decision rule itself, is under "H34 — RESULT" in HYPOTHESES.md.
+      DipStrategy__RatchetGivebackPct:  "${RATCHET_GIVEBACK:-0.40}"
+      FlowStrategy__RatchetGivebackPct: "${RATCHET_GIVEBACK:-0.40}"
 
     depends_on:
       postgres:
