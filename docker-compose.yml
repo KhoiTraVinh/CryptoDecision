@@ -388,6 +388,38 @@ services:
       # Q1, i.e. deliberately before most positions have peaked.
       DipStrategy__ExitReviewAfter:    "${EXIT_REVIEW_AFTER:-00:30:00}"
       FlowStrategy__ExitReviewAfter:   "${EXIT_REVIEW_AFTER:-00:30:00}"
+
+      # ── H36: TargetRiskMultiple 2.0 -> 1.0, 2026-10-08 ──────────────────────
+      #
+      # The stop is a flat 2.00% in practice — 1.5 x ATR has never once beaten the
+      # H8 floor in 124 trades (ATR at entry ranges 0.138-0.936%, so 1.5x tops out at
+      # 1.404% against a 2.00% floor; it would need 1.333% ATR to bind). So the
+      # target is 2.0 x 2.00% = 4.00%, and the "dynamic" geometry has never moved.
+      #
+      # Gridded on real minute paths, 120 bracketed trades, first touch inside 12h,
+      # net of the 0.070% round trip. Where both legs are touched in the same minute
+      # the adverse one is assumed first, because the optimistic version is how a
+      # replay invents an edge:
+      #
+      #     TP      TP first   SL first   neither   net/decided trade
+      #     0.75%      74         30        16        -0.113
+      #     1.50%      50         39        31        -0.104
+      #     2.00%      39         40        41        -0.095   <- best
+      #     2.50%      26         40        54        -0.297
+      #     4.00%       8         41        71        -1.090   <- shipped
+      #
+      # NO CELL IS POSITIVE. This is damage reduction, not an edge: ~1.0 percentage
+      # point per bracket-decided trade, moving off the worst cell of the nine.
+      #
+      # 1.50-2.00% is a plateau (-0.104/-0.106/-0.095) rather than a spike, and it
+      # falls off a cliff past 2.00%. Separately, 2.00% is where touch probability
+      # equals the stop's — measured on a different day by a different method, same
+      # answer. Two agreeing measurements on a plateau is the opposite of picking an
+      # argmax off a short curve, which this repository has done before.
+      #
+      # MinRewardRisk 0.5 still clears: 2%/2% is 0.93:1 after fees.
+      DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-1.0}"
+      FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-1.0}"
       #
       # LIVE from 2026-10-06 16:30 UTC, by operator instruction.
       #
