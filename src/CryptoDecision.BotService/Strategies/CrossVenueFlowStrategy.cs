@@ -284,7 +284,7 @@ public sealed class CrossVenueFlowStrategy(
                 // fetched above are still used for the volatility reading the geometry
                 // needs; this mode simply does not score on them.
                 FlowEntryMode.FlowRatio =>
-                    CrossVenueFlowScorer.ScoreFlowRatio(set.ByVenue, DateTime.UtcNow, tuning.Signal),
+                    await ScoreFlowRatioLiveFirstAsync(opts.Symbol, set, ct),
 
                 // No catch-all that scores something. ZScore and OfiMagnitude were removed
                 // on 2026-09-18 and this arm used to send anything unrecognised to the
@@ -1024,6 +1024,87 @@ public sealed class CrossVenueFlowStrategy(
         }
     }
 
+
+    /// <summary>
+    /// Check the bucket IN PROGRESS first, then fall back to the settled one.
+    ///
+    /// The settled path waits for a 15-minute bucket to close and then three more
+    /// minutes to settle. Eighteen minutes of latency is fine for a ratio, which is
+    /// meaningless until the bucket is whole, and useless for SIZE, which is already
+    /// true the moment the prints land.
+    ///
+    /// 2026-10-08 is the case that forced this. The 15:15 bucket traded $49.51M, 2.5x
+    /// the news-print threshold. CANDLE_REVERSAL bought the dip at 15:15:51 — 51
+    /// seconds in — and was stopped out at 15:23:57 for -$0.6228, the largest loss in
+    /// the live book. `suspend_on_high_volume` was ON and did nothing, because it
+    /// suspends the dip rule only while XVENUE_FLOW HOLDS a high-volume position, and
+    /// XVENUE_FLOW could not open one until ~15:33. The whole trade lived and died
+    /// inside the bucket whose volume was the reason not to take it.
+    ///
+    /// Reading the live bucket closes that window to one evaluation cycle.
+    ///
+    /// Re-entry is bounded by what already exists rather than by new state here:
+    /// max_open_high_volume is 1, max_open_per_side is 1, and cooldown_seconds is 900
+    /// — a full bucket — so the same spike cannot be taken twice. Keeping the guard
+    /// where the other caps live is deliberate; a second place that decides whether a
+    /// trade may open is a second place to get it wrong.
+    /// </summary>
+    private async Task<FlowVerdict> ScoreFlowRatioLiveFirstAsync(
+        string symbol, FlowBarSet set, CancellationToken ct)
+    {
+        var threshold = tuning.Signal.RatioHighVolumeUsd;
+
+        if (threshold > 0m)
+        {
+            var live = await flowRepo.GetLiveBucketVolumeAsync(symbol, ct);
+
+            if (live.TotalUsd >= threshold)
+            {
+                // Same refusal the settled path makes, for the same reason: with no
+                // dominant side, `ofi > 0 ? LONG : SHORT` would silently resolve a zero
+                // to SHORT.
+                if (live.Ofi == 0.0)
+                    return FlowVerdict.Abstain(
+                        "BUCKET_PERFECTLY_BALANCED",
+                        "The rolling 15 minutes to now have traded " +
+                        $"${live.TotalUsd / 1_000_000m:F2}M with buy and sell exactly equal, so " +
+                        "there is no dominant side to enter with.",
+                        0.0, 0.0, 0, set.ByVenue.Count, 0.0);
+
+                var ratio = (1.0 + Math.Abs(live.Ofi)) / (1.0 - Math.Abs(live.Ofi));
+
+                log.LogWarning(
+                    "[XFlow] LIVE news print: {Vol:F2}M in the rolling 15 minutes to {Now:HH:mm:ss}, " +
+                    "past the {Threshold:F1}M threshold. Entering {Side} now rather than waiting " +
+                    "for a bucket to close and settle, which costs up to 18 minutes.",
+                    live.TotalUsd / 1_000_000m, DateTime.UtcNow,
+                    threshold / 1_000_000m, live.Ofi > 0 ? "LONG" : "SHORT");
+
+                return new FlowVerdict(
+                    Actionable:          true,
+                    Side:                live.Ofi > 0 ? "LONG" : "SHORT",
+                    AggregateOfi:        live.Ofi,
+                    AggregateZ:          0.0,
+                    AgreeingVenues:      0,
+                    ParticipatingVenues: set.ByVenue.Count,
+                    DispersionBps:       0.0,
+                    AbstainCode:         "",
+                    Reason:              "The rolling 15 minutes to now have traded " +
+                                         $"${live.TotalUsd / 1_000_000m:F2}M, at or above the " +
+                                         $"${threshold / 1_000_000m:F1}M news-print threshold. " +
+                                         $"Entering WITH the heavier side at {ratio:F2}:1 " +
+                                         $"{(live.Ofi > 0 ? "buy" : "sell")} " +
+                                         $"(OFI {live.Ofi:+0.000;-0.000}) — a lead of " +
+                                         $"{Math.Abs(live.Ofi) * 100:F1}% of the notional so far. " +
+                                         "Read LIVE off raw trades, not a settled bucket. Volume " +
+                                         "is the whole signal here; price is not consulted.",
+                    EntryPath:           EntryPaths.HighVolume,
+                    TriggerValue:        ratio);
+            }
+        }
+
+        return CrossVenueFlowScorer.ScoreFlowRatio(set.ByVenue, DateTime.UtcNow, tuning.Signal);
+    }
 
     private static ExitDecision Exit(
         string reason, decimal price, decimal changePct,

@@ -1,4 +1,5 @@
 using CryptoDecision.Shared.Signals;
+using NpgsqlTypes;
 using Npgsql;
 
 namespace CryptoDecision.BotService.Infrastructure;
@@ -14,6 +15,54 @@ public interface IFlowBarRepository
     /// <summary>Recent 1-minute candles, ascending, for volatility measurement.</summary>
     Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(
         string symbol, int minutes, CancellationToken ct = default);
+
+    /// <summary>
+    /// Buy and sell notional in the 15-minute bucket CURRENTLY IN PROGRESS, summed
+    /// straight off raw trades up to this instant.
+    ///
+    /// Everything else in this interface deliberately refuses to look at the open
+    /// bucket, because a partial bucket is a moving number and a RATIO computed from
+    /// one is noise. This method exists because SIZE is not a ratio: $49M of prints is
+    /// $49M whether the bucket has finished or not, and waiting to be told so costs
+    /// the whole event.
+    ///
+    /// 2026-10-08 is why. The 15:15 bucket traded $49.51M — 2.5x the news-print
+    /// threshold. CANDLE_REVERSAL opened a LONG at 15:15:51, 51 seconds into it, and
+    /// was stopped out at 15:23:57 for -$0.6228, the largest loss in the live book.
+    /// The high-volume suspension that should have blocked that entry could not fire:
+    /// it waits for XVENUE_FLOW to hold a position, XVENUE_FLOW reads only closed and
+    /// settled buckets, and that bucket did not close until 15:30 or settle until
+    /// ~15:33. Eighteen minutes of structural latency against an eight-minute crash.
+    /// The trade was opened and killed inside the very bucket whose volume was the
+    /// reason not to open it.
+    /// </summary>
+    Task<LiveBucketVolume> GetLiveBucketVolumeAsync(
+        string symbol, CancellationToken ct = default);
+}
+
+/// <summary>
+/// Volume accumulated so far in the bucket currently in progress.
+/// </summary>
+/// <param name="BucketStart">Start of the bucket these totals belong to.</param>
+/// <param name="ElapsedMinutes">How far into the bucket the reading was taken.</param>
+public sealed record LiveBucketVolume(
+    DateTime BucketStart,
+    decimal  BuyUsd,
+    decimal  SellUsd,
+    double   ElapsedMinutes)
+{
+    public decimal TotalUsd => BuyUsd + SellUsd;
+
+    /// <summary>
+    /// Imbalance in [-1, +1], the same definition <see cref="FlowBar.Ofi"/> uses so a
+    /// live reading and a settled one cannot mean different things.
+    /// </summary>
+    public double Ofi => TotalUsd > 0m
+        ? (double)((BuyUsd - SellUsd) / TotalUsd)
+        : 0.0;
+
+    public static LiveBucketVolume Empty(DateTime bucketStart) =>
+        new(bucketStart, 0m, 0m, 0.0);
 }
 
 /// <summary>
@@ -143,6 +192,55 @@ public sealed class FlowBarRepository(NpgsqlDataSource dataSource) : IFlowBarRep
             StringComparer.OrdinalIgnoreCase);
 
         return new FlowBarSet(result, latest);
+    }
+
+    public async Task<LiveBucketVolume> GetLiveBucketVolumeAsync(
+        string symbol, CancellationToken ct = default)
+    {
+        // The buy/sell split is NOT re-derived here. `NOT is_buyer_maker` is the taker
+        // buying, and that is the convention sql/017 aggregates flow_bars_15m with and
+        // every IngestionService normaliser maps onto. Writing the condition a second
+        // time is how a live reading and a settled one come to disagree about which
+        // side a print was on, so it is copied rather than reasoned out.
+        //
+        // Across all venues, matching how the strategy sums settled buckets. Partitions
+        // are pruned by trade_time, so this touches at most today's and yesterday's.
+        // ROLLING 15 minutes, not the aligned bucket.
+        //
+        // Aligned was the first version and it has a hole: a spike at 15:23 is
+        // forgotten at 15:30 when the bucket rolls. On 2026-10-08 the $49.51M landed in
+        // the 15:15 bucket and CANDLE_REVERSAL opened trade #184 at 15:31:01 — 61
+        // seconds into the next bucket, with the accumulator back at zero and the
+        // cascade one minute behind it. A rolling window still sees it.
+        //
+        // Fifteen minutes because that is the width the $20M threshold was calibrated
+        // on. Changing the window without changing the threshold would silently change
+        // what the rule means.
+        const string sql = """
+            SELECT COALESCE(SUM(quote_qty) FILTER (WHERE NOT is_buyer_maker), 0),
+                   COALESCE(SUM(quote_qty) FILTER (WHERE     is_buyer_maker), 0)
+            FROM trades
+            WHERE symbol = @symbol
+              AND trade_time >= @since
+            """;
+
+        var now   = DateTime.UtcNow;
+        var since = now.AddMinutes(-15);
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("symbol", symbol);
+        cmd.Parameters.AddWithValue("since",  NpgsqlDbType.TimestampTz, since);
+
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct))
+            return LiveBucketVolume.Empty(since);
+
+        return new LiveBucketVolume(
+            BucketStart:    since,
+            BuyUsd:         r.GetDecimal(0),
+            SellUsd:        r.GetDecimal(1),
+            ElapsedMinutes: 15.0);
     }
 
     public async Task<IReadOnlyList<Candle>> GetRecentCandlesAsync(
