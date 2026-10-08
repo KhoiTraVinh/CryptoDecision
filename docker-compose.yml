@@ -362,9 +362,32 @@ services:
       # three parameters drifted before; CANDLE_REVERSAL is 13 of the 16 LIVE trades
       # and is bound from DipStrategy, not FlowStrategy.
       #
-      # ExitReviewAfter is left at 1h. It is the companion knob and moving it is a
-      # separate question: Q1 of time-to-peak is 18.6 min, so an earlier first look
-      # has its own case to make and its own cost.
+      # ── H35: ExitReviewAfter 1h -> 30m, 2026-10-08 ──────────────────────────
+      #
+      # H33 moved the gap BETWEEN reviews and, measured over 20 hours and 10 trades,
+      # never once took effect: the longest hold since it went live was 61 minutes,
+      # every LLM_EXIT fired at minute 60 or 61, and no position ever reached a
+      # second review. ExitReviewEvery cannot bind when nothing survives review one.
+      # ExitReviewAfter was the binding parameter all along, so this is what H33
+      # needed in order to measure anything at all.
+      #
+      # The cost, measured before the change rather than discovered after: 5 of the
+      # 11 RATCHET winners were held past 30 minutes — 44, 46, 54, 56 and 64 min —
+      # and together they are +$0.6325, more than the account's entire $0.5197 loss.
+      # Those five now get looked at while they are still open, and the reviewer has
+      # cut on 9 of its 11 first looks.
+      #
+      # It does not follow that they would be cut. A trade on its way to a ratchet
+      # win is moving in its own favour at minute 30, and the reviewer's stated
+      # grounds have been "the 1-hour and 4-hour price moves both run against the
+      # position" — which is a different reading at minute 30 than at minute 60.
+      # That is the bet, stated plainly, not a prediction.
+      #
+      # Time-to-peak on record: min 0.2, Q1 18.6, MEDIAN 62.3, Q3 92.7, max 162.1 min.
+      # H28 chose 1h to put the first look at the median peak. 30 min puts it nearer
+      # Q1, i.e. deliberately before most positions have peaked.
+      DipStrategy__ExitReviewAfter:    "${EXIT_REVIEW_AFTER:-00:30:00}"
+      FlowStrategy__ExitReviewAfter:   "${EXIT_REVIEW_AFTER:-00:30:00}"
       #
       # LIVE from 2026-10-06 16:30 UTC, by operator instruction.
       #

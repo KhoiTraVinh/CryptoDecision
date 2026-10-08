@@ -4040,3 +4040,86 @@ one firing rejects H33 regardless of P&L.
 
 `ExitReviewAfter` stays at 1h. This changes the gap between reviews, not when the
 first one lands.
+
+---
+
+## H35 — ExitReviewAfter 1h → 30m. 2026-10-08. **LIVE.**
+
+- **Opened** 2026-10-08
+- **Change** `FlowStrategyOptions.ExitReviewAfter` 1h → **30m**, both sections
+  (`DipStrategy__ExitReviewAfter`, `FlowStrategy__ExitReviewAfter`). Config-bound.
+- **Purpose** H33 cannot measure anything until a position survives to a second
+  review. None ever has.
+
+### Why H33 has been dead on arrival
+
+20 hours and 10 closed trades after the 30-minute cadence went live:
+
+```
+longest hold since H33       61 minutes
+LLM_EXIT trades              #175 cut at min 61, #178 at min 60, #181 at min 60
+positions reaching review 2  0
+```
+
+`ExitReviewEvery` governs the gap between review one and review two. There has never
+been a review two, so the parameter H33 changed has never once taken effect. The
+binding parameter was always `ExitReviewAfter`. H33's KEEP test reads "LLM_EXIT total
+R improves" — it would have been judged on a number its own mechanism never touched.
+
+All three cuts were losses (−0.1503, −0.1327, −0.1558) on near-identical grounds:
+*"the 1-hour and 4-hour price moves both run against the position"*. For a dip-buy
+that has not recovered within the hour, that sentence is close to true by
+construction, which is itself worth noticing.
+
+### What this puts at risk, measured first
+
+5 of the 11 RATCHET winners were held past 30 minutes:
+
+| id | held | P&L |
+|---|---|---|
+| 158 | 46 min | +0.1645 |
+| 161 | 44 min | +0.1786 |
+| 170 | 64 min | +0.1191 |
+| 177 | 56 min | +0.0873 |
+| 180 | 54 min | +0.0830 |
+| | | **+0.6325** |
+
+That is more than the account's entire −0.5197 loss, and the ratchet is 11 wins from
+11. Those five now get reviewed while still open, by a reviewer that has cut on 9 of
+its 11 first looks.
+
+It does not follow that they would be cut — a position heading for a ratchet win is
+moving in its own favour at minute 30, and the reviewer's grounds read differently
+then than at minute 60. That is the bet. It is written down here so it is not
+rediscovered as a surprise.
+
+### Decision rule — fixed before the change
+
+Judged at **20 closed trades opened after the deploy**, LIVE, both strategies.
+
+**REJECT** and return to 1h if any of:
+
+1. **RATCHET count falls** below 40% of closed trades (it is 11 of 27 = 41% now, and
+   5 of those 11 are in the window this change exposes). This is the mechanism check:
+   if the reviewer is eating ratchet winners, it shows up here before it shows up in
+   P&L.
+2. LLM_EXIT total R is **worse** than the −2.201R over 11 it stands at now, per trade.
+3. Total R over the window is worse than the 20 closed trades before the deploy.
+
+**KEEP** only if all three hold:
+
+1. RATCHET share ≥ 40%.
+2. LLM_EXIT mean R improves on −0.200 per trade.
+3. At least **3 positions reach a second review**. Without that, H33 is still
+   unmeasured and this change failed at its own purpose regardless of P&L.
+
+Condition 3 is the point of the exercise. A window that is profitable but still never
+reaches review two has not tested anything.
+
+### Attribution, stated plainly
+
+H34 is open at 11 of 25 and H33 is open and unmeasured. This is a third live change,
+and the house rule at the top of this file says that costs attribution. The exits are
+still disjoint — RATCHET is H34's, LLM_EXIT is H33's and H35's — but H33 and H35 now
+both act on the same LLM_EXIT rows and cannot be separated from each other at all.
+H33 should be judged as "cadence as a whole", not as the 30-minute gap specifically.
