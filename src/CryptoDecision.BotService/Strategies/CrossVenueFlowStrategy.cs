@@ -84,36 +84,19 @@ public sealed class CrossVenueFlowStrategy(
     /// <inheritdoc />
     public string DescribeRule() => tuning.Signal.EntryMode switch
     {
-        // The ratio path is switched off by raising its threshold out of reach rather than
-        // by a flag, so the banner has to say so out loud. A reader seeing "99.00x" can
-        // work it out; a reader seeing "the ratio path is DISABLED" cannot miss it, and
-        // the difference matters because a threshold nobody can reach and a threshold
-        // nobody meant to set look identical in a config file.
-        //
-        // 10.0 as the cut-off is not a tuning knob: the highest ratio ever observed on a
-        // qualifying bucket in 28 days of production is 2.53 on average and the sample
-        // maximum is far under 10, so anything at or above it is unreachable by
-        // construction rather than merely strict.
-        FlowEntryMode.FlowRatio when tuning.Signal.RatioMinimum >= 10m =>
-            $"RATIO PATH DISABLED (RatioMinimum {tuning.Signal.RatioMinimum:F2}x is " +
-            "unreachable — no bucket in 28 days came close). " +
-            (tuning.Signal.RatioHighVolumeUsd > 0m
-                ? $"The ONLY way in is the high-volume waiver: a closed 15m bucket, settled " +
-                  $"{tuning.Signal.RatioSettleMinutes} min, trading >= " +
-                  $"${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY ratio -> enter " +
-                  "WITH the heavier side (H11). Expect ~0.9 signals/day."
-                : "and RatioHighVolumeUsd is 0, so THIS STRATEGY CANNOT ENTER AT ALL.") +
-            " PRICE IS NOT READ.",
-
+        // FlowRatio has exactly one way in. The ratio test was deleted on 2026-10-08;
+        // before that it had been held at 999:1 since H29 on 09-28 after -1.736R over 19
+        // trades. Size is the whole trigger now and the banner says so without
+        // qualification, because "disabled" and "deleted" are different states and a
+        // reader should not have to work out which one they are looking at.
         FlowEntryMode.FlowRatio =>
-            $"the last closed 15m bucket, settled {tuning.Signal.RatioSettleMinutes} min, must " +
-            $"trade >= ${tuning.Signal.RatioMinVolumeUsd / 1_000_000m:F1}M with one side >= " +
-            $"{tuning.Signal.RatioMinimum:F2}x the other -> enter WITH that side" +
             (tuning.Signal.RatioHighVolumeUsd > 0m
-                ? $"; OR >= ${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY ratio, " +
-                  "which waives the ratio test entirely (H11)"
-                : "") +
-            ". " + DescribeShortGate(tuning.Signal) +
+                ? $"a closed 15m bucket, settled {tuning.Signal.RatioSettleMinutes} min, " +
+                  $"trading >= ${tuning.Signal.RatioHighVolumeUsd / 1_000_000m:F1}M at ANY " +
+                  "ratio -> enter WITH the heavier side (H11). There is no other entry: the " +
+                  "ratio path is GONE, not disabled. Expect ~0.9 signals/day."
+                : "RatioHighVolumeUsd is 0 and the ratio path was deleted, so THIS STRATEGY " +
+                  "CANNOT ENTER AT ALL.") +
             " " + DescribeExitPolicy() +
             "PRICE IS NOT READ, so every price and z threshold is inert.",
 
@@ -190,36 +173,6 @@ public sealed class CrossVenueFlowStrategy(
             : $"RATCHET: once a position reaches {tuning.RatchetArmR:F2}R of favourable " +
               $"excursion it is closed if it gives back {tuning.RatchetGivebackPct:P0} of that " +
               "peak, checked every cycle with no model call (H25). ";
-
-    private static string DescribeShortGate(FlowSignalOptions s)
-    {
-        var ownRatio  = s.ShortRatioMinimum > 0m && s.ShortRatioMinimum != s.RatioMinimum;
-        var ownVolume = s.ShortMinVolumeUsd  > 0m && s.ShortMinVolumeUsd  != s.RatioMinVolumeUsd;
-
-        if (!ownRatio && !ownVolume)
-            return "SHORT and LONG are held to the same thresholds.";
-
-        var gate = "SHORT requires " +
-                   (ownRatio  ? $">= {s.ShortRatioMinimum:F2}x (long side {s.RatioMinimum:F2}x)" : "") +
-                   (ownRatio && ownVolume ? " and " : "") +
-                   (ownVolume ? $">= ${s.ShortMinVolumeUsd / 1_000_000m:F2}M " +
-                                $"(long side ${s.RatioMinVolumeUsd / 1_000_000m:F1}M)" : "") +
-                   " (H22).";
-
-        // Two things a reader must not have to work out for themselves.
-        if (ownVolume && s.ShortMinVolumeUsd < s.RatioMinVolumeUsd)
-            gate += " NOTE the short notional floor is BELOW the long one — on this side the " +
-                    "ratio is doing the work and the notional is only a sanity floor.";
-
-        // The waiver is above both floors and is deliberately NOT gated, so it keeps taking
-        // shorts at any ratio. Said out loud because "I raised the short bar" and "I slowed
-        // the short side" are different claims and only the first one is true.
-        return s.RatioHighVolumeUsd > 0m
-            ? gate + $" The ${s.RatioHighVolumeUsd / 1_000_000m:F1}M waiver is NOT gated and " +
-                     "still takes shorts at any ratio — 19 qualifying buckets in the last 30 " +
-                     "days against 11 for this ratio path."
-            : gate;
-    }
 
     /// <summary>
     /// Where the target really sits once <c>use_dynamic_tp_sl</c> is on.

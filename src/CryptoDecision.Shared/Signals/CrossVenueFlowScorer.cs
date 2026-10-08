@@ -228,46 +228,6 @@ public sealed record FlowSignalOptions(
     bool    ReversalLongOnly              = false,
 
     /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: how far the dominant side must
-    /// outweigh the other, as a plain volume ratio. 2.5 means buy volume at least 2.5x
-    /// sell volume for a long.
-    ///
-    /// **2.1 -> 2.5 on 2026-09-20 (H23), to match the short side.** This is the one
-    /// threshold change in the H20-H23 sequence that lands INSIDE its own measurement
-    /// rather than outside it: the original sweep found a three-cell plateau at 1.8, 2.1
-    /// and 2.5, all positive overall after discarding the largest winner and in both
-    /// sample halves, with 3.0 failing the outlier check on 12 observations. 2.1 was
-    /// picked from the middle of that plateau; 2.5 is its top edge, still on the plateau.
-    ///
-    /// It also moves toward the evidence rather than away: the RATIO path is negative on
-    /// both sides so far — LONG -0.248R over 9, SHORT -0.749R over 3 — so raising the bar
-    /// on the long side is not tightening a rule that was working.
-    ///
-    /// Cost in coverage, measured on 30 days: buy-dominated buckets clearing the floor and
-    /// the ratio fall from 34 to 16, about 0.53/day.
-    /// </summary>
-    decimal RatioMinimum                  = 2.5m,
-
-    /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: minimum notional in the qualifying
-    /// bucket, in USD.
-    ///
-    /// A separate condition from the ratio, not a refinement of it. Below $3M a 2:1
-    /// imbalance measured -0.012 mean R once the largest winner was removed and -0.082
-    /// in the first sample half; above it, +0.332 and +0.521. A 2:1 lean on two million
-    /// dollars is what a quiet hour looks like, and it predicts nothing.
-    ///
-    /// **$3M -> $2.5M on 2026-09-20 (H23), to match the short side. THIS ONE GOES AGAINST
-    /// THE MEASUREMENT ABOVE** and the paragraph is left intact rather than softened: $2.5M
-    /// reaches half a million dollars into the band that measured -0.012R. The argument for
-    /// it is that the band was measured at a **2:1** imbalance and the ratio is now 2.5:1,
-    /// so the thin-volume cases it describes are largely excluded by the ratio instead —
-    /// but that is a reason to expect it to be survivable, not evidence that it is. H23
-    /// carries it as the weaker half of a symmetry change.
-    /// </summary>
-    decimal RatioMinVolumeUsd             = 2_500_000m,
-
-    /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: bucket notional at or above which the
     /// ratio test is SKIPPED and the entry is taken with whichever side traded more,
     /// however narrow its lead. 0 disables the exception and leaves the ratio in charge.
@@ -327,36 +287,7 @@ public sealed record FlowSignalOptions(
     /// 0.020R at five — against a measured edge of 0.379R. Three minutes buys a settled
     /// number for 4% of the edge.
     /// </summary>
-    int     RatioSettleMinutes            = 3,
-
-    /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: how far SELL volume must outweigh buy
-    /// before a SHORT is allowed, in place of <see cref="RatioMinimum"/>. 0 makes the two
-    /// sides symmetric again.
-    ///
-    /// Applied AFTER the high-volume waiver, so the news-print path keeps taking shorts at
-    /// any ratio. H20 put this ahead of the waiver and thereby changed two rules on one
-    /// decision; keeping them separate means each can be judged on its own.
-    /// </summary>
-    decimal ShortRatioMinimum             = 2.5m,
-
-    /// <summary>
-    /// For <see cref="FlowEntryMode.FlowRatio"/>: the notional floor a SHORT must clear,
-    /// in USD, in place of <see cref="RatioMinVolumeUsd"/>. 0 falls back to that one.
-    ///
-    /// **NOTE IT IS BELOW THE LONG SIDE'S $3M**, deliberately: under H22 the ratio does the
-    /// work on the short side and the notional is only a sanity floor. The -0.012 mean R
-    /// measured below $3M is a pooled figure over both sides at 2:1, not a short-side
-    /// measurement at 2.5:1, so it does not directly argue against this.
-    ///
-    /// **This pair is the third setting of the short rule in one day**, after H20 (3.0x +
-    /// |OFI| 0.60, unreachable) and H21 ($10M + 2.1x, one matching bucket in 30 days).
-    /// Unlike both, it produces a testable population: over 30 days to 2026-09-20,
-    /// **11 sell-dominated buckets clear $2.5M AND 2.5x**, spread from 08-27 to 09-20
-    /// rather than clustered, roughly 0.37/day. See H22, including the count of how many
-    /// times this parameter has now moved.
-    /// </summary>
-    decimal ShortMinVolumeUsd             = 2_500_000m)
+    int     RatioSettleMinutes            = 3)
 {
     /// <summary>
     /// How many closed buckets to load before scoring.
@@ -395,8 +326,10 @@ public readonly record struct BucketOfi(DateTime Bucket, double Ofi, decimal Vol
 /// </summary>
 public static class EntryPaths
 {
-    /// <summary>The imbalance cleared RatioMinimum on at least RatioMinVolumeUsd.</summary>
-    public const string Ratio = "RATIO";
+    // "RATIO" was the other value here until 2026-10-08, when the ratio path was
+    // deleted. 19 historical bot_trades rows still carry entry_path = 'RATIO' and
+    // they are kept — that is a record of what happened, not a live code path, and
+    // nothing in the codebase compares against the string any more.
 
     /// <summary>
     /// The bucket cleared RatioHighVolumeUsd, so the ratio test was waived and the entry
@@ -774,41 +707,10 @@ public static class CrossVenueFlowScorer
                 $"{options.RatioSettleMinutes} min.",
                 bucket.Ofi, 0.0, 0, venues, 0.0);
 
-        // The floor is side-dependent. A sell-dominated bucket has to be bigger before
-        // this rule will act on it -- H21, replacing H20's ratio and |OFI| gates, which
-        // were out of reach and stopped the short side outright rather than raising its
-        // bar. The ratio test itself is back to symmetric at RatioMinimum.
-        //
-        // Checked here rather than after the ratio, so a thin bucket is refused for being
-        // thin whichever side it leans. The sign is read straight off bucket.Ofi, which is
-        // the same number `ratio` is derived from a few lines below.
-        var sellSide   = bucket.Ofi < 0.0;
-        var volumeFloor = sellSide && options.ShortMinVolumeUsd > 0m
-            ? options.ShortMinVolumeUsd
-            : options.RatioMinVolumeUsd;
-
-        if (bucket.VolumeUsd < volumeFloor)
-            return FlowVerdict.Abstain(
-                sellSide && volumeFloor != options.RatioMinVolumeUsd
-                    ? "SHORT_VOLUME_TOO_THIN"
-                    : "VOLUME_TOO_THIN",
-                $"The {bucket.Bucket:HH:mm} bucket traded " +
-                $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
-                $"${volumeFloor / 1_000_000m:F1}M floor" +
-                (sellSide && volumeFloor != options.RatioMinVolumeUsd
-                    ? $" the SHORT side requires — the long side needs only " +
-                      $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M. Shorts are held to more " +
-                      "because this rule has never produced a winning one (H21)."
-                    : ". A 2:1 imbalance on thin volume is what thin volume looks like: below " +
-                      "the floor those signals measured -0.012 mean R once the largest winner " +
-                      "is removed, against +0.332 above it."),
-                bucket.Ofi, 0.0, 0, venues, 0.0);
-
         // ratio = buy/sell, recovered from the imbalance:
         //   ofi = (b-s)/(b+s)  =>  b/s = (1+ofi)/(1-ofi)
-        // Expressed this way so the rule reads in the operator's terms -- "one side
-        // must be 2.1 times the other" -- while reusing the aggregation that already
-        // drops the live bucket.
+        // Kept only to STATE how narrow the winning side's lead was. Nothing is gated on
+        // it any more — see the deletion note on RatioHighVolumeUsd.
         var ofi = bucket.Ofi;
 
         if (Math.Abs(ofi) >= 1.0)
@@ -820,24 +722,29 @@ public static class CrossVenueFlowScorer
 
         var ratio = (1.0 + Math.Abs(ofi)) / (1.0 - Math.Abs(ofi));
 
-        // ── The news-print exception ──────────────────────────────────────────
+        // ── The news print is now the ONLY way in ─────────────────────────────
         //
-        // Above RatioHighVolumeUsd the ratio test is skipped and the side is simply
-        // whichever traded more. See that option for the measurement, which did not
-        // support it: 20M is an isolated positive cell between negative neighbours and
-        // its mean goes negative once the best single trade is removed.
+        // Below the threshold this rule abstains. It used to fall through to a ratio
+        // test; that path was switched off by H29 on 2026-09-28 (RatioMinimum 2.5 ->
+        // 999.0 in appsettings) after -1.736R over 19 trades, negative in 4 of 4 weeks,
+        // and DELETED on 2026-10-08 rather than left sitting unreachable.
         //
-        // Placed AFTER the one-sided guard so it inherits that protection, and after
-        // `ratio` is computed so the reason can state how narrow the lead actually was
-        // — which is the number an operator will want when this loses. At these volumes
-        // the lead is usually narrow by construction: ratio falls as volume rises, so a
-        // typical qualifying bucket leans about 1.2:1 and the side is being chosen by
-        // roughly a tenth of the notional.
+        // What the deletion removed, so nobody rebuilds it from memory: RatioMinimum,
+        // ShortRatioMinimum, RatioMinVolumeUsd, ShortMinVolumeUsd, the RATIO_TOO_LOW /
+        // SHORT_RATIO_TOO_LOW / VOLUME_TOO_THIN / SHORT_VOLUME_TOO_THIN abstains, and
+        // EntryPaths.Ratio. Historical bot_trades rows still carry entry_path = 'RATIO';
+        // that is data, not a live code path.
         //
-        // An exactly balanced bucket has no dominant side and is refused rather than
-        // defaulted. Without this, `ofi > 0 ? LONG : SHORT` silently resolves a zero to
-        // SHORT — impossible at 2.1:1, and reachable here, which is exactly the kind of
-        // edge a bypass rule opens up.
+        // Measured 2026-10-08 before deleting, and it is worth keeping: across the whole
+        // dataset the two gates were looking for opposite things. Buckets clearing $20M
+        // lean 1.20-1.60:1 — near balanced, because ratio FALLS as volume rises. Buckets
+        // leaning >= 2.1:1 average $2.57-3.18M and move price -0.12%. Of 161 buckets at
+        // >= 2.1:1, exactly ONE coincided with a >= 1% fall. A gate on imbalance and a
+        // gate on size cannot both fire on this instrument.
+        //
+        // The one-sided guard above still protects this path. An exactly balanced bucket
+        // has no dominant side and is refused rather than defaulted, because
+        // `ofi > 0 ? LONG : SHORT` silently resolves a zero to SHORT.
         if (options.RatioHighVolumeUsd > 0m && bucket.VolumeUsd >= options.RatioHighVolumeUsd)
         {
             if (ofi == 0.0)
@@ -860,8 +767,8 @@ public static class CrossVenueFlowScorer
                 Reason:              $"The {bucket.Bucket:HH:mm} bucket traded " +
                                      $"${bucket.VolumeUsd / 1_000_000m:F2}M, at or above the " +
                                      $"${options.RatioHighVolumeUsd / 1_000_000m:F1}M news-print " +
-                                     $"threshold, so the {options.RatioMinimum:F2}:1 ratio test is " +
-                                     $"skipped. Entering WITH the heavier side at {ratio:F2}:1 " +
+                                     "threshold, which is the only trigger this rule has. " +
+                                     $"Entering WITH the heavier side at {ratio:F2}:1 " +
                                      $"{(ofi > 0 ? "buy" : "sell")} (OFI {ofi:+0.000;-0.000}) — a " +
                                      // The $ on this segment is load-bearing. Without it the
                                      // brief printed the expression source verbatim, and this
@@ -874,52 +781,17 @@ public static class CrossVenueFlowScorer
                 TriggerValue:        ratio);
         }
 
-        // The ratio floor is side-dependent too, and sits AFTER the waiver so the
-        // news-print path keeps its documented "any ratio" behaviour. H20 put the short
-        // ratio ahead of the waiver and that also changed what the waiver does, which is a
-        // second change riding on one decision; H22 keeps them separate.
-        var ratioFloor = sellSide && options.ShortRatioMinimum > 0m
-            ? options.ShortRatioMinimum
-            : options.RatioMinimum;
-
-        if (ratio < (double)ratioFloor)
-            return FlowVerdict.Abstain(
-                sellSide && ratioFloor != options.RatioMinimum
-                    ? "SHORT_RATIO_TOO_LOW"
-                    : "RATIO_TOO_LOW",
-                $"The {bucket.Bucket:HH:mm} bucket is {ratio:F2}:1 " +
-                $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
-                $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
-                $"{ratioFloor:F2}:1 minimum" +
-                (sellSide && ratioFloor != options.RatioMinimum
-                    ? $" the SHORT side requires — the long side needs only " +
-                      $"{options.RatioMinimum:F2}:1 (H22)"
-                    : "") +
-                (options.RatioHighVolumeUsd > 0m
-                    ? $", and under the ${options.RatioHighVolumeUsd / 1_000_000m:F1}M that " +
-                      "would have waived it."
-                    : "."),
-                ofi, 0.0, 0, venues, 0.0);
-
-        var side = ofi > 0 ? "LONG" : "SHORT";
-
-        return new FlowVerdict(
-            Actionable:          true,
-            Side:                side,
-            AggregateOfi:        ofi,
-            AggregateZ:          0.0,
-            AgreeingVenues:      0,
-            ParticipatingVenues: venues,
-            DispersionBps:       0.0,
-            AbstainCode:         "",
-            Reason:              $"The {bucket.Bucket:HH:mm} bucket closed {ratio:F2}:1 " +
-                                 $"{(ofi > 0 ? "buy" : "sell")}-dominated on " +
-                                 $"${bucket.VolumeUsd / 1_000_000m:F2}M (OFI {ofi:+0.000;-0.000}), " +
-                                 $"past the {options.RatioMinimum:F2}:1 and " +
-                                 $"${options.RatioMinVolumeUsd / 1_000_000m:F1}M floors. Entering " +
-                                 "WITH the dominant side; price is not consulted.",
-            EntryPath:           EntryPaths.Ratio,
-            TriggerValue:        ratio);
+        // Below the news print there is nothing left to try. This is the whole of the
+        // rule's abstain surface now: settle, one-sided, too small.
+        return FlowVerdict.Abstain(
+            "BELOW_NEWS_PRINT",
+            $"The {bucket.Bucket:HH:mm} bucket traded " +
+            $"${bucket.VolumeUsd / 1_000_000m:F2}M, under the " +
+            $"${options.RatioHighVolumeUsd / 1_000_000m:F1}M news-print threshold. It leans " +
+            $"{ratio:F2}:1 {(ofi > 0 ? "buy" : "sell")}, which this rule no longer acts on — " +
+            "the ratio path was deleted on 2026-10-08 after H29 had held it at 999:1 since " +
+            "09-28. Size is the only trigger.",
+            ofi, 0.0, 0, venues, 0.0);
     }
 }
 

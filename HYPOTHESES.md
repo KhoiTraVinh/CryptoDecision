@@ -4291,3 +4291,80 @@ always outside it, and it has now been tried and did not pay.
 What is NOT concluded: that 0.40 is optimal, or that the ratchet is the problem. The
 ratchet remains the only exit in profit across the whole live book (+1.1779 over 11
 of 11 wins). This rejects one untested cell on six observations, nothing more.
+
+---
+
+## Removed: the FlowRatio imbalance gate. 2026-10-08.
+
+Not a hypothesis — a deletion, recorded because the parameters it removes appear in
+H11, H16, H18, H20, H21, H22, H23 and H29 and a reader of those entries needs to know
+the code is gone.
+
+H29 held `RatioMinimum` at 999:1 from 2026-09-28 after −1.736R over 19 trades,
+negative in 4 of 4 weeks. It sat unreachable for ten days. Deleted now at the
+operator's instruction rather than left as a switched-off path that still evaluates
+every cycle and still reads, in its own doc comment, as though 2.5 were live.
+
+**Gone:** `RatioMinimum`, `ShortRatioMinimum`, `RatioMinVolumeUsd`,
+`ShortMinVolumeUsd`, `EntryPaths.Ratio`, `DescribeShortGate()`, and the
+`RATIO_TOO_LOW` / `SHORT_RATIO_TOO_LOW` / `VOLUME_TOO_THIN` / `SHORT_VOLUME_TOO_THIN`
+abstain codes. 230 lines removed against 51 added.
+
+**Kept:** `RatioHighVolumeUsd` ($20M) and `RatioSettleMinutes` (3). The "Ratio" in
+the first name is now vestigial; it was not renamed because renaming a config key
+while appsettings still carries the old one fails silently into the code default,
+which is the exact failure mode this repository keeps paying for.
+
+**What FlowRatio is now, in full:** one closed 15m bucket, settled 3 minutes, trading
+≥ $20M, enter WITH whichever side traded more. A perfectly balanced bucket is refused
+rather than defaulted to SHORT. Everything below $20M abstains as `BELOW_NEWS_PRINT`.
+Price is not read.
+
+### The measurement that says this costs nothing
+
+Taken 2026-10-08, across the whole dataset, and it is the reason the two gates could
+never both have worked:
+
+| bucket type | median volume | median sell/buy |
+|---|---|---|
+| sideways | $3.01M | 0.99 |
+| fall 0.6–1.0% | $9.68M | 1.51 |
+| fall 1.0–1.5% | $16.99M | 1.26 |
+| fall 1.5–2.0% | $19.63M | 1.60 |
+
+and the inverse:
+
+| sell/buy | n | median move | mean volume |
+|---|---|---|---|
+| 1.5–2.1x | 514 | −0.155% | $4.65M |
+| 2.1–3.0x | 138 | −0.116% | $3.18M |
+| ≥ 3.0x | 23 | −0.196% | **$2.57M** |
+
+Ratio FALLS as volume rises. The biggest buckets lean 1.20–1.60 — near balanced — and
+the most lopsided buckets are the smallest and move price least. Of 161 buckets at
+≥ 2.1:1, exactly **one** coincided with a ≥ 1% fall.
+
+A gate on imbalance and a gate on size were looking for a bucket that is both large
+and one-sided, and on this instrument that bucket essentially does not exist. The
+ratio path was not unlucky; it was selecting from the thin end.
+
+### Verified before shipping
+
+A throwaway probe under `src/.probe` drove `ScoreFlowRatio` directly:
+
+```
+$3.3M  at 10.00:1 sell  -> BELOW_NEWS_PRINT   (the old 2.1x gate would have ENTERED)
+$14.0M at  2.50:1 sell  -> BELOW_NEWS_PRINT   (the old 2.5x gate would have ENTERED)
+$19.9M at  1.01:1       -> BELOW_NEWS_PRINT
+$21.0M at  1.02:1 buy   -> LONG,  HIGH_VOLUME
+$21.0M at  1.02:1 sell  -> SHORT, HIGH_VOLUME
+$45.0M at  1.50:1 sell  -> SHORT, HIGH_VOLUME
+$30.0M exactly balanced -> BUCKET_PERFECTLY_BALANCED
+```
+
+and reflected over `FlowSignalOptions` to confirm the four properties are gone and the
+two survivors are not. Probe removed; all four projects build clean with 0 warnings
+and no dead-code analyzer hits.
+
+Historical `bot_trades` rows still carry `entry_path = 'RATIO'` for 19 trades. That is
+data and it stays.
