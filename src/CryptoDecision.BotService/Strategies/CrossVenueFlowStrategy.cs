@@ -1226,6 +1226,18 @@ public sealed class FlowStrategyOptions
     /// <summary>
     /// How long a position is left alone before the model is first asked whether to cut it.
     ///
+    /// **DEPLOYED VALUE IS 30 MINUTES, NOT THIS DEFAULT.** H35, 2026-10-08, set via
+    /// `DipStrategy__ExitReviewAfter` / `FlowStrategy__ExitReviewAfter` in
+    /// docker-compose. The default below is one hour and the measurement under it is
+    /// H28's, which still stands on its own terms — it is simply not what is running.
+    ///
+    /// H35 exists because H33 could not measure anything without it. H33 moved
+    /// <see cref="ExitReviewEvery"/>, the gap between review one and review two, and
+    /// over 20 hours and 10 trades no position ever reached a second review: the
+    /// longest hold was 61 minutes and every LLM_EXIT fired at minute 60 or 61. THIS
+    /// parameter was the binding one the whole time. It was called "the companion
+    /// knob" when H33 shipped, and that was wrong.
+    ///
     /// **One hour since 2026-09-24 (H28). It was two, and that was the expensive number.**
     ///
     /// Time from entry to the position's own best price, measured from OKX ticks over the
@@ -1254,6 +1266,18 @@ public sealed class FlowStrategyOptions
 
     /// <summary>
     /// Minimum gap between two reviews of the same position.
+    ///
+    /// **DEPLOYED VALUE IS 30 MINUTES, NOT THIS DEFAULT.** H33, 2026-10-06, set via
+    /// `DipStrategy__ExitReviewEvery` / `FlowStrategy__ExitReviewEvery`.
+    ///
+    /// Two things on the record about it. The throughput arithmetic below is stale in
+    /// the bot's favour: re-measured 2026-10-06, a call takes 20.7-25.7s rather than
+    /// 42-43, the entry gate it shared the budget with was deleted by H30, and the
+    /// most positions ever open at once is 1 — worst case 52s against the same 120s.
+    ///
+    /// And it has still never taken effect. A gap between reviews cannot bind while
+    /// nothing survives review one; see <see cref="ExitReviewAfter"/>, which H35 moved
+    /// to 30 minutes on 2026-10-08 so that this one finally gets a chance to.
     ///
     /// **Also one hour since 2026-09-24 (H28), and this half is the one that costs.**
     ///
@@ -1308,6 +1332,18 @@ public sealed class FlowStrategyOptions
     /// ran; the grid cannot rank them on the eleven trades measured, and 40% is the best
     /// cell in the replay that matches how the bot samples price. Unchanged by the
     /// 2026-09-23 arm override, which moved RatchetArmR only.
+    ///
+    /// **0.25 was tried and rejected — H34, 2026-10-06 to 10-08.** Do not reach for it
+    /// again without new evidence. The parameter worked exactly as specified: capture
+    /// measured against `peak_price`, which is what this rule actually reads, went from
+    /// 57.1% to 66.1% against a 75% ceiling. The money did not follow. RATCHET went
+    /// from 5 trades at +0.6071 to 6 at +0.5708, mean R 0.2024 -> 0.1586 — count up,
+    /// total down. A tighter trail keeps a larger share of a peak it reaches sooner,
+    /// and the share is not what pays.
+    ///
+    /// Judged at 11 trades rather than the stated 25, which is a stopping-rule
+    /// violation and is recorded as one. The full result, including three defects in
+    /// that hypothesis's own decision rule, is under "H34 — RESULT" in HYPOTHESES.md.
     /// </summary>
     public decimal RatchetGivebackPct { get; set; } = 0.40m;
 }

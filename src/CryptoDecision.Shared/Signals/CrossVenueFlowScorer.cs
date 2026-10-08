@@ -961,10 +961,41 @@ public static class FlowGeometryDefaults
     /// <summary>Bar size the true range is resampled to before taking a median.</summary>
     public const int AtrBarMinutes = 15;
 
-    /// <summary>Stop distance as a multiple of that ATR.</summary>
+    /// <summary>
+    /// Stop distance as a multiple of that ATR.
+    ///
+    /// **This has never once decided a stop.** Measured 2026-10-08 across the 124
+    /// closed trades carrying an ATR: entry ATR runs 0.138-0.936%, so 1.5x tops out at
+    /// 1.404% against the 2.00% <see cref="MinStopPct"/> floor. The floor bound 124
+    /// times out of 124. Reaching it needs 1.333% ATR, ~42% above the most volatile
+    /// 4-hour window on record for this instrument.
+    ///
+    /// So the geometry reads as adaptive and is a constant 2.00% in practice. That is
+    /// not an argument for removing either half — H8 measured the floor and it is what
+    /// stops the stop sitting inside SOL's ordinary noise — but anyone reasoning about
+    /// "the ATR stop" should know it has never been used.
+    /// </summary>
     public const double StopAtrMultiple = 1.5;
 
-    /// <summary>Target distance as a multiple of the stop distance.</summary>
+    /// <summary>
+    /// Target distance as a multiple of the stop distance.
+    ///
+    /// **DEPLOYED VALUE IS 1.0, NOT THIS DEFAULT.** H36, 2026-10-08, set via
+    /// `DipStrategy__TargetRiskMultiple` / `FlowStrategy__TargetRiskMultiple`. With the
+    /// stop pinned at the 2.00% floor that makes the target 2.00% rather than 4.00%.
+    ///
+    /// 2.0 was the worst of nine levels gridded on real minute paths — 120 bracketed
+    /// trades, first touch inside 12h, net of the 0.070% round trip, adverse leg
+    /// assumed first on a tie: 4.00% returns -1.090 per decided trade against -0.095 at
+    /// 2.00%. No level is positive, so this bracket is not a source of edge at any
+    /// width; moving off 2.0 is worth about a percentage point per trade and nothing
+    /// more. 1.50/1.75/2.00% form a plateau and the curve falls off a cliff past it.
+    ///
+    /// Note what this interacts with: the stop has never once come from
+    /// <see cref="StopAtrMultiple"/>. Across 124 trades 1.5 x ATR topped out at 1.404%
+    /// against the 2.00% <see cref="MinStopPct"/> floor, so the floor bound every time
+    /// and this multiple has only ever been applied to 2.00%.
+    /// </summary>
     public const double TargetRiskMultiple = 2.0;
 
     /// <summary>
