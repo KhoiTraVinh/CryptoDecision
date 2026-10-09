@@ -362,6 +362,53 @@ public static class RiskEngine
             }
         }
 
+        // ── The same streak, counted on the ACCOUNT ───────────────────────────
+        //
+        // Per-strategy scoping is right about a SIGNAL being out of regime, and it is
+        // blind to the case where no single signal is at fault and the account is
+        // bleeding anyway.
+        //
+        // 2026-10-08, trades 187-191: five losses in a row for -$1.6507, which is 61%
+        // of the entire live loss to that point. Per strategy they were three
+        // (CANDLE_REVERSAL) and two (XVENUE_FLOW), so with maxConsecutiveLosses at 15
+        // — or at 5, or at 4 — nothing fired. Two counter-trend rules alternating
+        // through a V-shaped reversal: three longs into the fall, then two shorts
+        // within half an hour of the bottom. Neither rule was individually "out of
+        // regime"; the account was.
+        //
+        // SAME limit as per-strategy, not a multiple of it.
+        //
+        // The first version of this used twice the per-strategy limit, on the reasoning
+        // that an account streak should be harder to trip. A probe against the real
+        // 187-191 sequence killed that: the account streak was 5, so at 2x it needed
+        // maxConsecutiveLosses <= 2 to fire at all, and at any usable per-strategy
+        // value the account breaker was dead. Measured over the live book, account
+        // streaks reached 4 twice and 5 twice, and 6 never — a 2x breaker would sit
+        // permanently out of reach, which is the same defect as the 15 it replaces.
+        //
+        // An alternating streak is not less dangerous than a single-rule one. It is
+        // worse, because no rule looks broken while it happens.
+        var accountLimit = maxConsecutiveLosses;
+        var accountStreak = 0;
+
+        foreach (var trade in closedTradesNewestFirst)
+        {
+            if ((trade.ClosedAt ?? trade.OpenedAt) < streakSince) break;
+            if ((trade.PnlUsd ?? 0m) >= 0m) break;
+
+            accountStreak++;
+        }
+
+        if (accountStreak >= accountLimit)
+        {
+            return new CircuitBreak(
+                "ACCOUNT_LOSS_STREAK",
+                $"{accountStreak} losing trades in a row across ALL strategies within " +
+                $"{streakDays} days (limit {accountLimit}). No single rule hit its own " +
+                "streak limit, so this is not one signal out of regime — it is the account. " +
+                "Interleaved counter-trend rules do this to each other in a reversal.");
+        }
+
         // ── Peak-to-trough drawdown on the realised equity curve ──
         var drawdown = MaxDrawdownPct(closedTradesNewestFirst, opts.CapitalUsd);
         if (drawdown >= maxDrawdownPct)
