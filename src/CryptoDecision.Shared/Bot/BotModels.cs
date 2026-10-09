@@ -220,6 +220,31 @@ public sealed record BotOptions
     public int          MaxOpenPerSide           { get; set; } = 1;
 
     /// <summary>
+    /// Minutes to refuse a NEW entry on a side after the last trade on that side lost.
+    /// 0 disables.
+    ///
+    /// Paces a DIRECTION after it has just been wrong, which is a different question
+    /// from CooldownSeconds (paces a strategy) and from MaxOpenPerSide (caps
+    /// concurrency). On 2026-10-08 the gap between them cost $1.6507: the dip rule
+    /// bought three times into a fall, the flow rule shorted twice within half an hour
+    /// of the bottom, and every entry was legal — each cleared the 900s cooldown, and
+    /// the per-side cap was free because the previous position had just been stopped
+    /// out.
+    ///
+    /// 60 on a thin measurement, stated as thin. Over 134 closed trades it blocks 10,
+    /// NINE of them losers against a 54% base rate, -4.225R, lifting mean R on what
+    /// survives from -0.0692 to -0.0407. The same test at 2h/4h/8h scores better on
+    /// the full sample and collapses in the second half; 60 minutes is the only window
+    /// positive in both halves (+0.0433, +0.0137), and dropping the three largest
+    /// blocked trades decays it to +0.0089 without reversing.
+    ///
+    /// The obvious alternative — a trend filter — was measured on the same data and
+    /// does not survive: strong in the first half, gone in the second, sign-reversed
+    /// on LIVE trades.
+    /// </summary>
+    public int          SameSideLossBlockMinutes { get; set; } = 60;
+
+    /// <summary>
     /// Concurrent positions opened through the FlowRatio high-volume waiver. 0 disables.
     ///
     /// 1, and separate from MaxOpenPerSide because the two constrain different things.

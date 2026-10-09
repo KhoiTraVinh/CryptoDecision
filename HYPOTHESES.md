@@ -4441,3 +4441,86 @@ three halts per week at current performance**, each requiring
 actually fire, and it is the point: the previous settings were decoration.
 
 None of this improves the edge. It bounds a bad day.
+
+---
+
+## H37 — Block same-side re-entry for 60 min after a loss on that side. 2026-10-08. **LIVE.**
+
+- **Opened** 2026-10-08
+- **Change** new `BotOptions.SameSideLossBlockMinutes = 60`. Refuses a new entry on a
+  side when the last trade on that side lost less than 60 minutes ago.
+- **Purpose** The 2026-10-08 whipsaw was legal under every existing cap.
+
+### The gap it closes
+
+Trades 184–191: the dip rule bought three times into a fall from 109.08, the flow
+rule shorted twice within half an hour of the 106.42 bottom, price returned to
+109.88. Five losses, −$1.6507.
+
+Every entry was permitted. `CooldownSeconds` paces a STRATEGY and each entry cleared
+900s. `MaxOpenPerSide` caps CONCURRENCY and was free because the previous position
+had just been stopped out. `max_consecutive_losses` is scoped per strategy and saw
+three and two. Nothing asks "did this direction just lose".
+
+### Measured — and the first answer was wrong
+
+A trend filter is the fix one reaches for first. Entering AGAINST the 12h or 24h move
+looks decisive on the full sample: at 24h/2.5% the counter-trend group is −0.2280
+mean R against +0.0034, and dropping those trades turns −9.268R into +0.308R.
+
+It does not survive:
+
+| | 12h ≥1.5% | 24h ≥2.5% |
+|---|---|---|
+| full sample | +0.169 | +0.231 |
+| first half | +0.375 | +0.462 |
+| **second half** | **−0.000** | +0.041 |
+| **LIVE only** | +0.018 | **−0.058** |
+| less 5 largest | +0.032 | +0.132 |
+
+First-half effect, gone out of sample, sign-reversed on LIVE. Consistent with the
+2026-10-06 finding that a 12h-move filter does not separate, and not shipped.
+
+### What did survive
+
+Blocking same-side re-entry after a loss, over 134 closed trades:
+
+| window | blocked | blocked R | mean R kept | 1st half Δ | 2nd half Δ |
+|---|---|---|---|---|---|
+| 60 min | 10 | −4.225 | −0.0407 | **+0.0433** | **+0.0137** |
+| 120 min | 22 | −4.003 | −0.0470 | +0.0506 | −0.0062 |
+| 240 min | 37 | −5.189 | −0.0421 | +0.0787 | −0.0260 |
+| 480 min | 63 | −10.970 | +0.0240 | +0.1649 | −0.0035 |
+
+480 looks best and is first-half only. **60 is the only window positive in both
+halves.** Of the 10 it blocks, NINE are losers against a 54% base rate, and five are
+from the 2026-10-08 episode itself (#184, #186, #187, #188, #189).
+
+Decay under outlier removal: +0.0285 → +0.0209 → +0.0132 → +0.0089 dropping the
+largest one, two, three. Shrinks, does not reverse.
+
+### Decision rule — fixed before the change
+
+Judged at **30 closed trades opened after the deploy**, LIVE, both strategies.
+
+**KEEP** if both hold:
+
+1. Trades blocked by this rule, counted from the refusal log, have a loss rate
+   **≥ 70%**. This is the mechanism check and it is first: the claim is that a
+   direction which just lost is more likely to lose again, and 9/10 is what the
+   backtest says. If blocked trades lose at the base rate, the rule is only reducing
+   turnover.
+2. Total R over the window ≥ the 30 closed trades before the deploy.
+
+**REJECT** and set to 0 if any of:
+
+1. Blocked-trade loss rate below 60%.
+2. Fewer than 5 trades blocked in the window — the rule is not binding and cannot be
+   judged; re-open it at a longer window rather than keep it on no evidence.
+3. Total R worse than the preceding 30 **and** blocked-trade loss rate under 70%.
+
+### Attribution
+
+Fourth live change alongside H33, H35, H36. This one is separable: it acts only
+through refusals, which are logged with their own text, so its effect is countable
+independently of anything the exits do.

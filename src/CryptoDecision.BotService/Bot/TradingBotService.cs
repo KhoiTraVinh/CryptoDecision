@@ -977,6 +977,67 @@ public sealed class TradingBotService(
                             continue;
                         }
 
+                        // ── Do not dig: same side, straight after a loss on it ──
+                        //
+                        // The cooldown above paces a STRATEGY. This paces a DIRECTION,
+                        // and only after that direction has just lost. Different
+                        // question, and the existing caps could not ask it: on
+                        // 2026-10-08 the dip rule bought three times into a fall and
+                        // the flow rule shorted twice within half an hour of the
+                        // bottom, five losses for -$1.6507, every one of them legal.
+                        // Each entry cleared the 900s cooldown, the per-side cap was
+                        // free because the previous position had just been stopped
+                        // out, and no rule individually looked broken.
+                        //
+                        // Measured on 134 closed trades, blocking re-entry on a side
+                        // for 60 minutes after a loss on that side: 10 trades blocked,
+                        // NINE of them losers against a 54% base rate, -4.225R in
+                        // total, mean R on what survives improving from -0.0692 to
+                        // -0.0407.
+                        //
+                        // It is thin and it is registered as thin. The same test at 2h,
+                        // 4h and 8h all look better on the full sample and all collapse
+                        // in the second half; 60 minutes is the only window positive in
+                        // BOTH halves (+0.0433 and +0.0137). Dropping the three largest
+                        // blocked trades decays the gain to +0.0089 without reversing
+                        // it. A trend filter, which is the fix one would reach for
+                        // first, was measured on the same data and does not survive at
+                        // all — it reverses sign on LIVE trades.
+                        if (opts.SameSideLossBlockMinutes > 0)
+                        {
+                            var sinceLoss = closedTrades
+                                .Where(t => string.Equals(t.Side, decision.Side, StringComparison.OrdinalIgnoreCase))
+                                .Where(t => (t.PnlUsd ?? 0m) <= 0m)
+                                .Select(t => t.ClosedAt ?? t.OpenedAt)
+                                .DefaultIfEmpty(DateTime.MinValue)
+                                .Max();
+
+                            var elapsedLoss = DateTime.UtcNow - sinceLoss;
+
+                            if (sinceLoss > DateTime.MinValue
+                                && elapsedLoss.TotalMinutes < opts.SameSideLossBlockMinutes)
+                            {
+                                log.LogInformation(
+                                    "[TradingBot] {Strat} signalled {Side} but the last {Side} trade " +
+                                    "lost {Mins:F0} min ago, inside the {Block} min same-side block. " +
+                                    "Not digging.",
+                                    strat, decision.Side, decision.Side, elapsedLoss.TotalMinutes,
+                                    opts.SameSideLossBlockMinutes);
+
+                                await SafeRecordAsync(
+                                    configRepo.RecordEntryRefusalAsync(
+                                        $"{strat} {decision.Side} blocked: last {decision.Side} trade " +
+                                        $"lost {elapsedLoss.TotalMinutes:F0} min ago (block " +
+                                        $"{opts.SameSideLossBlockMinutes} min)", ct),
+                                    "same-side loss block refusal");
+
+                                // No cooldown stamp, same reasoning as the per-side cap:
+                                // nothing opened, and this limit is about direction after
+                                // a loss, not about how often the strategy may try.
+                                continue;
+                            }
+                        }
+
                         // ── One position at a time from the high-volume waiver ──
                         //
                         // FlowRatio has two ways in and they are different trades, so
