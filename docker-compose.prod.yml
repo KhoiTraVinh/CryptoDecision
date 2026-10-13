@@ -31,3 +31,6 @@ services:
 
   bot:
     image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/bot:${IMAGE_TAG:-latest}
+
+  polymarket:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/polymarket:${IMAGE_TAG:-latest}

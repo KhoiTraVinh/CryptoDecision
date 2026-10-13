@@ -665,6 +665,51 @@ services:
       - ollama_models:/root/.ollama
     restart: "no"
 
+  # ── Polymarket esports entry bot ────────────────────────────────────────────
+  #
+  # Independent of everything above it: no Postgres, no Kafka, no Ollama. It talks
+  # only outbound to Gamma, the CLOB and the Data API, and keeps its state on the
+  # exchange rather than on disk, so it can be started and stopped on its own.
+  #
+  # Polymarket__DryRun defaults to TRUE. It scans, decides and logs, and sends
+  # nothing. That is the arm switch; the private key alone does not arm it.
+  polymarket:
+    build:
+      context: ./src
+      dockerfile: CryptoDecision.PolymarketService/Dockerfile
+    container_name: polymarket
+    logging: *default-logging
+    mem_limit: 256m
+    environment:
+      DOTNET_ENVIRONMENT:          Production
+
+      # ── Wallet. Never written into this file; it is committed, these are not. ──
+      # PrivateKey is the key of the self-custody wallet (OKX Web3 Wallet), and
+      # FunderAddress is the Polymarket wallet address from the Deposit page —
+      # NOT the OKX wallet address. Getting those two out of step is the single
+      # most likely way for every order to be rejected.
+      Polymarket__PrivateKey:      "${POLY_PRIVATE_KEY:-}"
+      Polymarket__FunderAddress:   "${POLY_FUNDER_ADDRESS:-}"
+      Polymarket__SignatureType:   "${POLY_SIGNATURE_TYPE:-2}"
+
+      # The arm switch. Leave true until a preflight run has printed the right
+      # holder address, a non-zero USDC balance and a non-zero allowance.
+      Polymarket__DryRun:          "${POLY_DRY_RUN:-true}"
+
+      Polymarket__EntryPricesCsv:  "${POLY_ENTRY_PRICES:-}"
+      Polymarket__StakeUsd:        "${POLY_STAKE_USD:-0.20}"
+      Polymarket__MaxDailyUsd:     "${POLY_MAX_DAILY_USD:-15}"
+      Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-50000}"
+      Polymarket__RestBothSides:   "${POLY_REST_BOTH_SIDES:-false}"
+      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.15}"
+
+      # Contract ky lenh (EIP-712 verifyingContract). Mac dinh = clob-client 5.8.1.
+      # Polymarket dang chuyen sang rails pUSD voi contract moi; de o day de doi
+      # duoc bang bien moi truong thay vi phai build lai.
+      Polymarket__ExchangeAddress:        "${POLY_EXCHANGE_ADDRESS:-0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E}"
+      Polymarket__NegRiskExchangeAddress: "${POLY_NEGRISK_EXCHANGE_ADDRESS:-0xC5d563A36AE78145C45a50134d48A1215220f80a}"
+    restart: unless-stopped
+
 volumes:
   kafka_data:
   postgres_data:

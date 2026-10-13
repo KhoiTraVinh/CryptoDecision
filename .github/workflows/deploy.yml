@@ -77,6 +77,9 @@ jobs:
           - service: bot
             context: ./src
             dockerfile: ./src/CryptoDecision.BotService/Dockerfile
+          - service: polymarket
+            context: ./src
+            dockerfile: ./src/CryptoDecision.PolymarketService/Dockerfile
 
     steps:
       - uses: actions/checkout@v4
@@ -200,6 +203,28 @@ jobs:
           OKX_MARGIN_MODE=isolated
 
           OLLAMA_MODEL=${{ vars.OLLAMA_MODEL || 'qwen2.5:3b' }}
+
+          # ── Polymarket esports entry bot ──────────────────────────────────
+          # PrivateKey is the signing wallet. FunderAddress is the Polymarket
+          # account it signs for — a different address, and the single most
+          # common thing to get wrong; the bot refuses to trade if they match.
+          POLY_PRIVATE_KEY=${{ secrets.POLY_PRIVATE_KEY }}
+          POLY_FUNDER_ADDRESS=${{ secrets.POLY_FUNDER_ADDRESS }}
+
+          # DRY RUN defaults to true on purpose. A push to main deploys straight
+          # to live, so the arm switch must be a deliberate, separate act — set
+          # the repository variable POLY_DRY_RUN to false when you mean it.
+          POLY_DRY_RUN=${{ vars.POLY_DRY_RUN || 'true' }}
+
+          POLY_SIGNATURE_TYPE=${{ vars.POLY_SIGNATURE_TYPE || '3' }}
+          POLY_ENTRY_PRICES=${{ vars.POLY_ENTRY_PRICES || '0.01' }}
+          POLY_STAKE_USD=${{ vars.POLY_STAKE_USD || '0.06' }}
+          POLY_MAX_DAILY_USD=${{ vars.POLY_MAX_DAILY_USD || '0' }}
+          POLY_MIN_VOLUME_USD=${{ vars.POLY_MIN_VOLUME_USD || '50000' }}
+          POLY_ARM_BELOW_ASK=${{ vars.POLY_ARM_BELOW_ASK || '0.15' }}
+          POLY_REST_BOTH_SIDES=${{ vars.POLY_REST_BOTH_SIDES || 'false' }}
+          POLY_EXCHANGE_ADDRESS=${{ vars.POLY_EXCHANGE_ADDRESS || '0xE111180000d2663C0091e4f400237545B87B996B' }}
+          POLY_NEGRISK_EXCHANGE_ADDRESS=${{ vars.POLY_NEGRISK_EXCHANGE_ADDRESS || '0xe2222d279d744050d28e00520010520000310F59' }}
 
           IMAGE_REGISTRY=${{ env.REGISTRY_PATH }}
           IMAGE_TAG=${{ github.sha }}

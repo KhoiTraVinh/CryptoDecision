@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Workstation GC, for the same reason as every other service in this solution:
+         a memory-capped container has no throughput reason to stand up a GC heap and
+         thread per core. See IngestionService.csproj for the measurement. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <RootNamespace>CryptoDecision.PolymarketService</RootNamespace>
+    <AssemblyName>CryptoDecision.PolymarketService</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Polymarket orders are EIP-712 typed-data signed with the wallet's secp256k1
+         key. Nethereum is the only dependency here that is not already in the
+         solution; everything else is plain HTTP + HMAC. -->
+    <PackageReference Include="Nethereum.Signer.EIP712"          Version="4.*" />
+    <PackageReference Include="Serilog.Extensions.Hosting"       Version="8.*" />
+    <PackageReference Include="Serilog.Settings.Configuration"   Version="8.*" />
+    <PackageReference Include="Serilog.Sinks.Console"            Version="6.*" />
+    <PackageReference Include="Serilog.Formatting.Compact"       Version="3.*" />
+    <PackageReference Include="Serilog.Enrichers.Environment"    Version="3.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting"     Version="9.*" />
+    <PackageReference Include="Microsoft.Extensions.Http"        Version="9.*" />
+  </ItemGroup>
+</Project>
