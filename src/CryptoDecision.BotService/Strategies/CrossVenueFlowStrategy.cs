@@ -1260,10 +1260,14 @@ public sealed class FlowStrategyOptions
     /// <summary>
     /// How long a position is left alone before the model is first asked whether to cut it.
     ///
-    /// **DEPLOYED VALUE IS 30 MINUTES, NOT THIS DEFAULT.** H35, 2026-10-08, set via
-    /// `DipStrategy__ExitReviewAfter` / `FlowStrategy__ExitReviewAfter` in
-    /// docker-compose. The default below is one hour and the measurement under it is
-    /// H28's, which still stands on its own terms — it is simply not what is running.
+    /// **DEPLOYED VALUE IS ONE HOUR AND MATCHES THIS DEFAULT, since H39 on 2026-10-13.**
+    /// It was 30 minutes between H35 (2026-10-08) and H39, set via
+    /// `DipStrategy__ExitReviewAfter` / `FlowStrategy__ExitReviewAfter` in docker-compose,
+    /// where both lines still carry the value explicitly. H39 is an operator decision
+    /// taken against the measurement: over the 15 LLM_EXIT trades under the 30-minute
+    /// cadence the early look added +3.677R against carrying the same signals to stop or
+    /// target, where the 60-minute cadence before it had cost −3.355R over 38. Its case is
+    /// that 3 of the 11 positions cut at the first look went on to reach +1R.
     ///
     /// H35 exists because H33 could not measure anything without it. H33 moved
     /// <see cref="ExitReviewEvery"/>, the gap between review one and review two, and

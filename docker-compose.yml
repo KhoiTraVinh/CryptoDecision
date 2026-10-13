@@ -386,8 +386,44 @@ services:
       # Time-to-peak on record: min 0.2, Q1 18.6, MEDIAN 62.3, Q3 92.7, max 162.1 min.
       # H28 chose 1h to put the first look at the median peak. 30 min puts it nearer
       # Q1, i.e. deliberately before most positions have peaked.
-      DipStrategy__ExitReviewAfter:    "${EXIT_REVIEW_AFTER:-00:30:00}"
-      FlowStrategy__ExitReviewAfter:   "${EXIT_REVIEW_AFTER:-00:30:00}"
+      #
+      # ── H39: ExitReviewAfter 30m -> 1h, 2026-10-13. Operator decision. ──────
+      #
+      # Reverts H35's half of the cadence. H33's ExitReviewEvery stays at 30m below.
+      #
+      # THE REASON IS THE ONE H35 WROTE DOWN AS ITS OWN RISK: a position on its way
+      # to a ratchet win is being looked at, and cut, before it gets there. The
+      # operator reads the ratchet as the thing that earns and the first look as the
+      # thing that interrupts it. H35 called that "the bet, stated plainly".
+      #
+      # THE BET IS 2 FOR 2 SO FAR, AGAINST. Since H35 shipped, exactly two RATCHET
+      # winners were held past minute 30 — #180 at 54 min (+$0.0830) and #198 at 62
+      # min (+$0.1121) — and the reviewer looked at both and held both. It has not
+      # yet taken a ratchet winner off the board.
+      #
+      # AND THE MEASUREMENT RUNS THE OTHER WAY, on 15 LLM_EXIT trades either side of
+      # H35, each compared with what signal_outcomes says the same signal did when
+      # carried to stop or target:
+      #
+      #   first review at 60m (before H35)   38 exits   -5.913R realised   -2.559R held   -3.355R
+      #   first review at 30m (after  H35)   15 exits   -2.638R realised   -6.316R held   +3.677R
+      #
+      # Not one of those 15 had armed the ratchet when it was cut: peak excursion ran
+      # 0.000R to 0.204R against a 0.25R arm. The reviewer is not taking ratchet
+      # winners, it is closing positions that never started, 9 of which were on their
+      # way to a full -1R.
+      #
+      # WHAT THE CHANGE BUYS, stated as the operator's case rather than mine: of the
+      # 11 cut at the first look, THREE went on to reach +1R — #192, #193 and #197,
+      # cut at -0.237R, +0.059R and +0.086R. That is +3R left on the table against
+      # the +1.404R the early cut saved on the other eight. Read trade by trade
+      # instead of in aggregate, the first look is 3-for-11 at killing a winner.
+      #
+      # Both sections, for H33's reason: CANDLE_REVERSAL binds from DipStrategy and
+      # is the majority of trades. Revert by putting 00:30:00 back on both lines, or
+      # set EXIT_REVIEW_AFTER in the host .env to override without a code change.
+      DipStrategy__ExitReviewAfter:    "${EXIT_REVIEW_AFTER:-01:00:00}"
+      FlowStrategy__ExitReviewAfter:   "${EXIT_REVIEW_AFTER:-01:00:00}"
 
       # ── H36: TargetRiskMultiple 2.0 -> 1.0, 2026-10-08 ──────────────────────
       #

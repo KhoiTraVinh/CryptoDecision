@@ -4451,3 +4451,177 @@ Judged at **30 closed trades opened after the deploy**, LIVE, both strategies.
 Fourth live change alongside H33, H35, H36. This one is separable: it acts only
 through refusals, which are logged with their own text, so its effect is countable
 independently of anything the exits do.
+
+---
+
+## H38 — After a waiver TP, the same side needs the flow to turn over first. 2026-10-13. **LIVE. Operator rule, n=1.**
+
+- **Opened** 2026-10-13
+- **Change** new `BotOptions.HighVolumeTpLockMinutes = 240`. When the most recent
+  HIGH_VOLUME trade exited at target, the waiver refuses a new entry on that SAME side.
+  The opposite side is allowed, and taking it clears the lock by becoming the most recent
+  waiver trade.
+- **Purpose** The waiver took one event, took its target on it, and immediately took it
+  again at the bottom.
+
+### The episode
+
+| | #203 | #204 |
+|---|---|---|
+| opened | 00:09:13 — SHORT @ 103.81 | **00:52:28** — SHORT @ 101.80 |
+| closed | 00:52:27 `EXCHANGE_TP` @ 101.75 | 01:06:06 `EXCHANGE_SL` @ 103.85 |
+| P&L | **+$0.5567** | **−$0.6155** |
+
+0.76 seconds between the first close and the second entry; the low of the move was
+101.63. #204's stop sat at 103.836, above #203's own entry, so it could only be reached
+by the move retracing to where it began. Net for the episode: **−$0.0588.**
+
+### Why the signal cannot be the thing that fixes this
+
+Measured off raw trades at the instant of each entry, the two signals are the same signal:
+
+| | volume, rolling 15m | OFI |
+|---|---|---|
+| #203 entry | $21.66M | −0.307 |
+| #204 entry | $21.14M | −0.251 |
+
+There is no threshold on volume or on imbalance that admits the first and refuses the
+second. The position book has to carry what the signal cannot.
+
+Re-arming on a sub-threshold reading does not do it either: the window fell to $6.80M at
+00:50, between the two entries, so an edge-triggered rule would have fired #204 anyway.
+The second print was real. Taking it was not.
+
+### Why "same side" is the same sentence as "the flow has not turned"
+
+On this path the side IS the sign of the flow — the entry resolves
+`live.Ofi > 0 ? LONG : SHORT`. So refusing the same side and admitting the opposite one
+states the operator's rule exactly: volume above the threshold is not enough to re-enter,
+it has to be volume pointing the other way. By 01:10 OFI had reached +0.369, and a LONG
+there is the trade this rule deliberately leaves open.
+
+### Not measured, and the honest reason
+
+**One of the 22 closed waiver positions has ever exited at target.** The sample for this
+rule is #204 and nothing else. It is a mechanism fix on n=1, and the only measurable
+claim about it is its cost, which is one trade: the one that lost $0.6155.
+
+A wider rule was measured on the same 22 and rejected by the operator: blocking ANY
+waiver re-entry for 120 minutes catches 7 trades, all 7 losers, −$2.0675 of a −$2.3557
+book. It was refused because it also blocks setups indistinguishable from #203 — which is
+correct, and is the reason this narrower rule keys on a target exit and on direction.
+
+`HighVolumeTpLockMinutes` is a safety valve, not a measured number: it exists so a side
+cannot stay locked forever if the opposite signal never arrives. 0 = never expires.
+
+### Decision rule — fixed before the change
+
+Judged at **5 waiver target exits**, which on the current rate of one in 22 closed trades
+is a long way off. That is stated rather than hidden: this rule will not be judgeable for
+months, and until then it is carried on its mechanism.
+
+**KEEP** if, of the signals it blocks, fewer than half would have resolved `WIN` in
+`signal_outcomes`.
+
+**REJECT** and set the lock to 0 if half or more would have won, or if the lock is ever
+observed holding a side for longer than the 240-minute valve because the opposite signal
+never came — the second case means the valve, not the rule, is doing the work.
+
+### Attribution
+
+Entry path only. Acts through refusals, which leave their own text in
+`bot_config.last_refusal_reason` and a `signal_outcomes` row with `bot_trade_id` NULL.
+Ships alongside H39, which touches only the exit path.
+
+---
+
+## H39 — ExitReviewAfter 30m → 1h. Reverts H35. 2026-10-13. **LIVE. Operator decision, against the measurement.**
+
+- **Opened** 2026-10-13
+- **Change** `DipStrategy__ExitReviewAfter` / `FlowStrategy__ExitReviewAfter`
+  `00:30:00` → `01:00:00` in docker-compose, which is also the code default. H33's
+  `ExitReviewEvery` stays at 30 minutes.
+- **Purpose** Operator reads the first look as interrupting positions on their way to a
+  ratchet win. This entry records that the evidence available on the day pointed the
+  other way, so that the next judgement is made against what was actually known.
+
+### First, a correction that matters for what is being tuned
+
+The ratchet has **no review interval**. It runs every evaluation cycle, costs no model
+call, and closes on price giveback alone. The 30-minute parameter is `ExitReviewAfter`,
+which gates the **LLM reviewer** — a different exit (`LLM_EXIT`) with a different record.
+Raising it does not slow the ratchet down; it delays the model's first look.
+
+### What the ratchet and the reviewer have actually done
+
+Each exit compared with what `signal_outcomes` says the same signal did when carried to
+its stop or target, over 148 closed trades:
+
+| exit | n | realised R | R if held | **exit added** |
+|---|---|---|---|---|
+| **RATCHET** | 33 | +6.819 | +1.086 | **+5.733** |
+| LLM_EXIT | 53 | −8.552 | −8.875 | +0.323 |
+| SL | 10 | −10.636 | −10.000 | −0.636 |
+| OFI_REVERSAL | 31 | +5.395 | +9.318 | **−3.923** |
+
+The ratchet is the largest positive line in the system. It is not exiting early: eleven
+of its 33 exits were on positions that were going to resolve at −1R.
+
+### H35's stated risk, now testable
+
+H35 shipped with its own risk written down: five of the eleven ratchet winners to that
+point had been held past minute 30, and the first look would now see them while open.
+
+Since H35, exactly two ratchet winners have been held past minute 30 — **#180 at 54 min
+(+$0.0830) and #198 at 62 min (+$0.1121)** — and the reviewer looked at both and held
+both. **2 for 2 against the stated risk.** No ratchet winner has yet been cut by a
+review.
+
+### The cadence measurement
+
+| first review | n | realised R | R if held | difference |
+|---|---|---|---|---|
+| 60 min (before H35) | 38 | −5.913 | −2.559 | **−3.355** |
+| 30 min (after H35) | 15 | −2.638 | −6.316 | **+3.677** |
+
+Not one of those 15 had armed the ratchet when it was cut — peak excursion ran 0.000R to
+0.204R against a 0.25R arm. The reviewer was not taking ratchet winners; it was closing
+positions that never started, nine of which were on their way to a full −1R.
+
+Confounded, and said so: the two eras are also two market regimes, H36 changed the target
+on the same day as H35, and 15 trades is 15 trades.
+
+### The operator's case, which is not nothing
+
+Read trade by trade rather than in aggregate, of the 11 cut at the first look **three
+went on to reach +1R** — #192, #193 and #197, cut at −0.237R, +0.059R and +0.086R. That
+is 3R left on the table against the 1.404R the early cut saved on the other eight. The
+first look is 3-for-11 at killing a winner, and a rule that kills a winner a third of the
+time it fires is a defensible thing to want delayed.
+
+### Decision rule — fixed before the change
+
+Judged at **15 closed LIVE trades** opened after the deploy, so the sample matches the 15
+H35 is being judged against.
+
+**KEEP 1h** if both hold:
+
+1. Over those trades, `LLM_EXIT` realised R ≥ R-if-held — the reviewer is still adding,
+   just later.
+2. At least one ratchet winner is held past minute 60 that would have been cut at 30.
+   This is the mechanism check: the whole case for H39 is that the first look was taking
+   trades that had further to run.
+
+**REVERT to 30m** if any of:
+
+1. `LLM_EXIT` realised R is worse than R-if-held by more than 1.5R.
+2. Three or more positions reach −1R having been cut at neither 30 nor 60 minutes
+   because the first look no longer arrives before the stop does.
+3. Fewer than 6 `LLM_EXIT` closures in the window — not binding, cannot be judged.
+
+### Attribution
+
+This is the only change to the exit path in this deploy, but it ships alongside the
+high-volume target lock on the ENTRY path. Those touch different
+sides of a trade and their rows are distinguishable (`close_reason` vs the refusal log),
+so neither hides the other.

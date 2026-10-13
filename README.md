@@ -126,19 +126,30 @@ Refusals carry named codes:
 
 ### The early exit is now the model's call (H24, 2026-09-20)
 
-After 2h held, and then at most once every 2h, `AiExitReviewer` is asked whether force
-remains behind the position or the trend has turned. CUT closes it as `LLM_EXIT`. The
-15-bucket `OFI_REVERSAL` rule no longer runs every cycle — it runs ONLY when a review was
-due and the model could not answer (Ollama down, timed out, unparseable). That fallback is
-deliberate: `OFI_REVERSAL` is the only exit that has produced positive R here, 30 exits at
-+4.647R, and an outage falls back to it rather than to nothing.
+**Deployed cadence: first look after 1h, then at most once every 30m.** Both are set in
+docker-compose on BOTH strategy sections, not left to the code default. The first look has
+moved four times — 2h (H24), 1h (H28), 30m (H35), 1h again (H39, 2026-10-13) — so read the
+compose lines rather than this sentence if they ever disagree.
 
-The cadence is measured, not chosen: one call costs 42-43s on a 2-vCPU host where Ollama
-runs `NUM_PARALLEL=1`, against a 120s cycle budget shared with every open position and the
-entry gate. Per-bucket review would be ~16 calls per trade; two-hourly is ~2. See H24 for
-the arithmetic and the decision rule, and `bot_trades.last_exit_review_at` for the pacing
-clock, which is per position and survives a restart.
+`AiExitReviewer` is asked whether force remains behind the position or the trend has
+turned; CUT closes it as `LLM_EXIT`. It is given the closed 15-minute buckets since entry,
+each with its OFI and its notional in $M — so the "is buying coming back against my short"
+question is already a thing the model is asked, and `LLM_EXIT` is the answer's track
+record, not a feature still to be built.
 
+The 15-bucket `OFI_REVERSAL` rule no longer runs every cycle — it runs ONLY when a review
+was due and the model could not answer (Ollama down, timed out, unparseable). That fallback
+is deliberate, though the reason stated for it has aged: `OFI_REVERSAL` was the only exit
+with positive R when H24 shipped, and on the book as it now stands it is the exit that
+leaves the most behind — 31 exits, +5.395R realised against +9.318R had those positions
+been carried to stop or target.
+
+The cadence was measured, not chosen, and the arithmetic has been re-measured since: a call
+costs 20.7-25.7s on this 2-vCPU host with Ollama at `NUM_PARALLEL=1`, not the 42-43s H24
+worked from, and the entry gate it shared the 120s cycle budget with was deleted by H30.
+See H24, H28, H33, H35 and H39 for each move and its decision rule, and
+`bot_trades.last_exit_review_at` for the pacing clock, which is per position and survives a
+restart.
 ### CANDLE_REVERSAL — the dip rule, and the majority of the trade stream
 
 Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) closed
