@@ -1088,6 +1088,81 @@ public sealed class TradingBotService(
                             }
                         }
 
+                        // ── After a target exit, the same side needs a NEW flow ──
+                        //
+                        // Operator rule, 2026-10-13. Once a waiver position has taken its
+                        // target, the waiver will not re-enter on the SAME side. It will
+                        // enter the opposite one — and only the opposite one — because on
+                        // this path the side IS the sign of the flow: the entry resolves
+                        // `live.Ofi > 0 ? LONG : SHORT`, so a signal arriving on the other
+                        // side is, by construction, the flow having turned over.
+                        //
+                        // Volume staying above the threshold is therefore not enough to
+                        // re-enter. It has to be volume pointing the OTHER way.
+                        //
+                        // The case it is built from: #203 shorted a $21.14M print at
+                        // 103.81 and took its target at 101.75; 0.76 seconds later #204
+                        // shorted the same flow again at 101.80, four cents off the
+                        // 101.63 low, and was stopped at 103.85. Measured at the instant
+                        // of each entry, the two signals are indistinguishable — $21.66M
+                        // at OFI −0.307 against $21.14M at OFI −0.251 — which is the
+                        // point: the signal cannot tell them apart, so the position book
+                        // has to. By 01:10 OFI had reached +0.369, and a LONG there would
+                        // have been the trade this rule leaves open.
+                        //
+                        // NOT MEASURED, and said plainly: exactly one waiver position in
+                        // the 22 closed ones has ever exited at target, so the sample for
+                        // this rule is #204 alone. It is a mechanism fix on n=1. What can
+                        // be said is what it costs — nothing, historically. It blocks one
+                        // trade, and that trade lost $0.6155.
+                        //
+                        // Keyed on the most recent waiver trade rather than on the most
+                        // recent waiver TP, which is what clears it: once an entry is
+                        // taken on the other side, that entry is the most recent one and
+                        // the lock is simply gone. HighVolumeTpLockMinutes exists only so
+                        // a side cannot stay locked forever if the opposite signal never
+                        // arrives — a safety valve, not a tuned number. 0 = never expires.
+                        if (decision.Flow?.EntryPath == EntryPaths.HighVolume)
+                        {
+                            var lastHv = accountTrades
+                                .Where(t => t.EntryPath == EntryPaths.HighVolume)
+                                .OrderByDescending(t => t.OpenedAt)
+                                .FirstOrDefault();
+
+                            var tookTarget = lastHv?.CloseReason is "TP" or "EXCHANGE_TP";
+
+                            var lockAgeMinutes = lastHv?.ClosedAt is { } closedAt
+                                ? (DateTime.UtcNow - closedAt).TotalMinutes
+                                : 0.0;
+
+                            var lockLive = opts.HighVolumeTpLockMinutes <= 0
+                                        || lockAgeMinutes < opts.HighVolumeTpLockMinutes;
+
+                            if (tookTarget && lockLive
+                                && string.Equals(lastHv!.Side, decision.Side, StringComparison.OrdinalIgnoreCase))
+                            {
+                                log.LogInformation(
+                                    "[TradingBot] {Strat} signalled {Side} through the high-volume " +
+                                    "waiver, but trade {LastId} took its target on {Side} {Mins:F0} " +
+                                    "min ago and the flow has not turned over since. Volume above " +
+                                    "the threshold is not enough — the same side needs the OTHER " +
+                                    "side's flow first.",
+                                    strat, decision.Side, lastHv.Id, decision.Side, lockAgeMinutes);
+
+                                await SafeRecordAsync(
+                                    configRepo.RecordEntryRefusalAsync(
+                                        $"{strat} {decision.Side} blocked: trade {lastHv.Id} took " +
+                                        $"target on {decision.Side} {lockAgeMinutes:F0} min ago; " +
+                                        "waiver re-entry needs the flow to reverse", ct),
+                                    "high-volume target-lock refusal");
+
+                                // No cooldown stamp, same reasoning as the caps above:
+                                // nothing opened, and this is about which way the flow
+                                // points, not about how often a strategy may try.
+                                continue;
+                            }
+                        }
+
                         log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0}{Rationale}",
                             strat, decision.Side, stratTrades.Count + 1, opts.MaxOpenTradesPerStrategy, opts.Symbol,
                             decision.Confidence,

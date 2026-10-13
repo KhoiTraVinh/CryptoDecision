@@ -257,6 +257,31 @@ public sealed record BotOptions
     public int          MaxOpenHighVolume        { get; set; } = 1;
 
     /// <summary>
+    /// Minutes after a high-volume waiver position exits AT TARGET during which that path
+    /// will not re-enter on the SAME side. 0 = the lock never expires on its own.
+    ///
+    /// Operator rule, 2026-10-13. On this path the side IS the sign of the flow — the entry
+    /// resolves <c>live.Ofi &gt; 0 ? LONG : SHORT</c> — so refusing the same side and
+    /// allowing the opposite one is the same sentence as "re-enter only if the flow has
+    /// turned over". Volume still above the threshold does not qualify on its own.
+    ///
+    /// It exists because the signal cannot separate the two entries that produced it.
+    /// Trade #203 shorted at 103.81 on $21.66M at OFI −0.307 and took target at 101.75;
+    /// #204 shorted again 0.76 seconds later at 101.80 on $21.14M at OFI −0.251 — four
+    /// cents off the 101.63 low — and was stopped at 103.85. By the rule's own measurements
+    /// those two signals are the same signal. Fifteen minutes later OFI was +0.369.
+    ///
+    /// NOT MEASURED. One of the 22 closed waiver positions has ever exited at target, so
+    /// the sample is #204 and nothing else: a mechanism fix on n=1, recorded as such. Its
+    /// historical cost is one trade, and that trade lost $0.6155.
+    ///
+    /// The lock is keyed on the most recent waiver trade, not the most recent waiver
+    /// target, so an entry on the opposite side clears it by existing. This timeout is only
+    /// here so a side cannot stay locked forever when the opposite signal never arrives.
+    /// </summary>
+    public int          HighVolumeTpLockMinutes  { get; set; } = 240;
+
+    /// <summary>
     /// While a high-volume-waiver position is open, close and suspend every OTHER strategy.
     ///
     /// H26, deleted 2026-09-28 when XVENUE_FLOW went off, restored 2026-09-30 as part of H31.
