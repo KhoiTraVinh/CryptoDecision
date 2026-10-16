@@ -5052,3 +5052,100 @@ Ollama is now **unused by the bot**. Nothing calls it: the entry gate was delete
 and the exit reviewer is switched off here. It is still running, still holding its ~3.4 GiB
 limit on a 2-vCPU host, and it is the single most expensive service in the stack. If H44
 is kept at the 2026-10-23 judging, remove the service.
+
+---
+
+## H45 — The 4% target has never been touched. Target 2.0R → 0.75R, widening OFF. 2026-10-16. **LIVE.**
+
+- **Opened** 2026-10-16
+- **Change**
+  - `TargetRiskMultiple` **2.0 → 0.75** on both sections. At the 2.00% stop floor that
+    is a **1.50%** target instead of 4.00%.
+  - `bot_config.use_dynamic_tp_sl` **TRUE → FALSE** (SQL, live immediately), so the
+    stored level is the level that trades.
+  - `MinStopPct` stays at 2.00%. See below — the stop is not the problem.
+- **Purpose** Operator: "TP is too high and SL is too high." Half right, and the half
+  that is right is worse than it sounds.
+
+### The target was not high. It was unreachable.
+
+Maximum favourable excursion inside the applicable hold, all 172 closed trades, measured
+off `klines_1m`:
+
+| median | p75 | p90 | **max** |
+|---|---|---|---|
+| 0.69% | 1.27% | 1.86% | **3.94%** |
+
+Share of trades that touch a given target at any point before the hold expires:
+
+| target | 1.0% | 1.5% | 2.0% | 2.5% | 3.0% | **4.0%** | **6.67%** |
+|---|---|---|---|---|---|---|---|
+| touched | 64 | 31 | 15 | 10 | 3 | **0** | **0** |
+| share | 37.2% | 18.0% | 8.7% | 5.8% | 1.7% | **0.0%** | **0.0%** |
+
+**The best trade this book has ever produced did not reach 4%.** The stored target was
+4.00% and `use_dynamic_tp_sl` put its real level at 6.67%, so TP was decorative: every
+position was always going to exit on the stop or the 3-hour cap. `TP` and `EXCHANGE_TP`
+have fired twice in 172 trades, both under an older, smaller target.
+
+This is the error H42 made and did not catch. Its grid was in R, where "2.0R" looks like
+a reasonable number; in percent it was asking for a move the instrument does not make on
+this horizon.
+
+### The grid, in percent space and net of fees
+
+180-minute hold, 0.1% round trip charged on every trade, totals in R:
+
+| | tp 0.5% | tp 0.75% | tp 1.0% | tp 1.5% | tp 2.0% | tp 3.0% |
+|---|---|---|---|---|---|---|
+| stop 0.8% | −23.01 | −19.18 | −14.49 | −16.97 | −19.57 | −19.26 |
+| stop 1.0% | −25.54 | −24.25 | −18.90 | −20.46 | −22.56 | −22.31 |
+| stop 1.5% | −18.51 | −18.15 | −14.21 | −13.17 | −13.73 | −14.91 |
+| **stop 2.0%** | −14.37 | −15.06 | −11.98 | **−10.73** | −11.13 | −12.01 |
+
+Best cell is stop 2.00% / target 1.50%. The 1.0–2.0% target band is a plateau, not a
+spike, which is the shape worth trusting.
+
+### The stop is the opposite of too high
+
+Every column says a WIDER stop is better, monotonically from 0.8% to 2.0%. The mechanism
+is arithmetic, not opinion: dollar risk per trade is fixed at `capital × risk_pct`, so
+notional is `risk$ / stop%` — halving the stop doubles the position and the same 0.1%
+round trip then costs twice as many R. At a 0.8% stop the fee alone is 0.125R per trade,
+21.5R over this sample. At 2.00% it is 0.05R.
+
+Adverse excursion backs it from the other side: median 0.71%, p90 2.18%. A 2.00% stop
+sits just under the 90th percentile, so it is already being touched by ordinary noise on
+roughly one trade in ten; moving it in makes that one in three.
+
+`MinStopPct` stays at 2.00%, and this is the second independent measurement to land on
+that number — the first was H15's touch-probability argument.
+
+### Fees are now the largest single line
+
+Nothing in this grid is positive, and 0.1% per round trip against a 0.69% median
+excursion is most of the reason. At the best cell the fee is 8.6R of the 10.73R lost.
+That is the next thing to work on and it is not a geometry problem: it is either fewer
+trades, bigger moves per trade, or maker rebates on the exit.
+
+### Decision rule — fixed before the change
+
+Judged **2026-10-23** with H40, H42 and H44.
+
+**KEEP** if both hold:
+
+1. At least 3 closures with `close_reason` in (`TP`, `EXCHANGE_TP`). The entire claim is
+   that the target is now reachable; zero TP closures in a week means it still is not.
+2. Mean R over the window is above −0.062R, the per-trade average of the best cell.
+
+**REVERT** if any of:
+
+1. Zero TP closures in the week AND more than 60% of closures are `TIMEOUT` — the target
+   moved but not far enough, and 1.0% is the next step down.
+2. Mean R below −0.15.
+
+### Attribution
+
+Separable from H40 and H44 by `close_reason`: this change can only show up as TP
+closures appearing where there were none, and as the realised R of those closures. It
+shares the week with them and that is recorded.

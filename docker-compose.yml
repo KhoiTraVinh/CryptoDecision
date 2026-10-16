@@ -454,8 +454,38 @@ services:
       # argmax off a short curve, which this repository has done before.
       #
       # MinRewardRisk 0.5 still clears: 2%/2% is 0.93:1 after fees.
-      DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-2.0}"
-      FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-2.0}"
+      #
+      # ── H45: 2.0 -> 0.75. The 4% target has never once been touched. ────────
+      #
+      # At the 2.00% stop floor, 2.0x stored a 4.00% target, and use_dynamic_tp_sl
+      # made its real level 6.67%. Maximum favourable excursion inside the hold,
+      # measured on all 172 closed trades off klines_1m:
+      #
+      #     median 0.69%   p75 1.27%   p90 1.86%   MAX 3.94%
+      #
+      # The best trade this book has ever produced did not reach 4%. Share of trades
+      # that touch a given target at any point before the hold expires:
+      #
+      #     1.0% -> 37.2%    2.0% -> 8.7%    3.0% -> 1.7%    4.0% -> 0%    6.67% -> 0%
+      #
+      # The target was not high, it was unreachable: a level no trade in the sample
+      # has ever printed cannot fire, so TP was decorative and every position was
+      # exiting on the stop or the 3h cap. 0.75 x 2.00% = 1.50%, which 18.0% of
+      # trades touch.
+      #
+      # Gridded in PERCENT space, net of the 0.1% round trip, 180m hold, totals in R:
+      #
+      #              tp0.5    tp0.75   tp1.0    tp1.5    tp2.0    tp3.0
+      #     stop 0.8  -23.01   -19.18   -14.49   -16.97   -19.57   -19.26
+      #     stop 1.0  -25.54   -24.25   -18.90   -20.46   -22.56   -22.31
+      #     stop 1.5  -18.51   -18.15   -14.21   -13.17   -13.73   -14.91
+      #     stop 2.0  -14.37   -15.06   -11.98   -10.73   -11.13   -12.01
+      #
+      # Best cell is stop 2.00% / target 1.50%, and the 1.0-2.0% target band is a
+      # plateau rather than a spike. MinRewardRisk 0.5 still clears: 1.5%/2.0% is
+      # 0.70:1 after fees.
+      DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-0.75}"
+      FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-0.75}"
       #
       # ── H42: target back to 2.0R, ratchet OFF, max hold 3h. 2026-10-16 ─────
       #
@@ -783,7 +813,13 @@ services:
       dockerfile: CryptoDecision.PolymarketService/Dockerfile
     container_name: polymarket
     logging: *default-logging
-    mem_limit: 256m
+    # 1g, not the 256m this started on. The scan parses Gamma event pages, and one page of
+    # 100 football events carries about fifty markets each - six to eight megabytes of JSON
+    # - across seventeen competition tags. At 256m that threw OutOfMemoryException mid-scan
+    # and silently dropped every football page after the first, which is the worst kind of
+    # failure here: the bot kept running and just stopped seeing most of the market.
+    # Measured 277 MB in steady state, so this is roughly 3.5x headroom.
+    mem_limit: 1g
     environment:
       DOTNET_ENVIRONMENT:          Production
 
@@ -804,6 +840,7 @@ services:
       Polymarket__StakeUsd:        "${POLY_STAKE_USD:-0.20}"
       Polymarket__MaxDailyUsd:     "${POLY_MAX_DAILY_USD:-15}"
       Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-25000}"
+      Polymarket__ScanIntervalSeconds: "${POLY_SCAN_SECONDS:-5}"
       # Giu true. Tach dong tien cua @greenworld theo so phe nam trong mot market:
       # 25 market om ca hai phe @1c tra ve +$3.243, con 2.139 market chi mot phe lo
       # $1.962. Om ca hai phe o 1c la cam chac ben thang voi gia ~2c.
@@ -823,7 +860,12 @@ services:
       # 0.10 was briefly changed to 0.07 on 2026-10-16 on exactly the wrong reading
       # of that precedence -- treating production as authoritative and this as dead
       # text. Reverted the same day. Left here as the reason not to repeat it.
-      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.10}"
+      # Nguong arm. ArmBelowAsk la gia tri du phong cho mon khong khai bao rieng; gia tri
+      # tinh theo DONG nen 1.0 = 100 xu = vao ngay, KHONG phai 1 xu. Muc lenh nam cho la
+      # Polymarket__EntryPricesCsv.
+      Polymarket__ArmBelowAsk:          "${POLY_ARM_BELOW_ASK:-0.09}"
+      Polymarket__ArmBelowAskByGameCsv: "${POLY_ARM_BY_GAME:-}"
+      Polymarket__SoccerArmBelowAsk:    "${POLY_SOCCER_ARM:-0.05}"
 
       # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
       # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
