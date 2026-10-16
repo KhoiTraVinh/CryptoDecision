@@ -808,13 +808,22 @@ services:
       # 25 market om ca hai phe @1c tra ve +$3.243, con 2.139 market chi mot phe lo
       # $1.962. Om ca hai phe o 1c la cam chac ben thang voi gia ~2c.
       Polymarket__RestBothSides:   "${POLY_REST_BOTH_SIDES:-true}"
-      # 0.07, not the 0.10 this read until 2026-10-16. deploy.yml writes
-      # POLY_ARM_BELOW_ASK=0.07 into .env, and a `${VAR:-default}` here only applies
-      # when .env does not set VAR at all -- so the default on this line is dead text
-      # and 0.07 is what has been running. Changed here to stop the file claiming a
-      # number that never reached the bot. If 0.10 was the intention, change
-      # .github/workflows/deploy.yml too; changing only this line does nothing.
-      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.07}"
+      # ── THE POLYMARKET DEFAULTS ON THIS BLOCK ARE LIVE. Do not "align" them. ──
+      #
+      # Polymarket geo-blocks the production region, so the instance that actually
+      # rests orders is the LOCAL one. Local has no deploy workflow writing a .env,
+      # which means `${VAR:-default}` falls through to the default on each line --
+      # these numbers are the running configuration, not documentation of it.
+      #
+      # The same lines in .github/workflows/deploy.yml are the opposite: that file
+      # writes ~/cryptodecision/.env on the production host, where the service is
+      # blocked and places nothing. So when the two disagree, THIS file is the one
+      # that trades, and an edit here changes real behaviour today.
+      #
+      # 0.10 was briefly changed to 0.07 on 2026-10-16 on exactly the wrong reading
+      # of that precedence -- treating production as authoritative and this as dead
+      # text. Reverted the same day. Left here as the reason not to repeat it.
+      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.10}"
 
       # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
       # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
