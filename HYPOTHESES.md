@@ -4894,3 +4894,65 @@ left ON.
 Recorded because the structural concern is correct even though the number is small: if
 the hold cap is ever raised again, or the instrument changed for one that moves 10% in an
 afternoon, this stops being inert and the stop becomes 2x what the position was sized for.
+
+---
+
+## H43 — Raise ReversalDropPct above 0.60%. 2026-10-16. **MEASURED, NOT SHIPPED — the gradient runs the other way.**
+
+- **Proposed** by the operator: 0.60% is too small a fall to buy.
+- **Status** Measured on the 102 closed LONG dip trades, bucketed by the fall each one
+  actually entered on, read out of `entry_rationale`. Raising the threshold deletes the
+  only band that earns.
+
+### Bigger falls are worse, not better
+
+| fall at entry | n | wins | mean R | total R |
+|---|---|---|---|---|
+| **0.60–0.80%** | 49 | 29 | **+0.0946** | **+4.634** |
+| 0.80–1.00% | 25 | 8 | −0.0393 | −0.983 |
+| 1.00–1.50% | 21 | 10 | −0.0963 | −2.022 |
+| ≥ 1.50% | 7 | 1 | −0.1176 | −0.823 |
+
+Monotone decreasing. Cumulatively, every raise makes the kept book worse:
+
+| minimum fall | kept | kept R | kept mean R | dropped R |
+|---|---|---|---|---|
+| **0.60 (current)** | 102 | **+0.807** | +0.0079 | — |
+| 0.70 | 69 | −2.753 | −0.0399 | +3.560 |
+| 0.80 | 53 | −3.828 | −0.0722 | +4.634 |
+| 1.00 | 28 | −2.844 | −0.1016 | +3.651 |
+
+The existing note on `ReversalDropPct` — "0.60 is where the effect starts rather than where
+it is largest" — reads as though more is safer. On realised trades it is the opposite: 0.60
+is where the effect IS, and it decays immediately above it.
+
+### H40 already removed the part that was bad
+
+The obvious objection is that big falls lose because big falls happen in flushes, which is
+what H40 caps. Crossed, on the same 102 trades:
+
+| fall | H40 at $10M | n | total R | mean R |
+|---|---|---|---|---|
+| 0.6–0.8% | blocks | 5 | −0.904 | −0.1809 |
+| **0.6–0.8%** | **keeps** | **44** | **+5.539** | **+0.1259** |
+| ≥ 0.8% | blocks | 19 | −3.865 | −0.2034 |
+| ≥ 0.8% | keeps | 34 | +0.037 | +0.0011 |
+
+Both blocked rows are strongly negative and both kept rows are not. **After H40 the big-fall
+band is flat rather than negative**, so the damage attributed to fall size was mostly the
+volume effect, already priced. What remains is the top-left-to-bottom-right structure: the
+money is small dips in quiet tape, 44 trades at +0.1259 mean R.
+
+Raising the threshold deletes that cell and keeps the flat one.
+
+### If anything, the opposite — and not yet worth it
+
+The symmetric change is a CEILING on the fall: refuse dips bigger than ~0.8%. After H40
+that band is +0.037R over 34 trades, so a ceiling buys almost nothing and costs 34 trades
+of sample. Not proposed.
+
+### The short side is a separate question
+
+`ReversalRisePct` is 1.00 and the short side's bands are: 1.00–1.50% rise, n 9, +0.1858
+mean R; ≥1.50%, n 5, −0.3405. Same shape — the smaller move is the better trade — on 14
+trades total, which is too few to act on either way. Recorded so it is not re-derived.

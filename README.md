@@ -28,7 +28,7 @@ OKX     ┘                                              │  trades → flow_ba
                                                        ▼
                                                 Bot (2 strategies, both live)
                                                  │ scorer → geometry → sizing
-                                                 │ optional LLM veto gate
+                                                 │ LLM reviews OPEN positions (not entries)
                                                  ▼
                                              OKX  ─ post-only entry + OCO exit
 ```
@@ -49,7 +49,7 @@ and `flow_bars_15m`. See **Operating the bot** below.
 | **Ingestion** | .NET 9 worker | 3 exchange WebSockets → Channels → Kafka | yes |
 | **Processor** | .NET 9 worker | Kafka → `COPY` → `flow_bars_15m` + daily features | yes |
 | **Bot** | .NET 9 worker | Scorer → risk engine → OKX orders (or paper) | yes |
-| **Ollama** | ollama/ollama | Serves `qwen2.5:3b` for the entry gate | yes |
+| **Ollama** | ollama/ollama | Serves `qwen2.5:3b` to the EXIT reviewer. The entry gate it was first added for was DELETED by H30 on 2026-09-29 | yes |
 | **Kafka** | KRaft, no ZooKeeper | Trade + kline transport | yes |
 | **PostgreSQL** | 16 | `trades` partitioned daily, 7-day retention | yes |
 
