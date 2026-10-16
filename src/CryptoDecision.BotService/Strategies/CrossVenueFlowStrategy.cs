@@ -176,7 +176,13 @@ public sealed class CrossVenueFlowStrategy(
     /// </summary>
     private string DescribeRatchet() =>
         !tuning.UseRatchetExit
-            ? ""
+            // Says so out loud rather than falling silent. An empty string here means a
+            // reader cannot tell "the ratchet is off" from "this banner predates the
+            // ratchet", and H42 is a one-week trial of exactly this switch — the startup
+            // line is where that week gets verified from.
+            ? "RATCHET: OFF (H42, 2026-10-16). Nothing closes a position on giveback from " +
+              "its peak; the 3h max hold and the stop are what bound a position that turns. " +
+              "It was worth +5.17R at a 12-hour hold and -4.98R at a 3-hour one. "
             : $"RATCHET: once a position reaches {tuning.RatchetArmR:F2}R of favourable " +
               $"excursion it is closed if it gives back {tuning.RatchetGivebackPct:P0} of that " +
               "peak, checked every cycle with no model call (H25). ";

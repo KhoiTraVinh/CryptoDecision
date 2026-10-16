@@ -4868,3 +4868,29 @@ Not separable. Three parameters moved at once, deliberately, because the measure
 they only work as a set — a 2R target at a 12-hour hold is the −7.46 cell and a 3-hour cap
 with the ratchet still on is −6.27. If this is judged a failure, the next step is to move
 them back ONE at a time, starting with the ratchet.
+
+### H42 addendum — the dynamic widening was checked, not assumed
+
+`use_dynamic_tp_sl` is TRUE in production and scales BOTH barriers by
+`clamp(1 + 10 x excursion, 1, 2)` off the position's own peak, so the 2R target and the 1R
+stop replayed above are not literally the levels that trade. With the ratchet gone that
+matters more than it did, because the ratchet used to close these positions before the
+widening had anywhere to go.
+
+Re-replayed at 180m / 2.0R / no ratchet, widening modelled bar by bar off the lagged peak:
+
+| | total R | stops | worst scale seen | mean scale at the stop |
+|---|---|---|---|---|
+| fixed barriers | −1.589 | — | — | — |
+| widening on | **−1.455** | 22 | **1.10x** | 1.035x |
+
+The mechanism is real and bounded in practice. The 10x multiplier applies to excursion as
+a fraction of PRICE, so reaching the 2x clamp needs a 10% favourable move, and nothing in
+this book does that inside three hours — the widest scale any trade reached was 1.10x and
+the average at the moment of a stop was 1.035x. Worth about +0.13R over 172 trades, in
+the position's favour. It does not change H42's comparison and `use_dynamic_tp_sl` is
+left ON.
+
+Recorded because the structural concern is correct even though the number is small: if
+the hold cap is ever raised again, or the instrument changed for one that moves 10% in an
+afternoon, this stops being inert and the stop becomes 2x what the position was sized for.
