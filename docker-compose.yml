@@ -492,6 +492,51 @@ services:
       # together or this is a 2R target with 12 hours to drift, which is the -7.46 cell.
       DipStrategy__UseRatchetExit:      "${USE_RATCHET_EXIT:-false}"
       FlowStrategy__UseRatchetExit:     "${USE_RATCHET_EXIT:-false}"
+
+      # ── H44: no early exit at all, and a 0.80% dip. 2026-10-16 ─────────────
+      #
+      # Operator decision, taken against both measurements below. They are recorded in
+      # HYPOTHESES.md as H43 and H44 so the week is judged on what was known, not on
+      # what is remembered.
+      #
+      # UseFlowOfiExit=false is how "remove LLM_EXIT" is spelled. The switch sits ABOVE
+      # the reviewer in ClassifyExit, so it removes the model review AND the OFI fallback
+      # in one move -- they are not independent, and dropping only the reviewer is not
+      # reachable from configuration. What is left closing a position is the stop, the
+      # target, and the 3h max hold. Nothing else.
+      #
+      # That is exactly the configuration H42 replayed at -1.33R, the best cell in its
+      # grid, because that replay contained no early exit either. So this change moves
+      # the live system ONTO the thing that was measured rather than away from it.
+      #
+      # What it gives up, measured: the reviewer was worth +0.323R over 53 exits across
+      # the book and +1.37R over the 6 since H39 -- it loses money in dollars but loses
+      # LESS than holding those same positions would have. OFI_REVERSAL goes with it, and
+      # that one was worth -3.923R: 31 exits taking +5.395R where holding to stop or
+      # target returned +9.318R. Net of the two, removing both is roughly neutral to
+      # positive on the book as measured, and the 3h hold now does the job both were
+      # doing badly.
+      #
+      # ReversalDropPct 0.60 -> 0.80 on DipStrategy ONLY. FlowStrategy is FlowRatio mode
+      # and never reads a price threshold, so setting it there would be noise, not
+      # symmetry -- which is why this one line breaks the both-sections convention H33
+      # set for parameters both strategies actually read.
+      #
+      # H43 MEASURED THIS AND IT GOES THE OTHER WAY. On the 102 closed LONG dip trades,
+      # bucketed by the fall each actually entered on:
+      #
+      #     0.60-0.80%   n 49   +0.0946 mean R   +4.634 total
+      #     0.80-1.00%   n 25   -0.0393          -0.983
+      #     1.00-1.50%   n 21   -0.0963          -2.022
+      #     >= 1.50%     n  7   -0.1176          -0.823
+      #
+      # Raising the floor to 0.80 deletes the 49 trades carrying +4.634R and keeps the
+      # three bands that lose. Crossed with H40's volume cap, the cell being deleted is
+      # the best one in the book: small falls in quiet tape, 44 trades, +0.1259 mean R.
+      # The operator has the table and chose the threshold anyway.
+      DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
+      DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
+      FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
       #
       # LIVE from 2026-10-06 16:30 UTC, by operator instruction.
       #

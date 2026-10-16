@@ -4956,3 +4956,99 @@ of sample. Not proposed.
 `ReversalRisePct` is 1.00 and the short side's bands are: 1.00–1.50% rise, n 9, +0.1858
 mean R; ≥1.50%, n 5, −0.3405. Same shape — the smaller move is the better trade — on 14
 trades total, which is too few to act on either way. Recorded so it is not re-derived.
+
+---
+
+## H44 — No early exit at all, and a 0.80% dip floor. 2026-10-16. **LIVE. Operator decision, against both measurements.**
+
+- **Opened** 2026-10-16
+- **Change**
+  - `UseFlowOfiExit` **true → false** on BOTH sections. This is how "remove LLM_EXIT" is
+    spelled, and it removes more than that — see below.
+  - `ReversalDropPct` **0.60 → 0.80** on DipStrategy only.
+- **Status** Both go against the measurement. H43 holds the dip table; the exit numbers
+  are below. Shipped on the operator's decision with the tables in front of them, which
+  is the same standing H11 and H7 shipped under.
+
+### "Remove LLM_EXIT" is not a thing configuration can do by itself
+
+`UseFlowOfiExit` is checked in `ClassifyExit` **above** the reviewer, so setting it false
+removes the model review AND the OFI fallback together. They are not independently
+switchable: the OFI rule is only reachable as the answer to a review that was due and
+could not be answered, so there is no configuration that keeps OFI and drops the model.
+
+The same structure means the alternative route — passing no `IExitReviewer` — would ALSO
+have removed both, silently. The startup banner claimed otherwise ("the OFI rule, every
+cycle") and had been wrong since the reviewer shipped; corrected in the same commit.
+
+**What now closes a position: the stop, the target, and the 3-hour max hold. Nothing
+else.**
+
+### This moves the live system onto what was measured, not away from it
+
+H42's grid contained no early exit — it replayed stop and target only. The cell that
+scored −1.33R at 180m/2.0R is literally this configuration. Until now the live system had
+the reviewer running on top of it, so the deployed thing and the measured thing were not
+the same thing. They are now.
+
+### What is given up, and what is not
+
+| | n | realised R | R if held to stop/target | exit added |
+|---|---|---|---|---|
+| LLM_EXIT, whole book | 53 | −8.552 | −8.875 | **+0.323** |
+| LLM_EXIT, since H39 | 6 | −1.235 | −2.605 | **+1.37** |
+| OFI_REVERSAL | 31 | +5.395 | +9.318 | **−3.923** |
+
+The reviewer was adding — it loses money in dollars but less than holding the same
+positions would have. The OFI rule was subtracting nearly 4R by cutting winners short.
+Removing both together is roughly neutral-to-positive on the book as measured, which is
+the honest summary: the operator's instruction removes one thing that helped a little and
+one thing that hurt a lot.
+
+### The dip floor goes the wrong way and H43 says so
+
+0.60–0.80% is 49 trades at +0.0946 mean R, +4.634 total. Every band above it is negative.
+Crossed with H40's volume cap, the cell being deleted — small falls in quiet tape — is 44
+trades at +0.1259 mean R, the best cell in the book. Raising the floor to 0.80 keeps the
+three losing bands and deletes the winning one.
+
+The counter-case, stated fairly: all four bands are measured under exits that no longer
+exist. A 0.80% fall held to a 2R target with a 3-hour cap is not the trade any of those 25
+rows describe, and the gradient could in principle invert under the new geometry. It is
+not measured either way, and nothing in the replay suggests it.
+
+### Decision rule — fixed before the change
+
+Judged with H40 and H42 on **2026-10-23**.
+
+**KEEP** if both hold:
+
+1. CANDLE_REVERSAL mean R over the week is above **+0.0079R**, the figure the 0.60 floor
+   produced over 102 trades. A higher floor has to beat the floor it replaced, not merely
+   lose less than the book.
+2. No more than 40% of closures are `TIMEOUT` — with every early exit gone, the 3-hour cap
+   is the only thing left between the stop and the target, and a book that mostly times
+   out is a book with no exit policy.
+
+**REVERT** if any of:
+
+1. CANDLE_REVERSAL mean R below −0.05 over the week.
+2. Entry count falls below 2/day. The 0.80 floor was expected to thin the rule; thinning
+   it to nothing makes the week unjudgeable and the floor is the first thing to move back.
+3. Mean R of closed trades is worse than the mean `outcome_r` of the same signals carried
+   to resolution by more than 1.0R total — the early exits were removed on the claim that
+   they were not helping; if the book gets worse without them, that claim is refuted.
+
+### Attribution
+
+Two independent changes in one deploy, and they are separable in the data: the dip floor
+acts on CANDLE_REVERSAL entries only, the exit change acts on closures of both strategies.
+`close_reason` distinguishes the second completely — `LLM_EXIT` and `OFI_REVERSAL` should
+both fall to zero from this deploy, and if either appears, this did not take effect.
+
+### Note for whoever reads this next
+
+Ollama is now **unused by the bot**. Nothing calls it: the entry gate was deleted by H30
+and the exit reviewer is switched off here. It is still running, still holding its ~3.4 GiB
+limit on a 2-vCPU host, and it is the single most expensive service in the stack. If H44
+is kept at the 2026-10-23 judging, remove the service.

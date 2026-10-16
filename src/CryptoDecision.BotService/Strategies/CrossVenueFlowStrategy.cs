@@ -146,8 +146,17 @@ public sealed class CrossVenueFlowStrategy(
             ? "EARLY EXIT OFF: only the stop, the target and the max-hold cap close a " +
               "position. "
             : reviewer is null
-                ? $"EARLY EXIT: the {tuning.FlowOfiBars}-bucket OFI rule, every cycle — no " +
-                  "exit reviewer is wired into this instance. "
+                // NOT "the OFI rule, every cycle", which is what this said until
+                // 2026-10-16 and was never true. ClassifyExit returns at
+                // `reviewer is null` BEFORE the OFI rule is reached, so a null reviewer
+                // removes the early exit entirely rather than falling back to anything.
+                // The OFI rule is reachable only as the answer to a review that was DUE
+                // and could not be answered.
+                ? "EARLY EXIT: NONE. No exit reviewer is wired into this instance, and the " +
+                  $"{tuning.FlowOfiBars}-bucket OFI rule is NOT a substitute — it runs only " +
+                  "when a review was due and the model could not answer, so with no reviewer " +
+                  "it never runs. Only the stop, the target and the max-hold cap close a " +
+                  "position. "
                 : $"EARLY EXIT: after {Cadence(tuning.ExitReviewAfter)} and then every " +
                   $"{Cadence(tuning.ExitReviewEvery)}, the MODEL is asked whether force " +
                   $"remains or the trend has turned; the {tuning.FlowOfiBars}-bucket OFI rule " +
