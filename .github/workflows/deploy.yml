@@ -220,9 +220,16 @@ jobs:
           POLY_ENTRY_PRICES=${{ vars.POLY_ENTRY_PRICES || '0.01' }}
           POLY_STAKE_USD=${{ vars.POLY_STAKE_USD || '0.06' }}
           POLY_MAX_DAILY_USD=${{ vars.POLY_MAX_DAILY_USD || '0' }}
-          POLY_MIN_VOLUME_USD=${{ vars.POLY_MIN_VOLUME_USD || '50000' }}
-          POLY_ARM_BELOW_ASK=${{ vars.POLY_ARM_BELOW_ASK || '0.15' }}
-          POLY_REST_BOTH_SIDES=${{ vars.POLY_REST_BOTH_SIDES || 'false' }}
+          # These three MUST match the defaults in docker-compose.yml, and did not.
+          # This file wins: it writes .env, and `${VAR:-default}` in compose only
+          # applies when .env does not set VAR at all. So a compose default is dead
+          # text for every key listed here — MinVolumeUsd read 25000 in compose and
+          # would have run at 50000, and RestBothSides read true and would have run
+          # at false, which is the setting the operator reversed on 2026-10-13 after
+          # measuring it. Change both files together or do not change either.
+          POLY_MIN_VOLUME_USD=${{ vars.POLY_MIN_VOLUME_USD || '25000' }}
+          POLY_ARM_BELOW_ASK=${{ vars.POLY_ARM_BELOW_ASK || '0.07' }}
+          POLY_REST_BOTH_SIDES=${{ vars.POLY_REST_BOTH_SIDES || 'true' }}
           POLY_EXCHANGE_ADDRESS=${{ vars.POLY_EXCHANGE_ADDRESS || '0xE111180000d2663C0091e4f400237545B87B996B' }}
           POLY_NEGRISK_EXCHANGE_ADDRESS=${{ vars.POLY_NEGRISK_EXCHANGE_ADDRESS || '0xe2222d279d744050d28e00520010520000310F59' }}
 

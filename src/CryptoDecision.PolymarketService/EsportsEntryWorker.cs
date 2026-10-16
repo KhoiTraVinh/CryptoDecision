@@ -5,9 +5,13 @@ namespace CryptoDecision.PolymarketService;
 
 /// <summary>
 /// The whole strategy: on an esports match market with real volume, leave a resting buy
-/// order at 1c (and 3c) on one side, and wait. If the match goes badly for that side the
-/// price collapses through the order and fills it; if it does not, the order expires
-/// worthless when the market resolves. There is no exit leg.
+/// order at 1c on whichever side is collapsing, and wait. If the match keeps going badly
+/// for that side the price falls through the order and fills it; if it does not, the
+/// order expires worthless when the market resolves. There is no exit leg.
+///
+/// And when the match swings back and the OTHER side collapses in its turn, rest on that
+/// one too. Holding both tokens at 1c is a guaranteed holding of the winner for about 2c,
+/// and on the measured account those markets are the entire profit.
 ///
 /// Why resting orders and not market buys. Measured on @greenworld's 36-day history:
 /// 99% of positions have a ROUND total share count (100, 80, 250, 200, 150) and 26% of
@@ -22,10 +26,16 @@ namespace CryptoDecision.PolymarketService;
 /// resolution the same positions would have returned $1,660.40. A 2% difference is not
 /// worth an exit engine.
 ///
-/// What the entry rests on. 2,187 entries at 1c hit 1.74% against a 1.00% break-even
-/// (z = 3.36, p = 0.0004). The 3c level has no such measurement: it needs 3.00% to break
-/// even and nothing in the sample says it gets there. Every order is logged with its
-/// level so this bot's own fills can settle the question later.
+/// What the entry rests on. That account's whole public cash flow over 38 days: $3,418
+/// spent, $4,700 back, +$1,281. Split by how many sides of a market it ended up holding,
+/// 25 both-sided markets returned +$3,243 and the other 2,139 markets lost $1,962 between
+/// them at a 0.75% hit rate against a 1.00% break-even. The edge is in ending up with
+/// both, not in picking the losing side early.
+///
+/// The earlier reading of this sample - "2,187 entries at 1c hit 1.74%, z = 3.36" - counted
+/// the two legs of a both-sided market as two independent trials. They are not independent:
+/// one of the two cannot lose. Every order is logged with its level and side so this bot's
+/// own fills can be split the same way and the question re-answered on its own data.
 /// </summary>
 public sealed class EsportsEntryWorker(
     GammaClient gamma,
@@ -73,6 +83,15 @@ public sealed class EsportsEntryWorker(
             _opt.DryRun ? "DRY RUN (no orders sent)" : "LIVE (real money)",
             _opt.StakeUsd, string.Join(", ", _opt.EntryPrices), _opt.MinVolumeUsd,
             string.Join(", ", _opt.Games), _opt.MaxDailyUsd, _opt.RestBothSides);
+
+        if (_opt.SoccerEnabled)
+            log.LogInformation(
+                "Football is on. Levels=[{Levels}] CompetitionTagIds=[{Leagues}]. Measured on 1,495 closed " +
+                "winner-markets: it fills about once every 2.4 days, and hits 0.40% against a 1.00% break-even " +
+                "(1 winner in 250 - Real Madrid at Roma, 2026-10-14, which bottomed at 0.0065 and won). That is " +
+                "below break-even but not significantly so (z = -0.95), so this runs to settle the question on " +
+                "its own fills. Esports realises 2.16% on the same bet.",
+                string.Join(", ", _opt.SoccerEntryPrices), string.Join(", ", _opt.SoccerLeagueTagIds));
 
         // Throws rather than returning quietly. A BackgroundService that just returns
         // leaves the host running with nothing to do, so the container still reports
@@ -216,7 +235,7 @@ public sealed class EsportsEntryWorker(
 
         if (now - _marketsAt > TimeSpan.FromSeconds(_opt.MarketRefreshSeconds))
         {
-            _markets = await gamma.FetchEsportsMarketsAsync(ct);
+            _markets = await gamma.FetchMarketsAsync(ct);
             _marketsAt = now;
 
             // Markets that just left the eligible set are matches that are over. Anything
@@ -245,7 +264,6 @@ public sealed class EsportsEntryWorker(
         // waiting correctly from one that is broken.
         var tooLate = 0;
         var alreadyDone = 0;
-        var released = 0;
 
         foreach (var market in open)
         {
@@ -262,13 +280,7 @@ public sealed class EsportsEntryWorker(
             {
                 armed++;
 
-                // If an earlier, still-unfilled order sits on the other side and that
-                // side has climbed back out of the band, let it go and take this one.
-                // If it cannot be released, skip the market rather than rest on both.
-                var (clear, didRelease) = await TryClearOtherSideAsync(market, tokenId, books, ct);
-                if (didRelease) released++;
-                if (!clear) continue;
-                foreach (var level in _opt.EntryPrices)
+                foreach (var level in _opt.LevelsFor(market.Sport))
                 {
                     if (!books.TryGetValue(tokenId, out var book)) continue;
 
@@ -288,9 +300,9 @@ public sealed class EsportsEntryWorker(
 
         log.LogInformation(
             "Cycle: {Markets} in play, {Open} watched, {Armed} collapsing past {Arm} -> {Placed} placed " +
-            "({TooLate} already below the level, {Done} done earlier, {Released} stale sides released). " +
+            "({TooLate} already below the level, {Done} done earlier). " +
             "{Resting} resting, ${Committed} today. Lowest ask {Nearest} on {Where}",
-            _markets.Count, open.Count, armed, _opt.ArmBelowAsk, placed, tooLate, alreadyDone, released,
+            _markets.Count, open.Count, armed, _opt.ArmBelowAsk, placed, tooLate, alreadyDone,
             _restingOrders.Count, _committedToday,
             nearest < 1m ? nearest.ToString("0.###") : "none",
             nearest < 1m ? nearestOn : "-");
@@ -307,7 +319,7 @@ public sealed class EsportsEntryWorker(
             ? m.TokenIds.Where(t => t == side)
             : m.TokenIds;
 
-        return candidates.Any(t => _opt.EntryPrices.Any(l => !_placed.Contains(Key(t, l))));
+        return candidates.Any(t => _opt.LevelsFor(m.Sport).Any(l => !_placed.Contains(Key(t, l))));
     }
 
     /// <summary>
@@ -319,11 +331,13 @@ public sealed class EsportsEntryWorker(
     /// placed. That gate is also what picks the side — the collapsing one selects itself,
     /// so no "cheaper side" heuristic is needed.
     ///
-    /// The measured account averaged 1.01 positions per market across 2,169 markets and
-    /// held both sides on only 24 of them, which is what arming one collapsing side per
-    /// match looks like. <see cref="PolymarketOptions.RestBothSides"/> allows both; it is
-    /// not a hedge, since if both ever fill you paid $0.40 for a ticket that pays out
-    /// whichever team wins.
+    /// The measured account averaged 1.01 positions per market across 2,164 markets and
+    /// held both sides on 25 of them. Those 25 are not noise around a one-side-per-match
+    /// rule - they returned +$3,243 while all 2,139 others lost $1,962 between them. So
+    /// with <see cref="PolymarketOptions.RestBothSides"/> on, which is now the default,
+    /// this method arms whichever side is collapsing right now and does not care that the
+    /// other side was armed an hour ago. Two sides can never be under the threshold at
+    /// once, so this still yields at most one new side per cycle.
     /// </summary>
     private IEnumerable<(string TokenId, string Outcome)> ChooseSides(EsportsMarket market, IReadOnlyDictionary<string, OrderBook> books)
     {
@@ -419,76 +433,32 @@ public sealed class EsportsEntryWorker(
     }
 
     /// <summary>
-    /// Records a placement. Deliberately does NOT commit the market to this side —
-    /// <see cref="_committedSide"/> is populated from held positions only, in
-    /// SyncWithExchangeAsync. A resting order is not a commitment: no money has moved,
-    /// and if the price recovers past the arming threshold it never will.
+    /// Records a placement. It also pins the market to this side, but that pin is read
+    /// only when <see cref="PolymarketOptions.RestBothSides"/> is off - and it is on by
+    /// default now, so by default the other side stays armable for the rest of the match.
     ///
-    /// Measured on 171 markets: whichever side reaches 0.15 first is NOT the side that
-    /// ends up at 1c in 7.6% of them. Committing on placement loses those outright —
-    /// the order sits unfillable while the other side collapses with the market locked.
-    /// Seen live on Team WE vs FlyQuest Game 4: armed on WE at 0.15, WE recovered to
-    /// 0.64, FlyQuest became the falling side, and the WE order could never fill.
+    /// What the pin costs when it IS on, measured on 171 markets: the side that reaches
+    /// the threshold first is NOT the side that ends at 1c in 7.6% of cases at 0.15, 2.9%
+    /// at 0.10 and 1.2% at 0.05 — in those the order rests unfillable while the other side
+    /// collapses, locked out. Arming lower buys a lower error rate with a lower capture
+    /// rate, because the price crosses a narrow band faster than the scan interval can
+    /// sample it: measured on 474 tokens, the median time spent inside the band before
+    /// the side went dead is 1 minute at 0.05, 3 at 0.07, 7 at 0.15 and 21 at 0.30, and
+    /// the share of sides that never show a single minute in band is 34.4% / 22.8% /
+    /// 5.3% / 0.2%. See PolymarketOptions.ArmBelowAsk for the full table.
+    ///
+    /// With both sides allowed that whole trade-off is mostly moot: arming the "wrong"
+    /// side first is no longer an error to be paid for, it is the first half of a
+    /// both-sided holding. What remains is pure capture, and capture says go higher.
+    ///
+    /// A releasable version of this lock was built and removed: see the git history for
+    /// TryClearOtherSideAsync if the trade-off is ever worth revisiting.
     /// </summary>
     private void Commit(EsportsMarket market, string tokenId, decimal level, string? orderId)
     {
         _placed.Add(Key(tokenId, level));
+        _committedSide[market.ConditionId] = tokenId;
         if (!string.IsNullOrEmpty(orderId)) _restingOrders[orderId] = tokenId;
-    }
-
-    /// <summary>
-    /// Releases a market still held by an unfilled order when the other side has become
-    /// the one collapsing. Cancels the stale order and forgets the placement so the new
-    /// side can be armed this cycle.
-    ///
-    /// Only ever runs when the market has no position: once an entry has filled, the
-    /// side is settled and nothing here touches it.
-    /// </summary>
-    /// <summary>
-    /// Answers whether it is safe to place on <paramref name="wantedToken"/>, releasing
-    /// an unfilled order on the other side first if one is in the way.
-    ///
-    /// Returns false rather than throwing when the old order cannot be cancelled: the
-    /// alternative is to place anyway and end up resting on both sides, which is the one
-    /// outcome the "one side per market" rule exists to prevent.
-    /// </summary>
-    private async Task<(bool Clear, bool Released)> TryClearOtherSideAsync(
-        EsportsMarket market, string wantedToken, IReadOnlyDictionary<string, OrderBook> books, CancellationToken ct)
-    {
-        if (_committedSide.ContainsKey(market.ConditionId)) return (true, false);   // we hold shares; ChooseSides already kept us on them
-
-        var stale = _restingOrders
-            .Where(kv => market.TokenIds.Contains(kv.Value) && kv.Value != wantedToken)
-            .ToList();
-        if (stale.Count == 0) return (true, false);
-
-        // Only let go once the old side has actually climbed back out of the arming band.
-        // Both sides cannot be below the threshold at once, but prices move between
-        // cycles and this stops a market flipping back and forth on noise.
-        foreach (var (_, token) in stale)
-            if (books.TryGetValue(token, out var b) && b.BestAsk is { } ask && ask <= _opt.ArmBelowAsk)
-                return (false, false);
-
-        var ids = stale.Select(kv => kv.Key).ToList();
-        var cancelled = _opt.DryRun ? ids.Count : await clob.CancelOrdersAsync(ids, ct);
-        if (cancelled == 0)
-        {
-            log.LogWarning("Could not cancel {Count} order(s) on the other side of {Question}; not placing, to avoid resting on both sides",
-                ids.Count, market.Question);
-            return (false, false);
-        }
-
-        foreach (var (id, token) in stale)
-        {
-            _restingOrders.Remove(id);
-            foreach (var level in _opt.EntryPrices) _placed.Remove(Key(token, level));
-        }
-
-        log.LogInformation(
-            "Released {Count} unfilled order(s) on {Question}: that side recovered and {Wanted} is the one collapsing now",
-            cancelled, market.Question, wantedToken[..Math.Min(12, wantedToken.Length)]);
-
-        return (true, true);
     }
 
     /// <summary>
@@ -510,10 +480,11 @@ public sealed class EsportsEntryWorker(
             {
                 _committedSide[p.ConditionId] = p.TokenId;
 
-                // Block every level on a token we already hold. A position does not say
-                // which level bought it, and re-buying after a restart is a far worse
-                // failure than missing one follow-up order.
-                foreach (var level in _opt.EntryPrices) _placed.Add(Key(p.TokenId, level));
+                // Block every level on a token we already hold, across both families. A
+                // position does not say which level bought it, nor which sport it came
+                // from, and re-buying after a restart is a far worse failure than missing
+                // one follow-up order.
+                foreach (var level in _opt.AllEntryPrices) _placed.Add(Key(p.TokenId, level));
             }
         }
         catch (Exception ex)

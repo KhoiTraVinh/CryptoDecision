@@ -803,9 +803,25 @@ services:
       Polymarket__EntryPricesCsv:  "${POLY_ENTRY_PRICES:-}"
       Polymarket__StakeUsd:        "${POLY_STAKE_USD:-0.20}"
       Polymarket__MaxDailyUsd:     "${POLY_MAX_DAILY_USD:-15}"
-      Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-50000}"
-      Polymarket__RestBothSides:   "${POLY_REST_BOTH_SIDES:-false}"
-      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.15}"
+      Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-25000}"
+      # Giu true. Tach dong tien cua @greenworld theo so phe nam trong mot market:
+      # 25 market om ca hai phe @1c tra ve +$3.243, con 2.139 market chi mot phe lo
+      # $1.962. Om ca hai phe o 1c la cam chac ben thang voi gia ~2c.
+      Polymarket__RestBothSides:   "${POLY_REST_BOTH_SIDES:-true}"
+      # 0.07, not the 0.10 this read until 2026-10-16. deploy.yml writes
+      # POLY_ARM_BELOW_ASK=0.07 into .env, and a `${VAR:-default}` here only applies
+      # when .env does not set VAR at all -- so the default on this line is dead text
+      # and 0.07 is what has been running. Changed here to stop the file claiming a
+      # number that never reached the bot. If 0.10 was the intention, change
+      # .github/workflows/deploy.yml too; changing only this line does nothing.
+      Polymarket__ArmBelowAsk:     "${POLY_ARM_BELOW_ASK:-0.07}"
+
+      # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
+      # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
+      # khop moi 32 ngay. Moi muc tren 0.01 do duoc deu phang hoac am, nen muc gia cho
+      # bong da tach rieng va khong bao gio dung chung voi esports.
+      Polymarket__SoccerEnabled:        "${POLY_SOCCER:-true}"
+      Polymarket__SoccerEntryPricesCsv: "${POLY_SOCCER_ENTRY_PRICES:-}"
 
       # Contract ky lenh (EIP-712 verifyingContract). Mac dinh = clob-client 5.8.1.
       # Polymarket dang chuyen sang rails pUSD voi contract moi; de o day de doi

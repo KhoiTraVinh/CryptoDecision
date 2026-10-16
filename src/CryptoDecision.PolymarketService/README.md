@@ -11,19 +11,50 @@ Mặc định `DryRun=true`: quét, quyết định, in log, **không gửi lệ
 ## 1. Chiến thuật, và nó dựa trên số đo nào
 
 Đo trên toàn bộ lịch sử công khai của ví `@greenworld`
-(`0x350dc6df635fe22471cddd678f82189b9fa71d30`), 5.500 dòng activity, 06/09 → 12/10/2026:
+(`0x350dc6df635fe22471cddd678f82189b9fa71d30`) — **20.068 dòng activity, 01/01 → 13/10/2026**.
+API chặn ở `offset=5000` nên phải quét theo cửa sổ thời gian mới lấy đủ.
+
+Ví đó **bắt đầu chiến thuật 1¢ vào giữa tháng 5/2026**, thấy rõ ở tỷ lệ lệnh vào đúng 1¢
+theo tháng: T1–T4 là 1–6%, **T5 nhảy lên 40%**, T6 89%, T7 96%, từ T8 là 100%. Mọi số
+dưới đây chỉ tính cohort từ 01/05/2026 trở đi:
 
 | | |
 |---|---|
-| Vị thế | 2.193 (~59/ngày) |
-| Chi ra | $3.322,31 |
-| Thu về | $4.499,50 → **+35,4%** |
-| Giá vào | **94,2% số tiền vào ở đúng $0,01** |
-| Tỷ lệ trúng | **1,74%** (hòa vốn cần 1,00%) |
-| Kiểm định nhị thức | z = 3,36 · p = 0,0004 |
+| Vị thế vào ở 1¢ | 7.305 trên 145 ngày (~50/ngày) |
+| Chi ra | $9.624 |
+| Thu về | $11.672 → **+21,3%** |
+| Tỷ lệ trúng | 1,97% thô — nhưng đọc tiếp mục ngay dưới |
 
 Chỉ 3 loại market: *Map N Winner*, *Game N Winner*, *Series BOx*. Không handicap, không
-over/under — 2.169/2.169 market đều là kèo thắng thua.
+over/under.
+
+### Toàn bộ lợi nhuận nằm ở market **ôm cả hai phe**
+
+Tách 7.305 vị thế theo số phe mà ví đó kết thúc với trong cùng một market:
+
+| | vị thế | chi ra | thu về | lãi/lỗ | ROI | trúng |
+|---|---|---|---|---|---|---|
+| **ôm cả hai phe @1¢** | 172 | $208 | $8.146 | **+$7.938** | +3.819% | 50,00% |
+| **chỉ một phe** | 7.133 | $9.416 | $3.526 | **−$5.890** | −62,6% | 0,81% |
+
+Ôm cả hai phe ở 1¢ không phải hedge và không phải cược đồng xu: đó là **cầm chắc token
+thắng với giá ~2¢**. Tỷ lệ trúng đúng bằng 50,00% (86/172) vì mỗi market như vậy luôn có
+đúng một chân thắng — số học, không phải may. Nhóm chỉ một phe trúng **0,81%**, nằm
+**dưới** mức hòa vốn 1,00%, tức là nó lỗ, và lỗ ở **mọi** mức volume (0,94% ở ≥$50k,
+0,83% ở ≥$200k).
+
+Con số "1,74% · z = 3,36" ở bản trước đếm hai chân của một market ôm-hai-phe như hai lần
+thử độc lập. Chúng không độc lập: một trong hai **không thể thua**. Vì vậy
+`RestBothSides` giờ mặc định `true` — xem mục 3.
+
+> ⚠️ Hai điều mẫu 5 tháng mới lộ ra:
+>
+> **Nhóm một phe đang tệ dần** — T5 1,47%, T6 1,20%, T7 1,36%, rồi T8 **0,36%**, T9 0,64%,
+> T10 0,53%. **2/6 tháng tổng thể âm** (+$679, −$91, +$434, −$164, +$413, +$777). Đây là
+> chiến thuật +EV nhưng có tháng lỗ; đừng tắt bot sau ba tuần xấu.
+>
+> **Tần suất market hai-phe** trôi từ 3,32% (T5) xuống ~1,1% và đứng ở đó. Cơ chế là số
+> học, **tần suất thì không**. Nếu 1,1% đó không giữ được thì cả chiến thuật âm.
 
 ### Vì sao là **lệnh chờ**, không phải lệnh thị trường
 
@@ -38,7 +69,7 @@ over/under — 2.169/2.169 market đều là kèo thắng thua.
   lệnh. Một bot "mua ngay" gần như không bao giờ khớp được ở 1¢ — và khi khớp được thì
   nó đang mua đúng nhóm đã chết, nhóm mà mọi lệnh dưới 1¢ trong mẫu đều thua.
 
-Nên bot đặt **GTC limit buy** nằm chờ ở 0,03 và 0,01, và **chỉ đặt khi ask hiện tại còn
+Nên bot đặt **GTC limit buy** nằm chờ ở 0,01, và **chỉ đặt khi ask hiện tại còn
 cao hơn mức đó** — để lệnh nằm chờ chứ không khớp ngay thành lệnh thị trường.
 
 ### Vì sao **không** có lệnh thoát
@@ -47,31 +78,53 @@ cao hơn mức đó** — để lệnh nằm chờ chứ không khớp ngay thà
 nếu giữ đến khi resolve thì được **$1.660,40**. Chênh 2%. Edge nằm ở lúc vào, không nằm
 ở lúc ra.
 
-### Lọc volume
+### Lọc volume — mặc định $25k, và nó **không** làm cái người ta tưởng
 
-Mô phỏng đều tay $0,20/lệnh trên chính 2.187 lệnh đó:
+Đo lại trên trọn 5 tháng (7.305 lệnh, 145 ngày), tách theo hai nhóm:
 
-| Lọc volume | lệnh/ngày | tỷ lệ trúng | ROI | chuỗi thua dài nhất |
-|---|---|---|---|---|
-| không lọc | 59,1 | 1,74% | +54% | 212 lệnh |
-| ≥ $20k | 40,5 | 1,87% | +68% | 227 lệnh |
-| **≥ $50k** (mặc định) | 29,5 | **2,20%** | **+96%** | 159 lệnh |
-| ≥ $200k | 16,3 | 2,56% | +138% | 91 lệnh |
-| ≥ $500k | 8,8 | 3,46% | +229% | 60 lệnh |
+| ngưỡng | lệnh/ngày | nhóm **một phe** | nhóm **hai phe** | **tổng** | ROI |
+|---|---|---|---|---|---|
+| không lọc | 50,4 | −$5.890 | +$7.938 | **+$2.048** | 21,3% |
+| ≥ $20k | 35,6 | −$4.076 | +$6.921 | **+$2.846** | 41,3% |
+| **≥ $25k** (mặc định) | 33,6 | −$3.713 | +$6.817 | **+$3.104** | 47,9% |
+| ≥ $50k (cũ) | 26,3 | −$2.821 | +$5.405 | **+$2.584** | 51,0% |
+| ≥ $100k | 19,9 | −$2.103 | +$4.020 | +$1.917 | 50,7% |
+| ≥ $500k | 8,9 | −$807 | +$2.812 | +$2.004 | 120,9% |
 
-Dưới $20k thì **lỗ** (−23% ở nhóm $5k–20k, −100% ở nhóm <$1k).
+ROI tăng theo ngưỡng, nhưng **lãi tuyệt đối đạt đỉnh quanh $20–30k**. Lý do: ngưỡng cắt
+lỗ của nhóm một phe và cắt lãi của nhóm hai phe **gần như cùng tốc độ**.
 
-> ⚠️ **Thiên lệch chưa khử được.** Bảng trên dùng volume **cuối cùng** của market. Trận
-> nào cửa dưới lội ngược dòng thì volume bùng nổ *sau* thời điểm vào lệnh, nên các mốc
-> volume cao gần như chắc chắn bị thổi phồng. Bot lọc theo volume **quan sát được tại
-> thời điểm đặt lệnh** và ghi con số đó vào log, để sau vài tuần có thể trả lời lại câu
-> hỏi này bằng dữ liệu sạch của chính nó.
+Và đây mới là điều quyết định — volume **không dự báo được** market nào sẽ thành hai phe,
+tức là nhóm duy nhất sinh lời:
 
-### Mức 3¢ **chưa có bằng chứng**
+| dải volume | market | thành hai phe | tỷ lệ |
+|---|---|---|---|
+| $0–10k | 1.307 | 12 | 0,92% |
+| $10–25k | 1.103 | 12 | 1,09% |
+| $25–50k | 1.035 | 16 | 1,55% |
+| $50–100k | 922 | 14 | 1,52% |
+| $100–250k | 955 | 7 | 0,73% |
+| ≥ $250k | 1.897 | 25 | 1,32% |
 
-94,2% tiền của mẫu vào ở 1¢; mức 3¢ gần như không xuất hiện. Hòa vốn ở 3¢ cần tỷ lệ
-trúng 3,00% và **không có số liệu nào nói nó đạt được**. Mức này được bật vì được yêu
-cầu; mọi lệnh đều ghi mức giá vào log để tách bạch về sau.
+Tỷ lệ phẳng lì. Kiểm lại bằng cách khác: **53,5%** market hai-phe vượt mốc $50k, so với
+**52,3%** của phần còn lại — không chọn lọc được gì cả.
+
+Nên $25k được chọn **vì độ phủ, không phải vì đỉnh ROI trong mẫu**: nó giữ 77% số cơ hội
+hai-phe thay vì 53% ở mốc $50k. Nhóm hai phe là động cơ duy nhất, nên nhìn thấy nhiều cơ
+hội hơn đáng giá hơn một con số ROI đẹp trên ít lệnh.
+
+> ⚠️ **Thiên lệch chưa khử được.** Mọi bảng trên dùng volume **cuối cùng** của market.
+> Trận nào lội ngược dòng thì volume bùng nổ *sau* thời điểm vào lệnh, nên các mốc volume
+> cao bị thổi phồng — nghĩa là thiên lệch này **ủng hộ hạ ngưỡng**, không phải nâng. Bot
+> lọc theo volume **quan sát được tại thời điểm đặt lệnh** và ghi vào log, để sau vài
+> tuần trả lời lại bằng dữ liệu sạch của chính nó.
+
+### Mức 3¢ **đã tắt**
+
+2.184/2.189 vị thế của mẫu vào ở đúng 1¢; mức 3¢ gần như không xuất hiện, nên không có
+số đo nào cho nó ở cả hai đầu. Hòa vốn ở 3¢ cần tỷ lệ trúng **3,00%**, trong khi nhóm
+một phe của chính ví đó chỉ đạt 0,75%. Mặc định giờ là một mức duy nhất `0.01`. Bật lại
+bằng `POLY_ENTRY_PRICES=0.03,0.01` nếu muốn tự đo; mọi lệnh đều ghi mức giá vào log.
 
 ---
 
@@ -183,11 +236,11 @@ in đều, dù có vào lệnh hay không.
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `POLY_DRY_RUN` | `true` | Công tắc an toàn. Private key **một mình không** mở khóa gì |
-| `POLY_STAKE_USD` | `0.20` | Mỗi lệnh. Dưới mức này sẽ không đủ 5 share tối thiểu ở 3¢ |
-| `POLY_MAX_DAILY_USD` | `15` | Trần tiền cam kết mỗi ngày UTC. Đếm trong RAM — restart là reset |
-| `POLY_MIN_VOLUME_USD` | `50000` | Ngưỡng volume |
-| `POLY_REST_BOTH_SIDES` | `false` | Xem mục dưới |
-| `POLY_ARM_BELOW_ASK` | `0.15` | Chỉ vào khi giá bên đó **đã rớt** xuống dưới mức này. `1.0` = vào ngay khi thấy trận |
+| `POLY_STAKE_USD` | `0.20` | Mỗi lệnh. Sàn từ chối lệnh dưới 5 share, nên ở 1¢ **đừng xuống dưới $0,05**. Ví đang chạy đặt $0,06 = 6 share |
+| `POLY_MAX_DAILY_USD` | `15` | Trần tiền cam kết mỗi ngày UTC. Đếm trong RAM — restart là reset. **`0` = tắt trần**, lúc đó số dư ví là giới hạn duy nhất |
+| `POLY_MIN_VOLUME_USD` | `25000` | Ngưỡng volume. Xem mục 1 — nó lọc lỗ vặt, **không** chọn được market tốt |
+| `POLY_REST_BOTH_SIDES` | `true` | Nguồn lợi nhuận. Xem mục dưới |
+| `POLY_ARM_BELOW_ASK` | `0.10` | Chỉ vào khi giá bên đó **đã rớt** xuống dưới mức này. `1.0` = vào ngay khi thấy trận. Bắt được 84,6% cơ hội — xem bảng ở mục 3 |
 
 ### Vì sao không có chốt lời (TP)
 
@@ -234,14 +287,57 @@ Giữ đến kết quả thắng trên **cả ba cột cùng lúc** — kỳ v�
 
 ### `RestBothSides`
 
-Mẫu đo được trung bình **1,01 vị thế mỗi market** trên 2.169 market, và chỉ 24 market
-có cả hai bên — đúng hình dạng của việc đặt chờ cả hai bên rồi chỉ bên sụp đổ mới khớp.
-Đặt cả hai bên **không phải là hedge**: nếu hiếm hoi cả hai cùng khớp thì bạn trả $0,40
-cho tấm vé chắc chắn trúng dù đội nào thắng.
+**Mặc định `true`.** Đây là nơi toàn bộ lợi nhuận của mẫu nằm: 25 market ôm cả hai phe
+trả về +$3.243, trong khi 2.139 market chỉ một phe lỗ $1.962 (bảng ở mục 1).
 
-Mặc định vẫn `false` vì yêu cầu là "vô một phía thôi". Khi `false`, bot chọn **bên đang
-rẻ hơn** — bên nhiều khả năng chạm tới mức giá vào nhất. Bật `true` sẽ tăng gấp đôi số
-lệnh và số tiền mỗi ngày.
+Nó **không** đặt hai lệnh cùng lúc. Hai phe không bao giờ cùng nằm dưới `ArmBelowAsk`,
+nên mỗi chu kỳ vẫn chỉ arm được một phe. Phe thứ hai chỉ được arm **nếu trận lật kèo** và
+phe kia sụp đổ tới lượt nó — đúng 25 market nói trên. Market bình thường vẫn chỉ tốn một
+lệnh, nên chi phí thực tế tăng ít hơn nhiều so với "gấp đôi".
+
+Khi `false`, market bị khoá vào phe đầu tiên ngay lúc đặt lệnh (`Commit`), nên bot
+**không bao giờ** vào được 25 market đó — nó chỉ nhân bản đúng nửa lỗ −59,6%.
+
+Lưu ý đi kèm: lý do hạ `ArmBelowAsk` xuống thấp là để đỡ khoá nhầm phe. Khi đã ôm cả hai
+phe thì "nhầm phe" không còn là lỗi, mà là nửa đầu của thế ôm hai phe. Thứ còn lại chỉ là
+**độ bắt được**, và độ bắt được thì bảo nâng lên — xem bảng ngay dưới.
+
+### `ArmBelowAsk` — đo trực tiếp, không còn ước lượng
+
+Lấy 474 token mà ví mẫu đã mua ở 1¢, kéo price history của CLOB ở độ phân giải 1 phút,
+đếm số phút giá nằm trong khoảng (1¢, ngưỡng] **trước khi** bên đó chết hẳn. Bot quét
+20 giây/lần nên cần ít nhất một phút như vậy mới có cơ hội đặt lệnh:
+
+| ngưỡng | số phút trong vùng (trung vị) | % số lần **không có phút nào** | bắt được |
+|---|---|---|---|
+| 0.03 | 0 | 50,6% | 49,4% |
+| 0.05 | 1 | 34,4% | 65,6% |
+| 0.07 | 3 | 22,8% | 77,2% |
+| **0.10** (hiện tại) | 4 | 15,4% | **84,6%** |
+| 0.11 | 5 | 14,1% | 85,9% |
+| 0.15 | 7 | 5,3% | **94,7%** |
+| 0.20 | 9 | 2,1% | 97,9% |
+| 0.30 | 21 | 0,2% | 99,8% |
+| 1.00 | 240 | 0,0% | 100% |
+
+Giá **gap thẳng xuống không phải là chuyện của kèo vol thấp** — cần biết điều này trước
+khi đổ lỗi cho `MinVolumeUsd` mỗi lần miss. Độ bắt được ở 0.07 tách theo volume market:
+76,1% dưới $25k, 73,9% ở $25–100k, 84,4% ở $100–500k, 77,0% trên $500k. Phẳng.
+
+**Luật "bên kia lên 0.90 thì gài bên còn lại" chính là ngưỡng này.** Trên book thật, tổng
+hai ask của một market hai cửa nằm trong 1,010–1,030, nên luật đó tương đương ngưỡng
+~0.11 — cùng một thứ, không phải cơ chế mới. Và **đừng** triển khai nó bằng cách canh
+**ask** của bên mạnh: book bên đó rỗng đúng lúc trận kết thúc (14/25 market đang mở không
+có một lệnh bán nào ở bên mạnh, trong khi bên yếu nằm ở 0.001). Đại lượng bền là **bid**
+của bên mạnh — nhưng không đáng viết thêm code: cũng trong 25 market đó, bên yếu **luôn**
+có ask, nên nhánh dự phòng ấy sẽ chạy đúng 0 lần.
+
+Bảng này thay cho số đo cũ "24,6% ở 0.05 / 55,5% ở 0.15" (đo trên 171 market); bản cũ để
+lại trong git history chứ không cố hoà giải hai cách đo.
+
+Lưu ý nó **tương tác với `MinVolumeUsd`**: market chưa giao dịch đủ $25k thì không đủ điều
+kiện dù ngưỡng arm có cao tới đâu, nên độ bắt được thực tế bị chặn thêm bởi tốc độ volume
+tích luỹ, không chỉ bởi ngưỡng này.
 
 ---
 
