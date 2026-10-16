@@ -454,8 +454,44 @@ services:
       # argmax off a short curve, which this repository has done before.
       #
       # MinRewardRisk 0.5 still clears: 2%/2% is 0.93:1 after fees.
-      DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-1.0}"
-      FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-1.0}"
+      DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-2.0}"
+      FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-2.0}"
+      #
+      # ── H42: target back to 2.0R, ratchet OFF, max hold 3h. 2026-10-16 ─────
+      #
+      # Reverts H36 and switches off H25. The three are one change: a 2R target needs
+      # the position left alone long enough to reach it, and "left alone" is only safe
+      # with a hold cap that stops a position drifting for half a day.
+      #
+      # THE HOLD CAP IS THE PARAMETER THAT MATTERED, and it was not being varied when
+      # the first version of this was measured and rejected. Replayed on klines_1m over
+      # all 172 closed trades, stop/target only, no ratchet, max hold down the side and
+      # target multiple across:
+      #
+      #              1.0R     1.5R     2.0R     2.5R     3.0R
+      #     60m     +2.04    +1.14    +1.64    +1.08    +1.08
+      #     120m    -5.51    -7.94    -7.62    -7.12    -6.62
+      #     180m    -3.12    -3.00    -1.33    -0.33    +0.27
+      #     240m    -4.27    -7.63    -5.13    -3.70    -5.05
+      #     720m   -10.52   -10.68    -7.46    -7.51   -11.09
+      #
+      # Deployed before this change -- 720m hold, 1.0R target, ratchet ON -- replays at
+      # -5.37R. The operator's configuration, 180m and 2.0R with the ratchet off, is
+      # -1.33R on the same 172 trades. The ratchet is worth +5.17R at a 12-hour hold and
+      # is a LIABILITY once the hold is capped: at 180m it turns -1.33R into -6.27R,
+      # because what it was protecting against was a position drifting for hours.
+      #
+      # THE GRID IS ERRATIC AND IS NOT BEING FITTED. 120m is deeply negative between two
+      # rows that are not, and no column is monotone. What survives reading is the
+      # direction -- shorter holds beat longer ones at every target -- not any cell.
+      # 60m is the only row positive across all five multiples and is NOT taken: it is
+      # one row, the waiver path is already pinned at 60 so that row partly measures
+      # itself, and 3h is the operator's call.
+      #
+      # max_hold_minutes 720 -> 180 is a bot_config edit, not here. Both must move
+      # together or this is a 2R target with 12 hours to drift, which is the -7.46 cell.
+      DipStrategy__UseRatchetExit:      "${USE_RATCHET_EXIT:-false}"
+      FlowStrategy__UseRatchetExit:     "${USE_RATCHET_EXIT:-false}"
       #
       # LIVE from 2026-10-06 16:30 UTC, by operator instruction.
       #
@@ -502,6 +538,29 @@ services:
       # decision rule itself, is under "H34 — RESULT" in HYPOTHESES.md.
       DipStrategy__RatchetGivebackPct:  "${RATCHET_GIVEBACK:-0.40}"
       FlowStrategy__RatchetGivebackPct: "${RATCHET_GIVEBACK:-0.40}"
+
+      # ── H40: the dip rule stands aside in heavy tape, 2026-10-16 ────────────
+      #
+      # DipStrategy ONLY. FlowStrategy is the waiver, whose entire trigger is this same
+      # volume; capping it there would switch the strategy off.
+      #
+      # CANDLE_REVERSAL reads price and nothing else, so it cannot tell a dip from the
+      # first leg of a flush. Mean R over all 116 closed dip trades, by notional in the
+      # 30 minutes before entry:
+      #
+      #     < $10M   n 36   +0.0754        $20-40M   n 24   -0.0336
+      #     $10-20M  n 43   +0.0374        >= $40M   n 13   -0.2106
+      #
+      # Monotone across four buckets with no cell out of order. On the 15-minute window
+      # the bot reads live, the trades above the cap total negative R in BOTH sample
+      # halves at every threshold from $8M to $20M — ten cells, ten negative. At $10M it
+      # removes 31 of 116 entries carrying -4.720R and leaves 85 carrying +5.496R.
+      #
+      # $10M IS NOT AN OPTIMUM. The curve is monotone, so its argmax is simply the most
+      # aggressive setting available and the data cannot choose. $10M is half the
+      # news-print threshold and near the median entry; it thins the rule by about a
+      # quarter instead of gutting it. Set to 0 to remove the cap entirely.
+      DipStrategy__Signal__MaxEntryVolumeUsd: "${DIP_MAX_ENTRY_VOLUME_USD:-10000000}"
 
     depends_on:
       postgres:

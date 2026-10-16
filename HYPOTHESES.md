@@ -4625,3 +4625,246 @@ This is the only change to the exit path in this deploy, but it ships alongside 
 high-volume target lock on the ENTRY path. Those touch different
 sides of a trade and their rows are distinguishable (`close_reason` vs the refusal log),
 so neither hides the other.
+
+---
+
+## H40 — The dip rule stands aside in heavy tape. 2026-10-16. **LIVE.**
+
+- **Opened** 2026-10-16
+- **Change** new `FlowSignalOptions.MaxEntryVolumeUsd`, set to **$10M on DipStrategy
+  only** via `DipStrategy__Signal__MaxEntryVolumeUsd`. An actionable CANDLE_REVERSAL
+  verdict is vetoed as `TAPE_TOO_HEAVY` when the rolling 15 minutes have traded at or
+  above the cap. FlowStrategy is left at 0 — that rule's entire trigger is this same
+  volume.
+- **Purpose** CANDLE_REVERSAL reads price and nothing else, so it cannot tell a dip from
+  the first leg of a flush.
+
+### The gradient
+
+Mean R over all 116 closed CANDLE_REVERSAL trades, by notional in the 30 minutes before
+entry:
+
+| notional before entry | n | wins | mean R | total R |
+|---|---|---|---|---|
+| < $10M | 36 | 20 | **+0.0754** | +2.713 |
+| $10–20M | 43 | 19 | +0.0374 | +1.608 |
+| $20–40M | 24 | 12 | −0.0336 | −0.807 |
+| ≥ $40M | 13 | 6 | **−0.2106** | −2.738 |
+
+Four buckets, monotone, no cell out of order.
+
+### It survives the split
+
+On the 15-minute window the bot can read live, by cap, by sample half. `blocked` is what
+the cap removes:
+
+| cap | half | blocked | blocked R | kept | kept R | kept mean R |
+|---|---|---|---|---|---|---|
+| $8M | 1st | 18 | −2.114 | 40 | +5.475 | +0.1369 |
+| $8M | 2nd | 19 | −2.788 | 39 | +0.203 | +0.0052 |
+| **$10M** | 1st | 17 | −1.618 | 41 | +4.979 | +0.1214 |
+| **$10M** | 2nd | 14 | −3.102 | 44 | +0.517 | +0.0118 |
+| $12M | 1st | 11 | −0.655 | 47 | +4.017 | +0.0855 |
+| $12M | 2nd | 9 | −3.217 | 49 | +0.632 | +0.0129 |
+| $15M | 2nd | 6 | −2.429 | 52 | −0.156 | −0.0030 |
+| $20M | 2nd | 4 | −2.307 | 54 | −0.278 | −0.0051 |
+
+Ten cells tested, ten with negative blocked R. At $10M the cap removes 31 of 116 entries
+carrying −4.720R and leaves 85 carrying +5.496R.
+
+### $10M is not an optimum and the data cannot pick one
+
+Every threshold tested improves what is kept, so the curve is monotone and its argmax is
+just the most aggressive setting available — which is the shape that means "less trading
+is better in a losing book" as readily as it means "this threshold is right". $10M is
+half the news-print threshold and near the median entry, thinning the rule by about a
+quarter rather than gutting it. That is a choice, not a measurement, and it is recorded
+as one.
+
+One seam, unquantified: the gradient was measured on ALIGNED 15-minute buckets and the
+veto reads the ROLLING window. They are the same instrument at different offsets, and the
+rolling reading is never much lower, but the threshold was not fitted on the series that
+enforces it.
+
+### Decision rule — fixed before the change
+
+Judged on **2026-10-23, one week after the deploy** — the operator fixed the horizon as a
+week rather than a trade count. Sample: every `strategy_verdicts` row in the window whose
+code is `TAPE_TOO_HEAVY`, each scored by what `signal_outcomes` says the same signal went
+on to do.
+
+**KEEP** if both hold:
+
+1. Mean `outcome_r` over the vetoed signals is **negative**. The claim is that these
+   entries are worse, not merely fewer.
+2. CANDLE_REVERSAL's mean R over the window is above the +0.0067 it has run at across
+   its 116 closed trades.
+
+**RAISE the cap or REJECT** if any of:
+
+1. Mean `outcome_r` over vetoed signals is ≥ +0.05.
+2. More than 40% of vetoed signals resolve `WIN`.
+3. Fewer than 10 vetoed signals by 2026-10-23 — not binding, cannot be judged. Extend the
+   window rather than reading a verdict out of it.
+
+### Attribution
+
+Entry path, dip rule only. The veto is a named abstention, so a vetoed signal and a
+signal that never fired are different rows in `strategy_verdicts`. Nothing about the
+waiver, the geometry or any exit changes.
+
+---
+
+## H41 — Remove the ratchet and widen the target to 2R. 2026-10-16. **REJECTED, THEN SUPERSEDED BY H42 THE SAME DAY.**
+
+> **Read H42 before trusting the conclusion below.** Everything here was measured with
+> `max_hold_minutes` fixed at 720, which is the parameter that turned out to decide the
+> answer. With the hold capped at 3 hours the same comparison reverses and the change
+> shipped. This entry stays because the mistake is the lesson: two parameters were varied
+> against a third that was silently held at a value nobody had defended.
+
+- **Proposed** by the operator, 2026-10-16: drop RATCHET because it closes positions
+  early, and set the target to 2R because stop and target are currently equal.
+- **Status** Replayed on 1-minute candles over all 172 closed trades. Both halves lose
+  money against what is deployed. Not shipped, and the tables are here so the proposal
+  does not have to be re-argued from memory.
+
+### Method
+
+For every closed trade with geometry, the stored entry and stop are replayed forward over
+`klines_1m` to the applicable max hold (60 min on the waiver path, 720 elsewhere). Within
+a bar the order is stop, then target, then ratchet — the same order the code checks them
+in. A ratchet exit is priced at its floor, `peak × 0.60`, which is marginally generous to
+the ratchet. The replay contains ONLY the stop, the target and the ratchet: the LLM review
+and the OFI reversal rule are excluded, so these are not live-equivalent totals. They are
+a controlled comparison of four policies over one identical set of entries.
+
+### Target multiple alone, no ratchet
+
+| target | wins | stops | total R |
+|---|---|---|---|
+| 1.0R | 50 | 55 | −10.502 |
+| 1.5R | 23 | 57 | −10.651 |
+| **2.0R** | 11 | 57 | **−7.432** |
+| 2.5R | 7 | 57 | −7.484 |
+| 3.0R | 3 | 58 | −11.059 |
+
+**The operator is right about this half.** With no ratchet, 2R beats 1R by about 3R. The
+pair of proposals is internally consistent: a wider target needs the position left alone
+to reach it.
+
+### Both halves together
+
+| | ratchet ON | ratchet OFF | ratchet adds |
+|---|---|---|---|
+| **1R target (deployed)** | **−5.368R** | −10.535R | **+5.167R** |
+| 2R target | −6.061R | −7.499R | +1.437R |
+
+The proposal as stated — 2R target, no ratchet — scores **−7.499R against the deployed
+−5.368R**, so it costs about 2.1R over this sample. The best cell is the one already
+running. The ratchet adds in both columns; widening the target shrinks what it adds, which
+is the real relationship between the two parameters, but never far enough to make removing
+it pay.
+
+### What this does not say
+
+It does not say the system works. Every cell is negative: the entries lose money under
+every exit policy tested, and no arrangement of stop, target and ratchet repairs that.
+What it says is that this particular rearrangement is not where the repair is.
+
+---
+
+## H42 — Max hold 12h → 3h, target back to 2R, ratchet OFF. 2026-10-16. **LIVE.**
+
+- **Opened** 2026-10-16
+- **Change** three parameters that are one change:
+  - `bot_config.max_hold_minutes` **720 → 180** (applied by SQL, live immediately)
+  - `TargetRiskMultiple` **1.0 → 2.0** on both sections — reverts H36
+  - `UseRatchetExit` **true → false** on both sections — switches off H25
+  - `high_volume_max_hold_minutes` stays 60.
+- **Purpose** Operator's configuration. H41 rejected two thirds of it four hours earlier;
+  the rejection was wrong because the hold cap was never varied.
+
+### The grid that reversed H41
+
+Replayed on `klines_1m` over all 172 closed trades, stop and target only, no ratchet.
+Max hold down the side, target multiple across:
+
+| hold | 1.0R | 1.5R | 2.0R | 2.5R | 3.0R |
+|---|---|---|---|---|---|
+| 60m | **+2.04** | +1.14 | +1.64 | +1.08 | +1.08 |
+| 120m | −5.51 | −7.94 | −7.62 | −7.12 | −6.62 |
+| **180m** | −3.12 | −3.00 | **−1.33** | −0.33 | +0.27 |
+| 240m | −4.27 | −7.63 | −5.13 | −3.70 | −5.05 |
+| 720m | −10.52 | −10.68 | −7.46 | −7.51 | −11.09 |
+
+What was deployed before this — 720m, 1.0R, ratchet ON — replays at **−5.37R**. What is
+deployed after it — 180m, 2.0R, ratchet off — is **−1.33R** on the same 172 trades.
+
+### The ratchet is a liability once the hold is capped
+
+| | ratchet ON | ratchet OFF |
+|---|---|---|
+| 720m hold, 1.0R | −5.368 | −10.478 |
+| 720m hold, 2.0R | −6.061 | −7.385 |
+| 180m hold, 1.0R | −5.794 | −3.078 |
+| **180m hold, 2.0R** | −6.274 | **−1.296** |
+
+The sign of the ratchet's contribution flips with the hold: **+5.17R at 12 hours, −4.98R
+at 3 hours.** That is the whole of H41's error in one line. What the ratchet was
+protecting against was a position drifting for half a day, and a 3-hour cap protects
+against the same thing without also capping the winners at 0.15R.
+
+Note the ratchet column barely moves between 720m and 180m (−5.368 → −5.794): with the
+ratchet on, the hold cap is nearly inert, because almost nothing survives long enough to
+reach it. Two mechanisms were doing one job, and the cheaper one is the cap.
+
+### The grid is erratic and is not being fitted
+
+120m is deeply negative between two rows that are not. No column is monotone. What
+survives reading is the DIRECTION — shorter holds beat longer ones at every target — and
+not any individual cell.
+
+**60m is the only row positive across all five multiples, and it is not taken.** It is one
+row; the waiver path is pinned at 60 minutes already, so that row partly measures itself;
+and 3h is the operator's call with the row in front of them. Recorded so that "why not
+60?" has an answer that is not hindsight.
+
+### What this still does not fix
+
+Every cell except the 60m row is negative. The entries lose money under every exit policy
+and every hold tested. This change moves the book from −5.37R to −1.33R on replay, which
+is a better losing system, not a winning one. The remaining work is on entries — H40 is
+the first piece of that.
+
+### Decision rule — fixed before the change
+
+Judged on **2026-10-23, one week after the deploy**, over every LIVE trade opened in the
+window. The horizon is a week because that is what the operator committed to, not a trade
+count — at the current ~8 entries a day that should be comfortably past 25, and if it is
+not, rule 3 below applies.
+
+**KEEP** if both hold:
+
+1. Mean R over the window is above the −0.031R the 172-trade book has averaged.
+2. No more than 3 trades close at `TIMEOUT` with R below −0.5. The claim is that 3 hours
+   is long enough for a 2R target to resolve; a pile of deeply negative timeouts means
+   the cap is cutting positions mid-move rather than releasing dead ones.
+
+**REVERT** if any of:
+
+1. Mean R below −0.15 over the window.
+2. `TIMEOUT` closures exceed 40% of the window with mean R below zero — the target is out
+   of reach inside the cap, which would mean 2R and 3h are not compatible and one of them
+   has to move.
+
+**CANNOT JUDGE** if fewer than 15 LIVE trades close in the week. Hold the configuration
+and re-read at two weeks. A quiet week is not evidence, and reverting on silence is how a
+change gets undone by the weather.
+
+### Attribution
+
+Not separable. Three parameters moved at once, deliberately, because the measurement says
+they only work as a set — a 2R target at a 12-hour hold is the −7.46 cell and a 3-hour cap
+with the ratchet still on is −6.27. If this is judged a failure, the next step is to move
+them back ONE at a time, starting with the ratchet.

@@ -108,8 +108,15 @@ public sealed class CrossVenueFlowStrategy(
                 ? ", long only"
                 : $"; SHORT when it has risen {tuning.Signal.ReversalRisePct:F2}% over " +
                   $"{tuning.Signal.ReversalBarsShort} bar(s)") +
-            ". PRICE ONLY — no order flow is read. signal_outcomes records " +
-            "AggregateZ = 0 meaning 'not measured', not 'measured as nothing'.",
+            ". PRICE ONLY for the signal — no order flow is read. signal_outcomes records " +
+            "AggregateZ = 0 meaning 'not measured', not 'measured as nothing'. " +
+            (tuning.Signal.MaxEntryVolumeUsd > 0m
+                ? $"VETOED when the rolling 15 minutes have traded >= " +
+                  $"${tuning.Signal.MaxEntryVolumeUsd / 1_000_000m:F1}M (H40): this rule buys " +
+                  "falls in QUIET tape and loses in a flush, and the veto is the only thing " +
+                  "here that reads volume at all."
+                : "NO VOLUME CAP: MaxEntryVolumeUsd is 0, so a 0.60% fall is taken the same " +
+                  "way in a dead hour and in a liquidation cascade (see H40)."),
 
         // No catch-all that describes a real rule. An unrecognised mode says so, rather
         // than borrowing the nearest description -- which is the defect this method was
@@ -296,6 +303,49 @@ public sealed class CrossVenueFlowStrategy(
                     "FlowRatio and CandleReversal are the only rules that exist; fix the " +
                     "config rather than trusting anything downstream of this."),
             };
+
+            // ── The dip rule stands aside in heavy tape (H40) ──────────────────
+            //
+            // Applied here rather than inside the scorer because the scorer is a pure
+            // function over candles and this needs a database read. It is a veto on an
+            // actionable verdict, not a second entry rule: the signal is unchanged and
+            // the refusal is named, so "the dip fired and was vetoed" and "the dip never
+            // fired" stay different rows in strategy_verdicts.
+            //
+            // Buying a fall works in quiet tape and stops working in a busy one. Over
+            // all 116 closed CANDLE_REVERSAL trades, mean R by notional in the 30
+            // minutes before entry is monotone across four buckets: +0.0754 under $10M,
+            // +0.0374 at $10-20M, -0.0336 at $20-40M, -0.2106 above $40M. On the
+            // 15-minute window this reads live, the trades above the line total negative
+            // R in both sample halves at every threshold from $8M to $20M.
+            //
+            // A flush is exactly when "price fell 0.60% over two bars" stops describing
+            // a dip and starts describing the start of a move. This rule reads no flow
+            // at all, so without this it cannot tell the two apart. It is the news-print
+            // waiver's own mechanism, used as a brake instead of a trigger.
+            //
+            // The read costs one query against today's partition and only happens on an
+            // ACTIONABLE verdict, which is roughly 7.6 times a day.
+            if (verdict.Actionable
+                && tuning.Signal.EntryMode == FlowEntryMode.CandleReversal
+                && tuning.Signal.MaxEntryVolumeUsd > 0m)
+            {
+                var tape = await flowRepo.GetLiveBucketVolumeAsync(opts.Symbol, ct);
+
+                if (tape.TotalUsd >= tuning.Signal.MaxEntryVolumeUsd)
+                {
+                    verdict = FlowVerdict.Abstain(
+                        "TAPE_TOO_HEAVY",
+                        $"The rolling 15 minutes have traded ${tape.TotalUsd / 1_000_000m:F2}M, " +
+                        $"at or above the ${tuning.Signal.MaxEntryVolumeUsd / 1_000_000m:F1}M cap " +
+                        "this rule will not buy a fall into. The price signal fired and is " +
+                        "unchanged; what is refused is taking it in a flush, where the same " +
+                        "0.60% drop stops being a dip and starts being the start of a move " +
+                        "(H40). Quiet tape is where this rule earns.",
+                        verdict.AggregateOfi, verdict.AggregateZ, verdict.AgreeingVenues,
+                        verdict.ParticipatingVenues, verdict.DispersionBps);
+                }
+            }
 
             if (!verdict.Actionable)
             {

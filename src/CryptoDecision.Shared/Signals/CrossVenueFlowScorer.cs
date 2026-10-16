@@ -287,7 +287,44 @@ public sealed record FlowSignalOptions(
     /// 0.020R at five — against a measured edge of 0.379R. Three minutes buys a settled
     /// number for 4% of the edge.
     /// </summary>
-    int     RatioSettleMinutes            = 3)
+    int     RatioSettleMinutes            = 3,
+
+    /// <summary>
+    /// For <see cref="FlowEntryMode.CandleReversal"/>: rolling 15-minute notional at or
+    /// above which the dip rule will NOT open a position. 0 disables the cap.
+    ///
+    /// The cap is a MAXIMUM, which is the opposite of the intuition one brings to a
+    /// volume filter. Buying a fall works in quiet tape and stops working in a busy one,
+    /// and the gradient over all 116 closed CANDLE_REVERSAL trades is monotone — mean R
+    /// by notional in the 30 minutes before entry:
+    ///
+    ///     &lt; $10M   n 36   +0.0754      $20-40M   n 24   -0.0336
+    ///     $10-20M   n 43   +0.0374      &gt;= $40M   n 13   -0.2106
+    ///
+    /// Four buckets, monotone, no cell out of order. It separates on the 15-minute
+    /// window the bot can actually read live, in BOTH sample halves, at every threshold
+    /// from $8M to $20M — the trades above the line total negative R in all ten cells
+    /// tested. At $10M it removes 31 of 116 entries carrying -4.720R and leaves 85
+    /// carrying +5.496R.
+    ///
+    /// The mechanism is the one the waiver is built on, read from the other side. A
+    /// 15-minute window trading this much is a flush, and a flush is exactly when "price
+    /// fell 0.60% over two bars" stops describing a dip and starts describing the
+    /// beginning of a move. The dip rule reads no flow at all, so without this it cannot
+    /// see the difference.
+    ///
+    /// $10M IS NOT MEASURED AS AN OPTIMUM and the data cannot pick one: every threshold
+    /// tested improves what is kept, so the curve is monotone and its argmax is just the
+    /// most aggressive setting. $10M is half the news-print threshold and near the median
+    /// entry, which thins the dip rule by about a quarter rather than gutting it. H40 in
+    /// HYPOTHESES.md carries the tables and the decision rule.
+    ///
+    /// Measured on ALIGNED buckets and enforced on the ROLLING window, which are not the
+    /// same instrument. The rolling reading is the one the waiver uses and is never lower
+    /// than the aligned one by much, but the threshold was fitted on the aligned series
+    /// and that is a known, unquantified seam.
+    /// </summary>
+    decimal MaxEntryVolumeUsd             = 0m)
 {
     /// <summary>
     /// How many closed buckets to load before scoring.
