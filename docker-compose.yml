@@ -865,14 +865,11 @@ services:
       # Polymarket__EntryPricesCsv.
       Polymarket__ArmBelowAsk:          "${POLY_ARM_BELOW_ASK:-0.09}"
       Polymarket__ArmBelowAskByGameCsv: "${POLY_ARM_BY_GAME:-}"
-      Polymarket__SoccerArmBelowAsk:    "${POLY_SOCCER_ARM:-0.05}"
 
       # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
       # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
       # khop moi 32 ngay. Moi muc tren 0.01 do duoc deu phang hoac am, nen muc gia cho
       # bong da tach rieng va khong bao gio dung chung voi esports.
-      Polymarket__SoccerEnabled:        "${POLY_SOCCER:-true}"
-      Polymarket__SoccerEntryPricesCsv: "${POLY_SOCCER_ENTRY_PRICES:-}"
 
       # Contract ky lenh (EIP-712 verifyingContract). Mac dinh = clob-client 5.8.1.
       # Polymarket dang chuyen sang rails pUSD voi contract moi; de o day de doi

@@ -2,21 +2,12 @@ using System.Text.Json.Serialization;
 
 namespace CryptoDecision.PolymarketService.Polymarket;
 
-/// <summary>
-/// Which market family a market came from. It decides which entry levels apply, because
-/// the two behave nothing alike: an esports map keeps trading after it is decided and its
-/// losing side reaches 1c almost every time, while a football market closes on the final
-/// whistle and its losing side stops at 10c or above 80.7% of the time.
-/// </summary>
-public enum Sport { Esports, Soccer }
-
 /// <summary>A tradable match market, reduced to what the entry rule actually reads.</summary>
 public sealed record EsportsMarket(
     string ConditionId,
     string Question,
     string Slug,
     string Game,
-    Sport Sport,
     IReadOnlyList<string> Outcomes,
     IReadOnlyList<string> TokenIds,
     bool NegRisk,

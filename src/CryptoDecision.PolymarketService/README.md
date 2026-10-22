@@ -240,7 +240,8 @@ in đều, dù có vào lệnh hay không.
 | `POLY_MAX_DAILY_USD` | `15` | Trần tiền cam kết mỗi ngày UTC. Đếm trong RAM — restart là reset. **`0` = tắt trần**, lúc đó số dư ví là giới hạn duy nhất |
 | `POLY_MIN_VOLUME_USD` | `25000` | Ngưỡng volume. Xem mục 1 — nó lọc lỗ vặt, **không** chọn được market tốt |
 | `POLY_REST_BOTH_SIDES` | `true` | Nguồn lợi nhuận. Xem mục dưới |
-| `POLY_ARM_BELOW_ASK` | `0.10` | Chỉ vào khi giá bên đó **đã rớt** xuống dưới mức này. `1.0` = vào ngay khi thấy trận. Bắt được 84,6% cơ hội — xem bảng ở mục 3 |
+| `POLY_ARM_BELOW_ASK` | `0.09` | Ngưỡng **dự phòng** cho môn không khai báo riêng. Giá tính theo **đồng**, nên `1.0` = 100 xu = vào ngay, **không phải** 1 xu. Mức lệnh nằm chờ là `POLY_ENTRY_PRICES` |
+| `POLY_ARM_BY_GAME` | `Counter-Strike=0.03,Valorant=0.03,LoL=0.09,Dota 2=0.09` | Ngưỡng arm **theo từng môn**. CS2 và Valorant kết thúc map ngay khi đủ 13 round nên giá rơi một nhịp; LoL và Dota rỉ máu vài phút nên ngưỡng cao vẫn với tới được |
 
 ### Vì sao không có chốt lời (TP)
 
@@ -313,7 +314,8 @@ Lấy 474 token mà ví mẫu đã mua ở 1¢, kéo price history của CLOB �
 | 0.03 | 0 | 50,6% | 49,4% |
 | 0.05 | 1 | 34,4% | 65,6% |
 | 0.07 | 3 | 22,8% | 77,2% |
-| **0.10** (hiện tại) | 4 | 15,4% | **84,6%** |
+| **0.09** (hiện tại) | 3 | 17,7% | **82,3%** |
+| 0.10 | 4 | 15,4% | 84,6% |
 | 0.11 | 5 | 14,1% | 85,9% |
 | 0.15 | 7 | 5,3% | **94,7%** |
 | 0.20 | 9 | 2,1% | 97,9% |

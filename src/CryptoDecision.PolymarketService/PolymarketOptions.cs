@@ -163,12 +163,31 @@ public sealed class PolymarketOptions
     /// <see cref="RestBothSides"/> on that risk is gone - the other side stays armable -
     /// so the only thing a low threshold still buys is fewer resting orders.
     ///
-    /// Set to 1.0 to arm as soon as a market appears. Note it interacts with
-    /// <see cref="MinVolumeUsd"/>: a market that has not traded $25k yet is not eligible
-    /// no matter how early this would arm it, so capture is bounded by how fast volume
-    /// accumulates, not by this alone.
+    /// NOTE ON UNITS, because this is the easy one to get wrong: the value is a price in
+    /// dollars, so 1.0 means 100 cents - "arm immediately, at any price" - and NOT one
+    /// cent. The level the order actually rests at is <see cref="EntryPrices"/>, which is
+    /// 0.01 and separate from this.
+    ///
+    /// 0.09 by operator decision. It was briefly set to 1.0 to capture the gap-downs: a
+    /// CS2 map ends the instant a team reaches 13 rounds and the price goes from 0.10 to
+    /// 0.001 without printing anything in between, so 15.4% of collapses never show a
+    /// single minute inside the 0.10 band and no scan interval can catch them. Resting on
+    /// the book beforehand is the only way to be filled on those, and a 1c bid costs
+    /// nothing until the price collapses onto it.
+    ///
+    /// It was reverted because 1.0 puts an order on both sides of every qualifying market
+    /// the moment it appears, including matches still at 50-50, and the operator cancelled
+    /// the 38 that produced. The trade-off, measured on 474 tokens by counting the minutes
+    /// a price spends inside the band before the side dies: capture is 82.3% at 0.09,
+    /// 84.6% at 0.10, 97.9% at 0.20, 99.8% at 0.30 and 100% at 1.0. If the gap-downs ever
+    /// look worth chasing again, 0.30 buys almost all of it without resting on even
+    /// matches.
+    ///
+    /// Note it interacts with <see cref="MinVolumeUsd"/>: a market that has not traded $25k
+    /// yet is not eligible no matter how early this would arm it, so in practice arming
+    /// still waits on volume rather than on price.
     /// </summary>
-    public decimal ArmBelowAsk { get; set; } = 0.10m;
+    public decimal ArmBelowAsk { get; set; } = 0.09m;
 
     /// <summary>
     /// Rest on both outcomes of a match instead of one.
@@ -225,104 +244,33 @@ public sealed class PolymarketOptions
     /// </summary>
     public string[] Games { get; set; } = [];
 
-    // ── Football ──────────────────────────────────────────────────────────────
-    //
-    // Added on request. Three earlier readings of this were wrong and are worth naming,
-    // because each one made football look less tradable than it is:
-    //
-    //   1. Price history was pulled in a window around Gamma's endDate. That field is the
-    //      scheduled time, not the settle time - on Roma vs Real Madrid it reads 19:00Z
-    //      while the market traded until 21:20Z - so the second half of every match was
-    //      cut off, and with it the collapse the strategy exists to catch.
-    //   2. The league filter matched tag LABELS, which silently excluded every Champions
-    //      League match: Gamma tags those "UCL". See SoccerLeagueTagIds.
-    //   3. The sample stopped two days short of the match that disproved the conclusion.
-    //
-    // Measured again on 1,495 closed winner-markets in these competitions, full price
-    // history, settlement plateau removed. The pipeline is checked against a known case:
-    // "Will Real Madrid CF win on 2026-10-14?" bottomed at 0.0065 and won.
-    //
-    //   level  fills  wins   rate    break-even   edge      z
-    //    0.01    250     1   0.40%         1%      -60%   -0.95
-    //    0.02    259     2   0.77%         2%      -61%   -1.41
-    //    0.03    267     4   1.50%         3%      -50%   -1.44
-    //    0.05    280     9   3.21%         5%      -36%   -1.37
-    //    0.10    307    24   7.82%        10%      -22%   -1.27
-    //    0.15    321    36  11.21%        15%      -25%   -1.90
-    //    0.20    343    55  16.03%        20%      -20%   -1.84
-    //
-    // So it DOES fill, and often - 250 fills in 610 days, one every 2.4 days, not the
-    // one-a-month claimed before. What it does not do is clear the bar: 0.40% against a
-    // 1.00% break-even, and negative at every level above it. The one winner in 250 is
-    // the Real Madrid match. Esports realises 2.16% on the same bet.
-    //
-    // Not significantly below break-even either (z = -0.95), which is the whole reason
-    // this stays switched on: at $0.10 a fill it costs about $25 a year to find out, and
-    // every order is logged so the question gets answered on this bot's own data.
-    //
-    // Caveat on the sample: only 588 of 2,990 tokens have CLOB price history at all, and
-    // the ones that do skew to higher volume.
-
     /// <summary>
-    /// Whether to scan football at all. The cost of being wrong is one $0.06 order a
-    /// month; the cost of being right is unknown, which is the only argument for it.
-    /// </summary>
-    public bool SoccerEnabled { get; set; } = true;
-
-    /// <summary>Gamma's parent Soccer tag. Per-league tags are used inconsistently - Serie A and
-    /// Europa League return almost nothing through their own ids - so the parent plus
-    /// <see cref="SoccerLeagues"/> is the only reliable way in.</summary>
-    public int SoccerTagId { get; set; } = 100_350;
-
-    /// <summary>
-    /// Competitions to accept, as Gamma tag IDs on the event.
+    /// Per-game arming thresholds as "Game=price" pairs, e.g.
+    /// "Counter-Strike=0.03,Valorant=0.03,LoL=0.09,Dota 2=0.09".
     ///
-    /// IDs, not labels. The first version matched label text and silently dropped every
-    /// Champions League match, because Gamma tags those events "UCL" - the string
-    /// "Champions League" appears nowhere on them. Tag 1234 is labelled "Champions League"
-    /// and is NOT the one in use; the live one is 100977. Labels are display text and
-    /// change; ids do not.
+    /// The shape of the collapse differs by game. A CS2 or Valorant map ends the moment a
+    /// team reaches 13 rounds, so its price falls in one step; a LoL or Dota game bleeds
+    /// out over several minutes, so a higher threshold is both reachable and useful.
+    ///
+    /// Names are matched against the canonical game on the market (see GammaClient's game
+    /// resolution, which reads the question prefix first and the event's tags second).
+    /// Anything unmatched falls back to <see cref="ArmBelowAsk"/>.
     ///
     /// Empty by default for the binding reason on <see cref="EntryPrices"/>; filled in
     /// <see cref="Validate"/>.
     /// </summary>
-    public int[] SoccerLeagueTagIds { get; set; } = [];
+    public string ArmBelowAskByGameCsv { get; set; } = "";
 
-    /// <summary>
-    /// Entry levels for football, separate from <see cref="EntryPrices"/> on purpose: the
-    /// table above measures every level from 0.03 up as flat or losing, so esports levels
-    /// must never leak into football markets.
-    /// </summary>
-    public decimal[] SoccerEntryPrices { get; set; } = [];
+    /// <summary>Parsed form of <see cref="ArmBelowAskByGameCsv"/>.</summary>
+    public Dictionary<string, decimal> ArmBelowAskByGame { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Comma-separated override for <see cref="SoccerEntryPrices"/>. See <see cref="EntryPricesCsv"/>.</summary>
-    public string SoccerEntryPricesCsv { get; set; } = "";
+    /// <summary>The arming threshold that applies to one market.</summary>
+    public decimal ArmFor(string game) =>
+        ArmBelowAskByGame.TryGetValue(game, out var v) ? v : ArmBelowAsk;
 
-    /// <summary>
-    /// How long a football market stays eligible after its Gamma endDate.
-    ///
-    /// Needed because for football that field is KICKOFF, not the final whistle. Measured
-    /// against the last trade on the book: La Liga +140 minutes, Bundesliga +151, and Roma
-    /// vs Real Madrid +140 - a match whose 1c print landed 100 minutes past its endDate.
-    /// Applying the esports rule (<see cref="MinMinutesToEnd"/>) to football retires every
-    /// market at kick-off, which is the moment before the only event this bot waits for.
-    /// That is why football scanned 43 times and never kept a single market.
-    ///
-    /// Entering a market that has actually finished is not a risk this opens up: the
-    /// losing side's ask sits at 0.001 by then, below the entry level, and the order is
-    /// refused for crossing rather than resting.
-    /// </summary>
-    public double SoccerMinutesAfterKickoff { get; set; } = 180;
-
-    /// <summary>The levels that apply to a market, by the family it came from.</summary>
-    public decimal[] LevelsFor(Sport sport) => sport == Sport.Soccer ? SoccerEntryPrices : EntryPrices;
-
-    /// <summary>
-    /// Every level either family can use. Used when blocking re-entry on a token already
-    /// held, where the sport is not known - a position read back from the exchange says
-    /// what it holds, never which rule bought it.
-    /// </summary>
-    public IEnumerable<decimal> AllEntryPrices => EntryPrices.Concat(SoccerEntryPrices).Distinct();
+    /// <summary>One-line summary of the thresholds, for the startup log.</summary>
+    public string ArmSummary() =>
+        string.Join(", ", ArmBelowAskByGame.Select(kv => $"{kv.Key}={kv.Value}").Append($"other={ArmBelowAsk}"));
 
     /// <summary>Ignore matches scheduled to end further out than this. Cuts the scan universe.</summary>
     public double MaxHoursToEnd { get; set; } = 24;
@@ -332,7 +280,25 @@ public sealed class PolymarketOptions
 
     // ── Cadence ───────────────────────────────────────────────────────────────
 
-    public int ScanIntervalSeconds { get; set; } = 20;
+    /// <summary>
+    /// 5 seconds, down from 20, and the reason is measured at second resolution off the
+    /// public trade prints of the matches that paid.
+    ///
+    /// The final leg of a collapse is fast. Imperial vs Fluxo W7M went 0.10 -> 0.01 in six
+    /// seconds, megoshort vs Privateer 0.11 -> 0.01 in eleven, MIBR LOS vs AG.AL
+    /// 0.053 -> 0.01 in three. In four of five CS2/Valorant wins examined there was no
+    /// print at all between 1.5c and 5c. A 20-second interval samples such a window zero
+    /// or one times; 5 seconds samples it one to three.
+    ///
+    /// What it does not change: where the price pauses. All four of those sat at 0.09-0.13
+    /// for fifteen to forty-three seconds before the final gap, which is why the arming
+    /// threshold belongs there rather than inside the gap.
+    ///
+    /// Cost measured against the live endpoint: 12 consecutive POST /books a minute with
+    /// 46 token ids, all 200, slowest response 360ms. The expensive calls are the Gamma
+    /// scans, and they stay on their own slower clocks below.
+    /// </summary>
+    public int ScanIntervalSeconds { get; set; } = 5;
     public int MarketRefreshSeconds { get; set; } = 120;
     public int PositionRefreshSeconds { get; set; } = 300;
 
@@ -398,49 +364,30 @@ public sealed class PolymarketOptions
         if (EntryPrices.Length == 0) EntryPrices = [0.01m];
         if (Games.Length == 0) Games = ["Counter-Strike", "LoL", "Dota 2", "Valorant"];
 
-        if (!string.IsNullOrWhiteSpace(SoccerEntryPricesCsv))
-            SoccerEntryPrices = SoccerEntryPricesCsv
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(s => decimal.TryParse(s, System.Globalization.NumberStyles.Any,
-                            System.Globalization.CultureInfo.InvariantCulture, out var d)
-                        ? d
-                        : throw new InvalidOperationException($"Polymarket:SoccerEntryPricesCsv has \"{s}\", which is not a number"))
-                .ToArray();
+        if (ArmBelowAskByGame.Count == 0)
+        {
+            var csv = string.IsNullOrWhiteSpace(ArmBelowAskByGameCsv)
+                ? "Counter-Strike=0.03,Valorant=0.03,LoL=0.09,Dota 2=0.09"
+                : ArmBelowAskByGameCsv;
 
-        if (SoccerEntryPrices.Length == 0) SoccerEntryPrices = [0.01m];
-        if (SoccerLeagueTagIds.Length == 0)
-            SoccerLeagueTagIds =
-            [
-                // Champions League - three live ids for the one competition
-                100_977,  // "UCL"                 <- the one actually on match events
-                102_469,  // "UEFA Champions League"
-                1_234,    // "Champions League"
+            foreach (var pair in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = pair.LastIndexOf('=');
+                if (eq <= 0)
+                    throw new InvalidOperationException($"Polymarket:ArmBelowAskByGameCsv has \"{pair}\", expected Game=price");
 
-                // Europa League - likewise three
-                101_787,  // "UEL"
-                102_506,  // "UEFA Europa League"
-                100_626,  // "Europa League"
+                var name = pair[..eq].Trim();
+                if (!decimal.TryParse(pair[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var price))
+                    throw new InvalidOperationException($"Polymarket:ArmBelowAskByGameCsv has \"{pair}\", which is not a number");
 
-                306,      // EPL
-                82,       // Premier League
-                780,      // La Liga
-                100_618,  // Serie A
-                102_070,  // Ligue 1
-                1_494,    // Bundesliga
-                101_735,  // Eredivisie
-                102_154,  // DFB-Pokal
-                101_807,  // FA Cup
-                102_643,  // EFL Championship
-                101_772,  // Primeira Liga
-            ];
+                if (price <= 0m || price > 1m)
+                    throw new InvalidOperationException($"Polymarket:ArmBelowAskByGameCsv has {name}={price}; must be in (0, 1]");
 
-        // Deliberately NOT here, having been found by a label sweep and rejected: AFC
-        // Champions League Elite (104937), Austria Bundesliga (104929), Bundesliga 2
-        // (102864), La Liga 2 (102866), Premier League Kazakhstan (105246), Azerbaijan
-        // Premier League (105913), Canadian Premier League (105910), Champions League
-        // Final (102178 - a futures market, not a match). Matching league names by text
-        // pulls all of these in; ids keep the list to the competitions that were asked
-        // for. Any new id has to be added here on purpose.
+                ArmBelowAskByGame[name] = price;
+            }
+        }
+
         if (PolygonRpcUrls.Length == 0)
             PolygonRpcUrls =
             [
@@ -450,18 +397,14 @@ public sealed class PolymarketOptions
             ];
 
         EntryPrices = EntryPrices.Distinct().OrderByDescending(p => p).ToArray();
-        SoccerEntryPrices = SoccerEntryPrices.Distinct().OrderByDescending(p => p).ToArray();
         Games = Games.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        SoccerLeagueTagIds = SoccerLeagueTagIds.Distinct().ToArray();
 
         if (StakeUsd <= 0) throw new InvalidOperationException("Polymarket:StakeUsd must be > 0");
         foreach (var p in EntryPrices)
             if (p < MinAskPrice || p >= 1m)
                 throw new InvalidOperationException($"Polymarket:EntryPrices has {p}; must be in [{MinAskPrice}, 1)");
 
-        foreach (var p in SoccerEntryPrices)
-            if (p < MinAskPrice || p >= 1m)
-                throw new InvalidOperationException($"Polymarket:SoccerEntryPrices has {p}; must be in [{MinAskPrice}, 1)");
+
         if (!DryRun && string.IsNullOrWhiteSpace(PrivateKey))
             throw new InvalidOperationException("Polymarket:DryRun is false but no PrivateKey was supplied");
         if (SignatureType is not (0 or 1 or 2 or 3))

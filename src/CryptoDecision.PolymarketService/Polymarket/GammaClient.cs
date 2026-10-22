@@ -22,28 +22,58 @@ public sealed class GammaClient(
     /// the same bet at all.
     /// </summary>
     private static readonly string[] ExcludedKinds =
-        ["handicap", "over/under", "total rounds", "total maps", "games total", "correct score", "o/u"];
+        ["handicap", "over/under", "total rounds", "total maps", "games total", "correct score", "o/u", "spread"];
 
     /// <summary>
-    /// The one question shape that is a football match winner: "Will Arsenal win on
-    /// 2026-10-18?", two-outcome Yes/No, where a draw resolves No.
-    ///
-    /// An earlier version of this also accepted the "A vs. B?" shape on the theory that it
-    /// was the moneyline. It is not. Of 405 such questions in the closed history, 208 are
-    /// first-goalscorer lines ("Ascot United FC to score first vs. Clevedon Town FC?") and
-    /// the other 197 are draw markets ("Will Arsenal vs. Olympiakos Piraeus end in a
-    /// draw?"). Not one was a match winner, and a 1c bid on a draw line is a completely
-    /// different bet from a 1c bid on a team. Only the volume floor kept that version from
-    /// trading them.
+    /// Whether an outcome label is a Yes/No or Over/Under leg rather than a team name.
+    /// This is what separates a match winner from every side market in the catalogue.
     /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex SoccerWinner = new(
-        @"^Will .+ win on \d{4}-\d{2}-\d{2}\?$",
-        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static bool IsBinaryLabel(string outcome) =>
+        outcome.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+        outcome.Equals("no", StringComparison.OrdinalIgnoreCase) ||
+        outcome.Equals("over", StringComparison.OrdinalIgnoreCase) ||
+        outcome.Equals("under", StringComparison.OrdinalIgnoreCase);
+
 
     /// <summary>
     /// Tags on an event, which is where Gamma records the competition. Both halves are
     /// needed: the id is what gets matched, the label is what goes in the log.
     /// </summary>
+    private static readonly (string Game, string[] Aliases)[] GameAliases =
+    [
+        ("Counter-Strike", ["counter-strike", "counter strike", "counter strike 2", "cs", "cs2", "csgo"]),
+        ("LoL",            ["lol", "league of legends", "msi", "lol worlds", "lec"]),
+        ("Dota 2",         ["dota 2", "dota2", "dota"]),
+        ("Valorant",       ["valorant", "vct"]),
+    ];
+
+    /// <summary>
+    /// The canonical game for a market: question prefix first, event tags second, raw
+    /// prefix if neither says anything.
+    ///
+    /// The order matters. The prefix is the more trustworthy of the two - events carry the
+    /// wrong game tag often enough to notice, with five LoL markets tagged
+    /// "counter-strike" and "Valorant: Paper Rex vs G2 Esports" tagged counter-strike as
+    /// well - while a question beginning "LoL:" is never a CS2 match. Tags are only there
+    /// for the tournament-named markets ("IEM Dallas: Liquid vs. FaZe"), where the
+    /// question says nothing about the game at all.
+    /// </summary>
+    private static string ResolveGame(string question, IReadOnlyList<(int Id, string Label)> tags)
+    {
+        var prefix = question.Split(':')[0].Trim();
+
+        foreach (var (game, aliases) in GameAliases)
+            if (aliases.Any(a => prefix.Equals(a, StringComparison.OrdinalIgnoreCase)))
+                return game;
+
+        foreach (var (game, aliases) in GameAliases)
+            if (tags.Any(t => aliases.Any(a => t.Label.Equals(a, StringComparison.OrdinalIgnoreCase))))
+                return game;
+
+        return prefix;
+    }
+
+    /// <summary>
     private static IReadOnlyList<(int Id, string Label)> EventTags(JsonElement ev)
     {
         if (!ev.TryGetProperty("tags", out var tags) || tags.ValueKind != JsonValueKind.Array) return [];
@@ -75,103 +105,54 @@ public sealed class GammaClient(
     /// <summary>Counters for one scan. A class rather than ref parameters, which async forbids.</summary>
     private sealed class Skipped
     {
-        public int Kind, Volume, Window, League;
+        public int Kind, Volume, Window;
     }
 
+    /// <summary>
+    /// Every open esports market worth watching. related_tags=true pulls the children of
+    /// the Esports tag - CS2, LoL, Dota 2, Valorant - without having to enumerate them.
+    ///
+    /// Football lived here too for a week and was removed on 2026-10-20 after it measured
+    /// negative at every entry level. The git history has the whole thing if it is ever
+    /// worth revisiting: the competition tag ids (several per competition, and never the
+    /// ones their names suggest), the Yes-leg-only rule, and the three separate bugs that
+    /// kept it silently dead - a parent tag that does not return its children, an endDate
+    /// that is kick-off rather than the whistle, and league matching by label.
+    /// </summary>
     public async Task<IReadOnlyList<EsportsMarket>> FetchMarketsAsync(CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
         var results = new List<EsportsMarket>();
         var skipped = new Skipped();
 
-        await ScanTagAsync(_opt.EsportsTagId, Sport.Esports, results, now, skipped, ct);
-
-        var esports = results.Count;
-
-        // One request per competition, not one for the parent Soccer tag.
-        //
-        // The parent tag does not return its children reliably: a sweep of all 2,100
-        // events under tag 100350 found six stale markets in the chosen competitions,
-        // while asking tag 306 directly returned sixteen Premier League fixtures inside
-        // 48 hours - Chelsea at $50k, Liverpool at $25k - every one of them carrying the
-        // Soccer tag it was supposedly reachable through. Scanning the parent is why
-        // football kept nothing for two days.
-        //
-        // Competitions share markets (UCL carries three different tag ids), so results
-        // are de-duplicated on conditionId.
-        if (_opt.SoccerEnabled)
+        for (var offset = 0; offset < 2000; offset += 100)
         {
-            var seen = results.Select(r => r.ConditionId).ToHashSet();
+            var url = $"{_opt.GammaUrl}/events?tag_id={_opt.EsportsTagId}&related_tags=true&closed=false" +
+                      $"&limit=100&offset={offset}&order=startDate&ascending=false";
 
-            foreach (var tagId in _opt.SoccerLeagueTagIds)
+            int onPage;
+            try
             {
-                var before = results.Count;
-                await ScanTagAsync(tagId, Sport.Soccer, results, now, skipped, ct);
-
-                // Drop anything this tag repeated from an earlier one.
-                for (var i = results.Count - 1; i >= before; i--)
-                {
-                    if (!seen.Add(results[i].ConditionId)) results.RemoveAt(i);
-                }
+                onPage = await ReadPageAsync(url, results, now, skipped, ct);
             }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Gamma page at offset {Offset} failed; using what we have", offset);
+                break;
+            }
+
+            if (onPage < 100) break;
         }
 
         log.LogInformation(
-            "Gamma scan: {Kept} markets kept ({Esports} esports, {Soccer} football); skipped {Kind} by kind, " +
-            "{League} outside the chosen competitions, {Volume} under ${MinVolume} volume, {Window} outside the time window",
-            results.Count, esports, results.Count - esports, skipped.Kind, skipped.League,
-            skipped.Volume, _opt.MinVolumeUsd, skipped.Window);
+            "Gamma scan: {Kept} markets kept; skipped {Kind} by kind, {Volume} under ${MinVolume} volume, " +
+            "{Window} outside the time window",
+            results.Count, skipped.Kind, skipped.Volume, _opt.MinVolumeUsd, skipped.Window);
 
         return results;
     }
 
-    /// <summary>
-    /// Walks one tag tree. related_tags=true pulls the children of the parent tag - CS2,
-    /// LoL, Dota 2, Valorant under Esports; every competition under Soccer - without
-    /// having to enumerate them. For football the per-competition tags cannot be used
-    /// directly: Serie A and Europa League return almost nothing through their own ids.
-    /// </summary>
-    private async Task ScanTagAsync(
-        int tagId, Sport sport, List<EsportsMarket> results, DateTimeOffset now, Skipped skipped, CancellationToken ct)
-    {
-        for (var offset = 0; offset < 2000; offset += 100)
-        {
-            var url = $"{_opt.GammaUrl}/events?tag_id={tagId}&related_tags=true&closed=false" +
-                      $"&limit=100&offset={offset}&order=startDate&ascending=false";
-
-            JsonElement page;
-            try
-            {
-                page = await GetJsonAsync(url, ct);
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Gamma page at offset {Offset} for {Sport} failed; using what we have", offset, sport);
-                break;
-            }
-
-            if (page.ValueKind != JsonValueKind.Array || page.GetArrayLength() == 0) break;
-
-            foreach (var ev in page.EnumerateArray())
-            {
-                if (!ev.TryGetProperty("markets", out var markets) || markets.ValueKind != JsonValueKind.Array)
-                    continue;
-
-                // Competition lives on the event, not the market, so it is read once here.
-                var leagues = EventTags(ev);
-
-                foreach (var m in markets.EnumerateArray())
-                {
-                    var outcome = Map(m, sport, leagues, now, skipped);
-                    if (outcome is not null) results.Add(outcome);
-                }
-            }
-
-            if (page.GetArrayLength() < 100) break;
-        }
-    }
-
-    private EsportsMarket? Map(JsonElement m, Sport sport, IReadOnlyList<(int Id, string Label)> leagues, DateTimeOffset now, Skipped skipped)
+    private EsportsMarket? Map(JsonElement m, IReadOnlyList<(int Id, string Label)> leagues, DateTimeOffset now, Skipped skipped)
     {
         ref var skippedKind = ref skipped.Kind;
         ref var skippedVolume = ref skipped.Volume;
@@ -185,37 +166,40 @@ public sealed class GammaClient(
         var question = Str(m, "question") ?? "";
         if (string.IsNullOrEmpty(conditionId) || string.IsNullOrEmpty(question)) return null;
 
+        // Parsed before the filter below, because the only reliable way to tell a match
+        // winner from a side market is the shape of its outcomes.
+        var outcomes = JsonArrayOfStrings(m, "outcomes");
+        var tokenIds = JsonArrayOfStrings(m, "clobTokenIds");
+
+        // A mismatch means we cannot say which token is which outcome. Never guess that.
+        if (tokenIds.Count == 0 || tokenIds.Count != outcomes.Count) return null;
+
+        // Two-outcome only. One side per match is only a meaningful rule when there are
+        // exactly two sides and the other one is the complement.
+        if (tokenIds.Count != 2) return null;
+
         string? game;
 
-        if (sport == Sport.Soccer)
         {
-            // Whitelist here, not blacklist. One football event carries around fifty
-            // markets - O/U 0.5 through 8.5, both-teams-to-score, first-half lines,
-            // spreads, exact score, draw-at-halftime, first goalscorer - and exactly one
-            // shape of question is the match winner. Listing what is allowed is the only
-            // filter that holds; a blacklist missed first-goalscorer and draw lines
-            // because neither carries a colon.
-            if (!SoccerWinner.IsMatch(question))
+            // Not a prefix whitelist any more. Polymarket names the same kind of market
+            // several ways and matching the game name only caught 164 of the 611 eligible
+            // winner markets in the catalogue. What it missed, by prefix: "League of
+            // Legends" (209 markets, $36.2M of volume), "IEM Cologne" (44), "BLAST.tv
+            // Austin Major" (31), "CS" (28), "BLAST Bounty" (26), "BLAST Open" (25), "MSI
+            // Playoffs" (13), "IEM Dallas" (11) and more - the config said "LoL" and
+            // "Counter-Strike", and a great many matches are titled after the tournament
+            // instead of the game.
+            //
+            // What every winner market has in common is the shape of its outcomes: two
+            // TEAM NAMES. Side markets carry Yes/No or Over/Under instead. Checked against
+            // the whole esports catalogue this keeps all 611 and admits nothing that is
+            // not a match - every question kept contains "vs", none is a handicap, total
+            // or spread.
+            if (IsBinaryLabel(outcomes[0]) || IsBinaryLabel(outcomes[1]))
             {
                 skippedKind++;
                 return null;
             }
-
-            var league = leagues.FirstOrDefault(l => _opt.SoccerLeagueTagIds.Contains(l.Id));
-            if (league.Id == 0)
-            {
-                skipped.League++;
-                return null;
-            }
-
-            game = league.Label;
-        }
-        else
-        {
-            // The game prefix does most of the filtering on its own: side markets are titled
-            // "Map Handicap: ..." or "Games Total: ...", never "Counter-Strike: ...".
-            game = _opt.Games.FirstOrDefault(g => question.StartsWith(g + ":", StringComparison.OrdinalIgnoreCase));
-            if (game is null) return null;
 
             var lower = question.ToLowerInvariant();
             if (ExcludedKinds.Any(k => lower.Contains(k)))
@@ -223,17 +207,12 @@ public sealed class GammaClient(
                 skippedKind++;
                 return null;
             }
+
+            // Games is no longer a gate - the gate is the Esports tag plus the shape above.
+            // But the game still has to be named, because the arming threshold is per game
+            // now and an unresolved game quietly takes the fallback instead.
+            game = ResolveGame(question, leagues);
         }
-
-        var outcomes = JsonArrayOfStrings(m, "outcomes");
-        var tokenIds = JsonArrayOfStrings(m, "clobTokenIds");
-
-        // A mismatch means we cannot say which token is which outcome. Never guess that.
-        if (tokenIds.Count == 0 || tokenIds.Count != outcomes.Count) return null;
-
-        // Two-outcome only. "Vao mot phia thoi" is only a meaningful rule when there are
-        // exactly two sides and the other one is the complement.
-        if (tokenIds.Count != 2) return null;
 
         var volume = Dec(m, "volumeNum") ?? Dec(m, "volume") ?? 0m;
         if (volume < _opt.MinVolumeUsd)
@@ -247,14 +226,7 @@ public sealed class GammaClient(
         {
             var minutesLeft = (endDate.Value - now).TotalMinutes;
 
-            // Football's endDate is kick-off, not the whistle, so the market is still the
-            // live one for about two and a half hours after it goes negative. See
-            // PolymarketOptions.SoccerMinutesAfterKickoff for the measurements.
-            var floor = sport == Sport.Soccer
-                ? -_opt.SoccerMinutesAfterKickoff
-                : _opt.MinMinutesToEnd;
-
-            if (minutesLeft < floor || minutesLeft > _opt.MaxHoursToEnd * 60)
+            if (minutesLeft < _opt.MinMinutesToEnd || minutesLeft > _opt.MaxHoursToEnd * 60)
             {
                 skippedWindow++;
                 return null;
@@ -262,19 +234,49 @@ public sealed class GammaClient(
         }
 
         return new EsportsMarket(
-            conditionId, question, Str(m, "slug") ?? "", game, sport,
+            conditionId, question, Str(m, "slug") ?? "", game,
             outcomes, tokenIds,
             Bool(m, "negRisk") ?? Bool(m, "neg_risk") ?? false,
             endDate, volume);
     }
 
-    private async Task<JsonElement> GetJsonAsync(string url, CancellationToken ct)
+    /// <summary>
+    /// Reads one page of events and maps it in place, returning how many events were on it.
+    ///
+    /// Mapping happens INSIDE the JsonDocument's scope on purpose. The previous version
+    /// returned <c>doc.RootElement.Clone()</c>, which copies the whole page onto the managed
+    /// heap - and a page of 100 football events carries about fifty markets each, six to
+    /// eight megabytes of JSON. That was survivable while there was one tag to scan; with
+    /// seventeen competition tags it threw OutOfMemoryException against the container's
+    /// 256 MB limit and every football page after the first was silently dropped.
+    /// </summary>
+    private async Task<int> ReadPageAsync(
+        string url, List<EsportsMarket> results, DateTimeOffset now, Skipped skipped, CancellationToken ct)
     {
-        using var response = await http.GetAsync(url, ct);
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-        return doc.RootElement.Clone();
+
+        var page = doc.RootElement;
+        if (page.ValueKind != JsonValueKind.Array) return 0;
+
+        foreach (var ev in page.EnumerateArray())
+        {
+            if (!ev.TryGetProperty("markets", out var markets) || markets.ValueKind != JsonValueKind.Array)
+                continue;
+
+            // Competition lives on the event, not the market, so it is read once here.
+            var leagues = EventTags(ev);
+
+            foreach (var m in markets.EnumerateArray())
+            {
+                var outcome = Map(m, leagues, now, skipped);
+                if (outcome is not null) results.Add(outcome);
+            }
+        }
+
+        return page.GetArrayLength();
     }
 
     // -- Gamma returns some fields as JSON-encoded strings; read both shapes. ---

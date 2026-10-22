@@ -60,6 +60,7 @@ public sealed class EsportsEntryWorker(
     private IReadOnlyList<EsportsMarket> _markets = [];
     private DateTimeOffset _marketsAt = DateTimeOffset.MinValue;
     private DateTimeOffset _syncedAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastCycleLog = DateTimeOffset.MinValue;
 
     /// <summary>Orders actually sent to the exchange this run.</summary>
     private int _ordersSent;
@@ -84,14 +85,8 @@ public sealed class EsportsEntryWorker(
             _opt.StakeUsd, string.Join(", ", _opt.EntryPrices), _opt.MinVolumeUsd,
             string.Join(", ", _opt.Games), _opt.MaxDailyUsd, _opt.RestBothSides);
 
-        if (_opt.SoccerEnabled)
-            log.LogInformation(
-                "Football is on. Levels=[{Levels}] CompetitionTagIds=[{Leagues}]. Measured on 1,495 closed " +
-                "winner-markets: it fills about once every 2.4 days, and hits 0.40% against a 1.00% break-even " +
-                "(1 winner in 250 - Real Madrid at Roma, 2026-10-14, which bottomed at 0.0065 and won). That is " +
-                "below break-even but not significantly so (z = -0.95), so this runs to settle the question on " +
-                "its own fills. Esports realises 2.16% on the same bet.",
-                string.Join(", ", _opt.SoccerEntryPrices), string.Join(", ", _opt.SoccerLeagueTagIds));
+        log.LogInformation("Arming thresholds: {Arm}", _opt.ArmSummary());
+
 
         // Throws rather than returning quietly. A BackgroundService that just returns
         // leaves the host running with nothing to do, so the container still reports
@@ -280,7 +275,7 @@ public sealed class EsportsEntryWorker(
             {
                 armed++;
 
-                foreach (var level in _opt.LevelsFor(market.Sport))
+                foreach (var level in _opt.EntryPrices)
                 {
                     if (!books.TryGetValue(tokenId, out var book)) continue;
 
@@ -297,6 +292,14 @@ public sealed class EsportsEntryWorker(
                 }
             }
         }
+
+        // At a 5-second interval an unconditional cycle line is 17,280 entries a day, which
+        // buries everything worth reading. Anything that placed an order is always logged;
+        // a quiet cycle is logged once a minute, which is enough to tell a waiting bot from
+        // a dead one.
+        var quiet = placed == 0 && DateTimeOffset.UtcNow - _lastCycleLog < TimeSpan.FromSeconds(60);
+        if (quiet) return;
+        _lastCycleLog = DateTimeOffset.UtcNow;
 
         log.LogInformation(
             "Cycle: {Markets} in play, {Open} watched, {Armed} collapsing past {Arm} -> {Placed} placed " +
@@ -319,7 +322,7 @@ public sealed class EsportsEntryWorker(
             ? m.TokenIds.Where(t => t == side)
             : m.TokenIds;
 
-        return candidates.Any(t => _opt.LevelsFor(m.Sport).Any(l => !_placed.Contains(Key(t, l))));
+        return candidates.Any(t => _opt.EntryPrices.Any(l => !_placed.Contains(Key(t, l))));
     }
 
     /// <summary>
@@ -360,7 +363,8 @@ public sealed class EsportsEntryWorker(
             yield break;
         }
 
-        var collapsing = sides.Where(s => s.Ask <= _opt.ArmBelowAsk).OrderBy(s => s.Ask).ToList();
+        var arm = _opt.ArmFor(market.Game);
+        var collapsing = sides.Where(s => s.Ask <= arm).OrderBy(s => s.Ask).ToList();
         if (collapsing.Count == 0) yield break;
 
         foreach (var s in _opt.RestBothSides ? collapsing : collapsing.Take(1))
@@ -480,11 +484,10 @@ public sealed class EsportsEntryWorker(
             {
                 _committedSide[p.ConditionId] = p.TokenId;
 
-                // Block every level on a token we already hold, across both families. A
-                // position does not say which level bought it, nor which sport it came
-                // from, and re-buying after a restart is a far worse failure than missing
-                // one follow-up order.
-                foreach (var level in _opt.AllEntryPrices) _placed.Add(Key(p.TokenId, level));
+                // Block every level on a token we already hold. A position does not say
+                // which level bought it, and re-buying after a restart is a far worse
+                // failure than missing one follow-up order.
+                foreach (var level in _opt.EntryPrices) _placed.Add(Key(p.TokenId, level));
             }
         }
         catch (Exception ex)
