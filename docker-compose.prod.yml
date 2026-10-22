@@ -3,19 +3,24 @@
 #
 # Used as:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# Why images and not a build on the instance
-# ------------------------------------------
-# The target is a 2-vCPU x86_64 instance -- NOT Graviton, whatever this comment used to
-# say; the deploy workflow defaults BUILD_PLATFORM to linux/amd64 and that is what runs.
-# Those two cores are what keeps three WebSocket feeds ingesting, Postgres aggregating and
-# the bot evaluating, and a .NET multi-stage build would take them away for minutes on
-# every deploy,
-# during which the ingestion gap shows up as missing 15-minute buckets. Buckets are
-# the thing the strategy is waiting on, so a deploy that costs data is expensive in
-# a way that is easy to miss.
+# Why images and not a build on the host
+# --------------------------------------
+# This used to be a capacity argument: the EC2 target had two x86_64 cores that were
+# fully occupied keeping three WebSocket feeds ingesting, Postgres aggregating and the
+# bot evaluating, and a .NET multi-stage build took them away for minutes on every
+# deploy -- the gap showing up afterwards as missing 15-minute buckets, which is what
+# the strategy is actually waiting on.
 #
-# Building in CI also makes rollback trivial: point IMAGE_TAG at the previous SHA
-# and `up -d`. Building on the host makes rollback a git checkout plus a rebuild.
+# That argument expired on 2026-10-22. The target is now a 28-core machine at home
+# that builds all four services in a couple of minutes with the stack running.
+#
+# What is left is the rollback argument, and it is the better one anyway: CI tags every
+# image with a commit SHA and GHCR keeps them, so a rollback is IMAGE_TAG plus `up -d`.
+# Building on the host makes rollback a git checkout plus a rebuild, and makes "which
+# commit is running" a question about the working tree rather than about a tag.
+#
+# BUILD_PLATFORM still defaults to linux/amd64, which is what both the old instance and
+# the new machine are -- NOT Graviton, whatever this comment used to say.
 #
 # IMAGE_TAG is set by the deploy workflow to the commit SHA. It defaults to `latest`
 # so a hand-run `up -d` on the instance still works, but a pinned SHA is what CI

@@ -1,9 +1,19 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Build service images, push to GHCR, deploy to the EC2 instance.
+# Build service images, push to GHCR, deploy to the server at home.
 #
-# The target is a 2-vCPU / 8 GB instance. Those two cores keep three WebSocket feeds
-# ingesting and the bot evaluating, so nothing is compiled on them: images are built
-# here and pulled there.
+# The target moved off EC2 on 2026-10-22. It is now a 28-core / 15 GB machine on the
+# operator's own network, reached over Tailscale because it sits behind residential
+# NAT on a private address with a dynamic public IP -- a GitHub-hosted runner can
+# route to neither, and forwarding SSH to the internet on an address the ISP rotates
+# was not worth it.
+#
+# Images are still built here and pulled there, but the original reason is gone: the
+# old instance had two cores that were fully occupied keeping three WebSocket feeds
+# ingesting, so a build on the host cost ingestion data. The new box builds all four
+# services in a couple of minutes with the stack running. Building in CI is now a
+# choice about where rollback lives -- IMAGE_TAG points at a commit SHA and every tag
+# stays in GHCR -- rather than a constraint. A self-hosted runner building on the box
+# would also work and would delete most of this file.
 #
 # Architecture comes from the BUILD_PLATFORM variable (see env below). The .NET
 # Dockerfiles cross-compile via $TARGETARCH, so an arm64 target builds natively on the
@@ -147,10 +157,24 @@ jobs:
           echo "REGISTRY_PATH=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
 
-      - name: Open SSH to the instance
+      # Joins the tailnet before anything tries to reach the host.
+      #
+      # The deploy target moved off EC2 to a machine at home: private 192.168 address
+      # behind residential NAT, and a dynamic public IP. A GitHub-hosted runner can
+      # route to neither, and forwarding SSH to the internet on an address the ISP
+      # rotates is the wrong trade. The tailnet gives the host one stable address
+      # without opening a port on the router.
+      - name: Join the tailnet
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Open SSH to the server
         env:
-          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          HOST: ${{ secrets.EC2_HOST }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy.pem
@@ -163,11 +187,17 @@ jobs:
       # db-migrate mounts. Source code is not shipped — the images carry it.
       - name: Sync compose files and migrations
         env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
         run: |
           ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'mkdir -p ~/cryptodecision'
-          rsync -az --delete \
+          # No --delete on this one. The destination is ~/cryptodecision itself, which
+          # is also where the hand-managed .env lives -- the file this workflow no
+          # longer writes and cannot regenerate. rsync only applies --delete to
+          # directories it is actually transferring, so with two file sources it should
+          # be inert, but "should be" is not what you want standing between a deploy
+          # and the only copy of the live trading credentials.
+          rsync -az \
             -e "ssh -i $HOME/.ssh/deploy.pem" \
             docker-compose.yml docker-compose.prod.yml \
             "$USER@$HOST:~/cryptodecision/"
@@ -179,68 +209,27 @@ jobs:
             -e "ssh -i $HOME/.ssh/deploy.pem" \
             scripts/ "$USER@$HOST:~/cryptodecision/scripts/"
 
-      # Written on the host, never committed and never echoed. `set +x` guards against
-      # a future `set -x` in this step leaking the key into the run log.
-      - name: Write .env on the host
-        env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
-        run: |
-          set +x
-          cat <<'ENVEOF' | ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'cat > ~/cryptodecision/.env && chmod 600 ~/cryptodecision/.env'
-          POSTGRES_DB=crypto
-          POSTGRES_USER=crypto
-          POSTGRES_PASS=${{ secrets.POSTGRES_PASS }}
 
-          OKX_API_KEY=${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET=${{ secrets.OKX_API_SECRET }}
-          OKX_PASSPHRASE=${{ secrets.OKX_PASSPHRASE }}
-
-          OKX_DEMO_TRADING=${{ vars.OKX_DEMO_TRADING || 'true' }}
-          OKX_ENABLE_LIVE_TRADING=${{ vars.OKX_ENABLE_LIVE_TRADING || 'false' }}
-          OKX_MAX_ORDER_NOTIONAL_USD=${{ vars.OKX_MAX_ORDER_NOTIONAL_USD || '10' }}
-          OKX_LEVERAGE=${{ vars.OKX_LEVERAGE || '3' }}
-          OKX_MARGIN_MODE=isolated
-
-          OLLAMA_MODEL=${{ vars.OLLAMA_MODEL || 'qwen2.5:3b' }}
-
-          # ── Polymarket esports entry bot ──────────────────────────────────
-          # PrivateKey is the signing wallet. FunderAddress is the Polymarket
-          # account it signs for — a different address, and the single most
-          # common thing to get wrong; the bot refuses to trade if they match.
-          POLY_PRIVATE_KEY=${{ secrets.POLY_PRIVATE_KEY }}
-          POLY_FUNDER_ADDRESS=${{ secrets.POLY_FUNDER_ADDRESS }}
-
-          # DRY RUN defaults to true on purpose. A push to main deploys straight
-          # to live, so the arm switch must be a deliberate, separate act — set
-          # the repository variable POLY_DRY_RUN to false when you mean it.
-          POLY_DRY_RUN=${{ vars.POLY_DRY_RUN || 'true' }}
-
-          POLY_SIGNATURE_TYPE=${{ vars.POLY_SIGNATURE_TYPE || '3' }}
-          POLY_ENTRY_PRICES=${{ vars.POLY_ENTRY_PRICES || '0.01' }}
-          POLY_STAKE_USD=${{ vars.POLY_STAKE_USD || '0.06' }}
-          POLY_MAX_DAILY_USD=${{ vars.POLY_MAX_DAILY_USD || '0' }}
-          # These three MUST match the defaults in docker-compose.yml, and did not.
-          # This file wins: it writes .env, and `${VAR:-default}` in compose only
-          # applies when .env does not set VAR at all. So a compose default is dead
-          # text for every key listed here — MinVolumeUsd read 25000 in compose and
-          # would have run at 50000, and RestBothSides read true and would have run
-          # at false, which is the setting the operator reversed on 2026-10-13 after
-          # measuring it. Change both files together or do not change either.
-          POLY_MIN_VOLUME_USD=${{ vars.POLY_MIN_VOLUME_USD || '25000' }}
-          POLY_ARM_BELOW_ASK=${{ vars.POLY_ARM_BELOW_ASK || '0.07' }}
-          POLY_REST_BOTH_SIDES=${{ vars.POLY_REST_BOTH_SIDES || 'true' }}
-          POLY_EXCHANGE_ADDRESS=${{ vars.POLY_EXCHANGE_ADDRESS || '0xE111180000d2663C0091e4f400237545B87B996B' }}
-          POLY_NEGRISK_EXCHANGE_ADDRESS=${{ vars.POLY_NEGRISK_EXCHANGE_ADDRESS || '0xe2222d279d744050d28e00520010520000310F59' }}
-
-          IMAGE_REGISTRY=${{ env.REGISTRY_PATH }}
-          IMAGE_TAG=${{ github.sha }}
-          ENVEOF
-
+      # .env is NOT written here any more; it is hand-managed on the host.
+      #
+      # It used to be generated from repository secrets and vars on every deploy, which
+      # was safe while Polymarket was geo-blocked in the EC2 region and placed nothing:
+      # its POLY_* values were inert text. On the machine at home that service trades
+      # for real, so regenerating .env would silently overwrite measured, live tuning
+      # with whatever the repository variables happen to hold -- POLY_STAKE_USD 0.06
+      # against the 0.10 actually running, and so on. The host's copy is the source of
+      # truth now; add a new secret by editing it there.
+      #
+      # IMAGE_REGISTRY and IMAGE_TAG travelled in that generated file, so they are
+      # passed through the ssh environment instead. docker compose resolves variables
+      # from the shell environment before .env, so this keeps the prod overlay working
+      # without the workflow touching the file.
       - name: Pull and restart
         env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          IMAGE_REGISTRY: ${{ env.REGISTRY_PATH }}
+          IMAGE_TAG: ${{ github.sha }}
           GH_USER: ${{ github.actor }}
           # GITHUB_TOKEN, not a PAT. It is scoped to this repository, expires when the
           # job ends, and needs no manual setup — so there is no long-lived credential
@@ -250,7 +239,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ssh -i ~/.ssh/deploy.pem "$USER@$HOST" \
-            "GH_USER='$GH_USER' GH_TOKEN='$GH_TOKEN' bash -s" <<'REMOTE'
+            "GH_USER='$GH_USER' GH_TOKEN='$GH_TOKEN' \
+             IMAGE_REGISTRY='$IMAGE_REGISTRY' IMAGE_TAG='$IMAGE_TAG' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/cryptodecision
 
@@ -293,8 +283,10 @@ jobs:
             exit 1
           }
 
-          # --no-build makes a fallback to compiling on this host an error rather than a
-          # silent twenty-minute stall on two cores.
+          # --no-build keeps a fallback to compiling on the host an error. The host can
+          # now build fine, which is exactly why this stays: a silent local build would
+          # deploy whatever source happens to sit in ~/cryptodecision instead of the
+          # commit that was just pushed, and the two are not the same thing.
           $COMPOSE up -d --no-build --remove-orphans
 
           # Reclaim superseded images. Needs -a: without it prune only removes
@@ -322,10 +314,17 @@ jobs:
 
       - name: Verify the stack came up
         env:
-          HOST: ${{ secrets.EC2_HOST }}
-          USER: ${{ secrets.EC2_USER }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          # Needed here too, not just in the deploy step. Every $COMPOSE call below
+          # reads docker-compose.prod.yml, which declares ${IMAGE_REGISTRY:?...} -- so
+          # without it `config --services` aborts and the verify step fails a deploy
+          # that actually succeeded.
+          IMAGE_REGISTRY: ${{ env.REGISTRY_PATH }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          ssh -i ~/.ssh/deploy.pem "$USER@$HOST" 'bash -s' <<'REMOTE'
+          ssh -i ~/.ssh/deploy.pem "$USER@$HOST" \
+            "IMAGE_REGISTRY='$IMAGE_REGISTRY' IMAGE_TAG='$IMAGE_TAG' bash -s" <<'REMOTE'
           set -euo pipefail
           cd ~/cryptodecision
 
