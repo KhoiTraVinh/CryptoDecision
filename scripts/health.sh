@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command health check, meant to be run ON the EC2 host:
+# One-command health check, meant to be run ON the host that runs the stack:
 #
 #     bash ~/cryptodecision/scripts/health.sh
 #
