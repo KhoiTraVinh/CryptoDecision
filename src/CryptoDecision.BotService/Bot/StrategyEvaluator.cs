@@ -237,20 +237,4 @@ public sealed record ExitDecision(
     decimal  CurrentPrice,
     decimal  ChangePct,
     decimal? DynamicStopPrice   = null,
-    decimal? DynamicTargetPrice = null,
-
-    /// <summary>
-    /// Set when the LLM exit reviewer was consulted this cycle, whatever it answered.
-    /// The caller persists it to pace the next review; null means no review happened.
-    /// </summary>
-    DateTime? ExitReviewedAt = null,
-
-    /// <summary>
-    /// What the reviewer said, CUT or HOLD, carried alongside <see cref="ExitReviewedAt"/>.
-    ///
-    /// The reason used to be logged and dropped. Logs do not survive a deploy — the
-    /// container is recreated, not restarted — so the reasoning behind every LLM_EXIT
-    /// was being destroyed on the next redeploy, and H33 is judged on exactly that.
-    /// Persisted by the same UPDATE that writes the stamp, so it costs no extra write.
-    /// </summary>
-    string? ExitReviewNote = null);
+    decimal? DynamicTargetPrice = null);

@@ -1031,9 +1031,8 @@ public sealed class CrossVenueFlowStrategy(
 
     private static ExitDecision Exit(
         string reason, decimal price, decimal changePct,
-        decimal? dynamicStop = null, decimal? dynamicTarget = null,
-        DateTime? reviewedAt = null, string? reviewNote = null) =>
-        new(true, reason, price, changePct, dynamicStop, dynamicTarget, reviewedAt, reviewNote);
+        decimal? dynamicStop = null, decimal? dynamicTarget = null) =>
+        new(true, reason, price, changePct, dynamicStop, dynamicTarget);
 }
 
 /// <summary>

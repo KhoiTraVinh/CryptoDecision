@@ -251,7 +251,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         pnl_usd, pnl_pct, status, opened_at, closed_at, close_reason, peak_price,
         mode, exchange, entry_order_id, exit_order_id, fee_usd, exit_algo_id,
         leverage, margin_mode, stop_price, target_price, atr_pct_at_entry,
-        entry_path, last_exit_review_at
+        entry_path
         """;
 
     public async Task<IReadOnlyList<BotTrade>> GetOpenTradesAsync(CancellationToken ct = default)
@@ -295,43 +295,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// Null clears them, which is the correct state when the feature is off or the trade
     /// has no favourable excursion: "not applicable" rather than "unchanged".
     /// </summary>
-    /// <summary>
-    /// Stamp when the LLM was last asked whether to cut this position.
-    ///
-    /// Written even when the answer was HOLD, and even when the model could not answer at
-    /// all — the stamp paces the NEXT question, so a failed review must still consume its
-    /// slot. Without that, an Ollama outage would make the bot retry every 30 seconds and
-    /// spend the whole cycle budget on a service that is down.
-    /// </summary>
-    /// <summary>
-    /// Stamp the review time, and keep what the reviewer said.
-    ///
-    /// The note rides on the UPDATE that was already happening, so persisting the
-    /// reasoning costs no extra round trip. It used to live only in `docker logs`,
-    /// which a deploy destroys because the container is recreated rather than
-    /// restarted — see sql/047.
-    /// </summary>
-    public async Task StampExitReviewAsync(
-        long tradeId, DateTime reviewedAt, string? note = null, CancellationToken ct = default)
-    {
-        const string sql = """
-            UPDATE bot_trades
-               SET last_exit_review_at   = @at,
-                   -- COALESCE so a reviewer that answered with nothing cannot erase the
-                   -- previous answer. A review that could not answer at all does not
-                   -- reach here; it keeps its slot but leaves the note alone.
-                   last_exit_review_note = COALESCE(@note, last_exit_review_note)
-             WHERE id = @id
-            """;
-
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd  = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("at", reviewedAt);
-        cmd.Parameters.AddWithValue("note",
-            string.IsNullOrWhiteSpace(note) ? DBNull.Value : note);
-        cmd.Parameters.AddWithValue("id", tradeId);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
 
     public async Task UpdateDynamicLevelsAsync(
         long tradeId, decimal? stopPrice, decimal? targetPrice, CancellationToken ct = default)
@@ -458,7 +421,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
             TargetPrice      = Dec("target_price"),
             AtrPctAtEntry    = Dec("atr_pct_at_entry"),
             EntryPath        = Str("entry_path"),
-            LastExitReviewAt = Dt("last_exit_review_at"),
         };
     }
 }
