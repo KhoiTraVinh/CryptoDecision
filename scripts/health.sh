@@ -81,7 +81,7 @@ else
         esac
 
         if [ "$longrunning" -eq 0 ]; then
-            # db-check, db-migrate, kafka-init, ollama-init are SUPPOSED to be
+            # db-check, db-migrate and kafka-init are SUPPOSED to be
             # exited; kafka and postgres are supposed to be running. An
             # exclusion list that forgets one is how the deploy workflow
             # reported "0 unhealthy" while db-check was failing.

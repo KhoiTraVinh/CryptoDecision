@@ -339,7 +339,7 @@ jobs:
           # than a count of exited containers.
           #
           # Two earlier versions of this check were wrong in opposite directions. Naming
-          # the one-shots to exclude ('db-migrate|kafka-init|ollama-init') meant adding
+          # the one-shots to exclude ('db-migrate|kafka-init') meant adding
           # db-check failed a deploy where all 24 migrations applied and every container
           # was healthy. Counting non-zero exits instead picked up containers that had
           # crashed days earlier and were never cleaned up, so it would start failing on

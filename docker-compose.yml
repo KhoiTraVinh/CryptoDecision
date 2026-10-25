@@ -336,95 +336,6 @@ services:
       Okx__Leverage:                   "${OKX_LEVERAGE:-3}"
       Okx__MarginMode:                 "${OKX_MARGIN_MODE:-isolated}"
 
-      # The same tag the ollama-init pull uses. Stated here rather than
-      # left to the code default, which was qwen2.5:7b — and because the availability
-      # probe matches only the name before the colon, a 3b-only host would have looked
-      # healthy and then refused every entry on a chat call for a missing tag.
-      Agent__Model:                    "${OLLAMA_MODEL:-qwen2.5:3b}"
-
-      # ── H33: exit-review cadence 1h -> 30m ──────────────────────────────────
-      #
-      # The perfect-reviewer ceiling by cadence, already measured and recorded on
-      # FlowStrategyOptions.ExitReviewAfter: 120m +0.883R, 60m +2.052R, 30m +2.655R,
-      # against +3.682R for the paths as offered. This buys the 60m -> 30m step.
-      #
-      # H28 paced 60m against "42-43s per call inside a 120s cycle budget shared with
-      # the entry gate", and called the worst case tight. Both halves of that have
-      # changed and were re-measured on 2026-10-06 before this was set:
-      #   - the entry gate was DELETED by H30 on 09-29, so it no longer competes
-      #   - four LIVE calls took 22.5 / 21.5 / 25.7 / 20.7 s, not 42-43
-      #   - max concurrent open positions ever observed is 1, not 2
-      # Worst case now is 2 positions x 26s = 52s against the same 120s budget.
-      # Over 4 days of LIVE the two warning signs H28 named are both at zero:
-      # "not evaluated this cycle" 0, exit review Unavailable 0.
-      #
-      # Set on BOTH sections deliberately. Leaving one on the code default is how
-      # three parameters drifted before; CANDLE_REVERSAL is 13 of the 16 LIVE trades
-      # and is bound from DipStrategy, not FlowStrategy.
-      #
-      # ── H35: ExitReviewAfter 1h -> 30m, 2026-10-08 ──────────────────────────
-      #
-      # H33 moved the gap BETWEEN reviews and, measured over 20 hours and 10 trades,
-      # never once took effect: the longest hold since it went live was 61 minutes,
-      # every LLM_EXIT fired at minute 60 or 61, and no position ever reached a
-      # second review. ExitReviewEvery cannot bind when nothing survives review one.
-      # ExitReviewAfter was the binding parameter all along, so this is what H33
-      # needed in order to measure anything at all.
-      #
-      # The cost, measured before the change rather than discovered after: 5 of the
-      # 11 RATCHET winners were held past 30 minutes — 44, 46, 54, 56 and 64 min —
-      # and together they are +$0.6325, more than the account's entire $0.5197 loss.
-      # Those five now get looked at while they are still open, and the reviewer has
-      # cut on 9 of its 11 first looks.
-      #
-      # It does not follow that they would be cut. A trade on its way to a ratchet
-      # win is moving in its own favour at minute 30, and the reviewer's stated
-      # grounds have been "the 1-hour and 4-hour price moves both run against the
-      # position" — which is a different reading at minute 30 than at minute 60.
-      # That is the bet, stated plainly, not a prediction.
-      #
-      # Time-to-peak on record: min 0.2, Q1 18.6, MEDIAN 62.3, Q3 92.7, max 162.1 min.
-      # H28 chose 1h to put the first look at the median peak. 30 min puts it nearer
-      # Q1, i.e. deliberately before most positions have peaked.
-      #
-      # ── H39: ExitReviewAfter 30m -> 1h, 2026-10-13. Operator decision. ──────
-      #
-      # Reverts H35's half of the cadence. H33's ExitReviewEvery stays at 30m below.
-      #
-      # THE REASON IS THE ONE H35 WROTE DOWN AS ITS OWN RISK: a position on its way
-      # to a ratchet win is being looked at, and cut, before it gets there. The
-      # operator reads the ratchet as the thing that earns and the first look as the
-      # thing that interrupts it. H35 called that "the bet, stated plainly".
-      #
-      # THE BET IS 2 FOR 2 SO FAR, AGAINST. Since H35 shipped, exactly two RATCHET
-      # winners were held past minute 30 — #180 at 54 min (+$0.0830) and #198 at 62
-      # min (+$0.1121) — and the reviewer looked at both and held both. It has not
-      # yet taken a ratchet winner off the board.
-      #
-      # AND THE MEASUREMENT RUNS THE OTHER WAY, on 15 LLM_EXIT trades either side of
-      # H35, each compared with what signal_outcomes says the same signal did when
-      # carried to stop or target:
-      #
-      #   first review at 60m (before H35)   38 exits   -5.913R realised   -2.559R held   -3.355R
-      #   first review at 30m (after  H35)   15 exits   -2.638R realised   -6.316R held   +3.677R
-      #
-      # Not one of those 15 had armed the ratchet when it was cut: peak excursion ran
-      # 0.000R to 0.204R against a 0.25R arm. The reviewer is not taking ratchet
-      # winners, it is closing positions that never started, 9 of which were on their
-      # way to a full -1R.
-      #
-      # WHAT THE CHANGE BUYS, stated as the operator's case rather than mine: of the
-      # 11 cut at the first look, THREE went on to reach +1R — #192, #193 and #197,
-      # cut at -0.237R, +0.059R and +0.086R. That is +3R left on the table against
-      # the +1.404R the early cut saved on the other eight. Read trade by trade
-      # instead of in aggregate, the first look is 3-for-11 at killing a winner.
-      #
-      # Both sections, for H33's reason: CANDLE_REVERSAL binds from DipStrategy and
-      # is the majority of trades. Revert by putting 00:30:00 back on both lines, or
-      # set EXIT_REVIEW_AFTER in the host .env to override without a code change.
-      DipStrategy__ExitReviewAfter:    "${EXIT_REVIEW_AFTER:-01:00:00}"
-      FlowStrategy__ExitReviewAfter:   "${EXIT_REVIEW_AFTER:-01:00:00}"
-
       # ── H36: TargetRiskMultiple 2.0 -> 1.0, 2026-10-08 ──────────────────────
       #
       # The stop is a flat 2.00% in practice — 1.5 x ATR has never once beaten the
@@ -529,11 +440,17 @@ services:
       # HYPOTHESES.md as H43 and H44 so the week is judged on what was known, not on
       # what is remembered.
       #
-      # UseFlowOfiExit=false is how "remove LLM_EXIT" is spelled. The switch sits ABOVE
-      # the reviewer in ClassifyExit, so it removes the model review AND the OFI fallback
-      # in one move -- they are not independent, and dropping only the reviewer is not
-      # reachable from configuration. What is left closing a position is the stop, the
-      # target, and the 3h max hold. Nothing else.
+      # UseFlowOfiExit=false is what leaves a position with no early exit at all.
+      #
+      # It used to mean more than that. The switch sat ABOVE an exit reviewer in
+      # ClassifyExit, so turning it off removed the model review AND the OFI rule
+      # together -- they were not independent, and dropping only the reviewer was
+      # not reachable from configuration. The reviewer is gone from the code now
+      # (it closed 30 positions for -$3.74 as LLM_EXIT), so this switch means the
+      # plain thing again: true runs the OFI rule every cycle, false runs nothing.
+      #
+      # With it false, what closes a position is the stop, the target, and the 3h
+      # max hold. Nothing else.
       #
       # That is exactly the configuration H42 replayed at -1.33R, the best cell in its
       # grid, because that replay contained no early exit either. So this change moves
@@ -567,25 +484,6 @@ services:
       DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
       DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
       FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
-      #
-      # LIVE from 2026-10-06 16:30 UTC, by operator instruction.
-      #
-      # This was staged on the one-change-at-a-time rule in HYPOTHESES.md, with H34
-      # going first. The operator asked for 30 minutes, was told why it was being
-      # held, and asked again. That is their call, and it is recorded as an override
-      # on the H33 entry rather than quietly taken -- the same way H18 was.
-      #
-      # The cost is real and is named here so nobody has to rediscover it: H33 and
-      # H34 now overlap, so neither can be cleanly attributed from the 25-trade
-      # window alone. H34 acts on every winner that arms the ratchet; H33 acts only
-      # on positions held past an hour. The exit mix is what separates them -- a
-      # RATCHET close is H34's, an LLM_EXIT close is H33's -- so judge them on that
-      # split rather than on total R.
-      #
-      # ExitReviewAfter stays 1h: this changes the gap BETWEEN reviews, not when the
-      # first one happens.
-      DipStrategy__ExitReviewEvery:    "${EXIT_REVIEW_EVERY:-00:30:00}"
-      FlowStrategy__ExitReviewEvery:   "${EXIT_REVIEW_EVERY:-00:30:00}"
 
       # ── H34: ratchet giveback 40% -> 25% ────────────────────────────────────
       #
@@ -650,158 +548,9 @@ services:
       retries: 3
       start_period: 60s
 
-  # ── Ollama — local LLM runtime serving Qwen 2.5 7B ────────────────────────
-  #
-  # Resource note: qwen2.5:3b at Q4_K_M is ~1.9 GB on
-  # disk and wants roughly 6-8 GB of RAM resident while loaded. mem_limit is set
-  # above that with headroom for the KV cache; lowering it will get the model
-  # OOM-killed mid-generation rather than making it run leaner. If the host
-  # cannot spare that, lower OLLAMA_KEEP_ALIVE from -1 to 30m: the model unloads
-  # when idle and reloads on demand, costing ~13s on the first gate call after a gap.
-  #
-  # GPU: uncomment the deploy block below on a machine with an NVIDIA GPU and the
-  # container toolkit installed. On CPU a generation takes ~20-60s, which is fine
-  # against a gate that is called a handful of times a day.
-  ollama:
-    # PINNED. This was ollama/ollama:latest until 2026-09-06, and an unpinned tag on the
-    # one component whose speed decides whether the bot can trade at all is how a deploy
-    # that changed three C# files silently replaced the inference engine.
-    #
-    # What it cost: the container was recreated (a compose edit touching every service),
-    # `latest` resolved to a newer build, and gate calls went from answering in seconds
-    # to timing out at 60 s on every single one. Entries stopped. Nothing reported an
-    # error — ollama healthy, loop turning, health.sh printing "All checks passed" — and
-    # it took a day and the operator saying "the price is clearly moving, check again"
-    # to find it. The previous image had already been pruned by the same deploy, so
-    # rolling back was not possible: there was nothing to roll back to.
-    #
-    # Raise this deliberately, after measuring a gate call on the new build. Never let
-    # it float.
-    image: ollama/ollama:0.33.3
-    container_name: ollama
-    logging: *default-logging
-    ports:
-      - "11434:11434"
-    # 3500m, raised from 3g on 2026-09-05. The reasoning below still holds; the number
-    # did not. Measured on the running host, ollama sat at 2.97 GiB of its 3 GiB
-    # ceiling — 99% — and had crept there over a week (90.8% -> 92.5% -> 99.0%). It is
-    # not a leak: `ollama ps` shows qwen2.5:3b resident with UNTIL=Forever, so the
-    # weights are fixed and the drift is KV cache. But there was no headroom left, and
-    # an OOM kill here is the quiet kind of failure: the gate becomes unreachable,
-    # allow_entry_without_gate is false so the bot stops entering, and health.sh keeps
-    # reporting ollama "healthy" because the container is still up.
-    #
-    # The rest of the stack measures ~1.33 GB resident (bot 118M, ingestion 108M,
-    # processor 91M, postgres 627M, kafka 386M), not the "under 900 MB" this comment
-    # used to claim. 3.5 GB + 1.33 GB against 7.78 GB total still leaves ~2.9 GB.
-    #
-    # 6g, not 10g. Docker on this host has 8.3 GB total, so a 10 GB limit was not a
-    # limit at all — it exceeded the VM, so the kernel OOM killer decided the outcome
-    # instead of Docker, and what it reaches for is whatever is largest at the time.
-    # That is how Docker Desktop was killed here before.
-    # 3500m -> 4096m on 2026-10-06, because the old ceiling was reached and enforced:
-    #
-    #   Fri Sep 25 14:03:13  llama-server invoked oom-killer
-    #   oom-kill: constraint=CONSTRAINT_MEMCG
-    #   Killed process 4031001 (llama-server) anon-rss:3,557,844 kB
-    #
-    # 3,474 MB against a 3,500 MB limit. The cgroup killed the MODEL RUNNER, not the
-    # container: ollama itself survived, so RestartCount stayed 0, the healthcheck
-    # (`ollama list`) kept passing, and it has reported "Up 4 weeks (healthy)" ever
-    # since. The only visible symptom would have been one exit review answering
-    # nothing, which the bot handles by falling back to the OFI rule and logging
-    # ExitReview.Unavailable. Green stack, silent loss.
-    #
-    # Why a 1.9 GB model needed 3.5 GB: the rest is KV cache, and the exit-review
-    # brief grows with how long the position has been held — one line per 15m bucket
-    # since entry, capped at 96 by `needed` in ReviewExitAsync. So peak memory is a
-    # function of HOLD TIME, not of call rate.
-    #
-    # H33 interacts with this, and not in the obvious way. Doubling the cadence does
-    # not raise the peak — calls serialise at NUM_PARALLEL=1 — but a long-held
-    # position is now reviewed at 60/90/120/150 min instead of 60/120/180, so there
-    # are more attempts at the largest briefs. More rolls, same dice.
-    #
-    # Budget: host is 7779 MB; limits were 5804 MB, leaving 1975 MB unallocated. At
-    # 4096 the allocation is 6400 MB with 1379 MB spare, and 622 MB (18%) of headroom
-    # over the observed kill. Limits are caps rather than reservations — postgres sits
-    # at 525 of 1024, kafka at 359 of 512 — so this costs nothing until it is used.
-    #
-    # The bounded fix is a context cap rather than more RAM, but num_ctx changes what
-    # the model is shown, and that is a behaviour change while H33 is open.
-    mem_limit: 4096m
-    environment:
-      # Keep the model resident between gate calls. The default 5m would
-      # unload it between runs and pay the multi-second load cost every time.
-      # Never unload. With ~4 gate calls a day, a 30-minute keep-alive meant almost
-      # every call paid the cold load — 15-18s on 2 Graviton cores, against a 90s
-      # cycle deadline. Holding 1.9 GB resident is the cheaper trade on an 8 GB box.
-      OLLAMA_KEEP_ALIVE:        "-1"
-      # Match the physical core count. Left unset, Ollama sizes its thread pool from
-      # nproc and oversubscribes a 2-core instance.
-      OLLAMA_NUM_THREAD:        "2"
-      # One model, one request at a time — bounds peak memory predictably.
-      OLLAMA_MAX_LOADED_MODELS: "1"
-      OLLAMA_NUM_PARALLEL:      "1"
-    volumes:
-      - ollama_models:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      # `ollama list` talks to the local API, so it proves the server is serving.
-      # The image has no wget/curl, so an HTTP probe is not available here.
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-
-  # ── One-shot model pull ───────────────────────────────────────────────────
-  # Pulls the configured model into the shared volume on first boot and exits.
-  #
-  # The tag comes from .env so this pull and the bot's entry gate
-  # cannot disagree about it. They could before: the bot defaulted to qwen2.5:7b in
-  # code with no env override, while OllamaAgentClient.IsAvailableAsync matches on the
-  # name before the colon — so on a host with only 3b pulled it would report the model
-  # available and then fail the actual chat call on a tag that does not exist. That
-  # surfaces as the gate refusing every entry, with a log line about JSON parsing.
-  # Nothing blocks on it: the gate refuses entries while the model is absent,
-  # while the pull runs and picks the LLM up automatically once it lands.
-  ollama-init:
-    # PINNED. This was ollama/ollama:latest until 2026-09-06, and an unpinned tag on the
-    # one component whose speed decides whether the bot can trade at all is how a deploy
-    # that changed three C# files silently replaced the inference engine.
-    #
-    # What it cost: the container was recreated (a compose edit touching every service),
-    # `latest` resolved to a newer build, and gate calls went from answering in seconds
-    # to timing out at 60 s on every single one. Entries stopped. Nothing reported an
-    # error — ollama healthy, loop turning, health.sh printing "All checks passed" — and
-    # it took a day and the operator saying "the price is clearly moving, check again"
-    # to find it. The previous image had already been pruned by the same deploy, so
-    # rolling back was not possible: there was nothing to roll back to.
-    #
-    # Raise this deliberately, after measuring a gate call on the new build. Never let
-    # it float.
-    image: ollama/ollama:0.33.3
-    container_name: ollama-init
-    logging: *default-logging
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      OLLAMA_HOST: "http://ollama:11434"
-    entrypoint: ["/bin/sh", "-c"]
-    # Single-element list so Compose does not word-split the script — same
-    # reasoning as kafka-init above.
-    command:
-      - >-
-        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
-    volumes:
-      - ollama_models:/root/.ollama
-    restart: "no"
-
   # ── Polymarket esports entry bot ────────────────────────────────────────────
   #
-  # Independent of everything above it: no Postgres, no Kafka, no Ollama. It talks
+  # Independent of everything above it: no Postgres, no Kafka. It talks
   # only outbound to Gamma, the CLOB and the Data API, and keeps its state on the
   # exchange rather than on disk, so it can be started and stopped on its own.
   #
@@ -881,6 +630,3 @@ services:
 volumes:
   kafka_data:
   postgres_data:
-  # Holds the downloaded Qwen 2.5 weights (~4.7 GB). Persisting this across
-  # `docker compose down` is what keeps the re-pull from happening every restart.
-  ollama_models:

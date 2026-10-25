@@ -1,5 +1,4 @@
 using CryptoDecision.Shared.Bot;
-using CryptoDecision.BotService.Agent;
 using CryptoDecision.BotService.Bot;
 using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Health;
@@ -94,14 +93,8 @@ builder.Services.AddSingleton<ITradingStrategy>(sp =>
     return new CrossVenueFlowStrategy(
         sp.GetRequiredService<IFlowBarRepository>(),
         options,
-        sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>(),
-        sp.GetRequiredService<IExitReviewer>());
+        sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>());
 });
-
-// The exit reviewer owns the Ollama client, the model and the timeout now that the entry
-// gate is gone. One model is loaded on this host (OLLAMA_MAX_LOADED_MODELS=1) and calls serialise
-// (NUM_PARALLEL=1), so a second model here would not be servable even if it were wanted.
-builder.Services.AddSingleton<IExitReviewer, AiExitReviewer>();
 
 // ─── Trading Bot ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<BotStateService>();
@@ -161,36 +154,26 @@ builder.Services.AddSingleton<IPriceFeed>(sp => sp.GetRequiredService<BinancePri
 builder.Services.AddSingleton<IPriceFeed>(sp => sp.GetRequiredService<OkxPriceFeed>());
 builder.Services.AddSingleton<PriceFeedResolver>();
 
-// ─── Ollama, for the entry gate only ──────────────────────────────────────────
+// ─── No language model runs here ──────────────────────────────────────────────
 //
-// The tool-calling agent that used to live here is gone. It handed the model
-// get_market_snapshot / get_open_positions / get_account_state / open_position /
-// close_position and let it decide entries when bot_config.use_ai_agent was set.
-// That flag was false throughout, XVENUE_FLOW owns the entry decision, and 853
-// lines of tool plumbing nothing reached is 853 lines that can still break a
-// build and still has to be read before every change.
+// Two things used to live at this point and both are gone, each removed after
+// being measured rather than on taste:
 //
-// What remains is one call with no tools array: AiExitReviewer hands the model a
-// finished proposal and takes APPROVE or SKIP. Giving it tools would give it a
-// way to act, which is the property being deliberately withheld.
-var agentOptions = new AgentOptions
-{
-    Model          = builder.Configuration["Agent:Model"]   ?? new AgentOptions().Model,
-    BaseUrl        = builder.Configuration["Agent:BaseUrl"] ?? new AgentOptions().BaseUrl,
-    Temperature    = double.TryParse(builder.Configuration["Agent:Temperature"], out var tp) ? tp : 0.1,
-    TimeoutSeconds = int.TryParse(builder.Configuration["Agent:TimeoutSeconds"], out var ts) ? ts : 60,
-};
-builder.Services.AddSingleton(agentOptions);
-
-builder.Services.AddHttpClient("ollama", c =>
-{
-    c.BaseAddress = new Uri(agentOptions.BaseUrl);
-    c.Timeout = TimeSpan.FromSeconds(agentOptions.TimeoutSeconds);
-});
-
-builder.Services.AddSingleton<OllamaAgentClient>();
-
-
+//   * A tool-calling agent that decided entries when bot_config.use_ai_agent was
+//     set. That flag was false throughout and XVENUE_FLOW owns the entry.
+//   * AiExitReviewer, which handed the model a finished position and took CUT or
+//     HOLD. It produced close_reason LLM_EXIT: 30 closes for -$3.74, the worst
+//     line in the book. H44 switched it off on 2026-10-16 and it placed nothing
+//     after that; this removes the code behind the switch.
+//
+// The entry gate before them scored the same way. Of 320 signals it refused 138,
+// and those refusals averaged +0.065R against +(-0.051)R for the ones it let
+// through -- it was rejecting the better half.
+//
+// What is left is arithmetic: ATR sets the stop, a multiple of the stop sets the
+// target, and a measured threshold decides the entry. If a model is ever wanted
+// again, the place for it is a shadow column in signal_outcomes that records a
+// verdict without acting on it, scored later the way the gate was.
 // ─── Health Checks ─────────────────────────────────────────────────────────────
 // Two checks, because "can this process reach the database" and "is this process
 // trading" are different questions and only the first was ever asked. See

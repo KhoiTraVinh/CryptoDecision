@@ -1,4 +1,3 @@
-using CryptoDecision.BotService.Agent;
 using CryptoDecision.BotService.Bot;
 using CryptoDecision.BotService.Infrastructure;
 using CryptoDecision.Shared.Bot;
@@ -54,11 +53,7 @@ namespace CryptoDecision.BotService.Strategies;
 public sealed class CrossVenueFlowStrategy(
     IFlowBarRepository              flowRepo,
     FlowStrategyOptions             tuning,
-    ILogger<CrossVenueFlowStrategy> log,
-    // Nullable so the strategy still runs with no model wired in: a null reviewer means
-    // the early exit is simply off, rather than a startup failure in a class whose other
-    // job -- placing stops -- has nothing to do with Ollama.
-    IExitReviewer?                  reviewer = null) : ITradingStrategy
+    ILogger<CrossVenueFlowStrategy> log) : ITradingStrategy
 {
     /// <summary>The name this class registered under when only one instance existed.</summary>
     public const string StrategyName = "XVENUE_FLOW";
@@ -145,37 +140,14 @@ public sealed class CrossVenueFlowStrategy(
         (!tuning.UseFlowOfiExit
             ? "EARLY EXIT OFF: only the stop, the target and the max-hold cap close a " +
               "position. "
-            : reviewer is null
-                // NOT "the OFI rule, every cycle", which is what this said until
-                // 2026-10-16 and was never true. ClassifyExit returns at
-                // `reviewer is null` BEFORE the OFI rule is reached, so a null reviewer
-                // removes the early exit entirely rather than falling back to anything.
-                // The OFI rule is reachable only as the answer to a review that was DUE
-                // and could not be answered.
-                ? "EARLY EXIT: NONE. No exit reviewer is wired into this instance, and the " +
-                  $"{tuning.FlowOfiBars}-bucket OFI rule is NOT a substitute — it runs only " +
-                  "when a review was due and the model could not answer, so with no reviewer " +
-                  "it never runs. Only the stop, the target and the max-hold cap close a " +
-                  "position. "
-                : $"EARLY EXIT: after {Cadence(tuning.ExitReviewAfter)} and then every " +
-                  $"{Cadence(tuning.ExitReviewEvery)}, the MODEL is asked whether force " +
-                  $"remains or the trend has turned; the {tuning.FlowOfiBars}-bucket OFI rule " +
-                  "runs ONLY as the fallback when it cannot answer. ");
-
-    /// <summary>
-    /// Render a review interval without rounding it away.
-    ///
-    /// This was `TotalHours:F0` with a literal "h". H33 set the interval to 30
-    /// minutes on 2026-10-06 and the startup banner began reading "every 0h" — on
-    /// the one line the operator had been told to check the cadence against. The
-    /// value was right and the sentence describing it was not, which is the failure
-    /// this codebase keeps paying for.
-    /// </summary>
-    private static string Cadence(TimeSpan t) =>
-        t.TotalHours >= 1 && t.Minutes == 0
-            ? $"{t.TotalHours:F0}h"
-            : $"{t.TotalMinutes:F0}min";
-
+            // Now says "every cycle" and means it. Between 2026-10-06 and this change
+            // the OFI rule sat UNDER the model: ClassifyExit returned early unless a
+            // review was due, so the rule only ever ran as the answer to a question the
+            // model could not answer. With the model gone the rule is the rule again,
+            // which is what it was when it measured +4.647R over 30 exits.
+            : $"EARLY EXIT: the {tuning.FlowOfiBars}-bucket OFI rule, every cycle. It " +
+              "closes when aggregate buy/sell imbalance over those buckets turns against " +
+              "the position. No model is consulted; there is none. ");
     /// <summary>
     /// The ratchet, said at startup alongside the reviewer.
     ///
@@ -826,65 +798,23 @@ public sealed class CrossVenueFlowStrategy(
         if (!tuning.UseFlowOfiExit)
             return new ExitDecision(false, null, currentPrice, changePct, dynamicStop, dynamicTarget);
 
-        // ── Who decides the early exit, and when ──────────────────────────────
+        // ── The OFI rule, run directly ────────────────────────────────────────
         //
-        // The model does, and the deterministic rule is what answers when the model
-        // cannot. That ordering is the whole change: if the 15-bucket rule kept running
-        // every cycle it would close positions long before the review was ever due — the
-        // mean hold to an OFI exit was 3.83h against a 2h first review — and the model
-        // would effectively never be asked.
+        // This used to sit behind an exit reviewer: the method returned early unless a
+        // review was DUE, the model was asked CUT or HOLD, and this rule ran only when
+        // the model could not answer. The model is gone -- it closed 30 positions for
+        // -$3.74 as LLM_EXIT, the worst line in the book, and H44 switched it off on
+        // 2026-10-16 -- so the rule it was placed in front of is the rule again.
         //
-        // The pacing is not a preference. One call costs a measured 42-43s on a 2-vCPU
-        // host where Ollama runs NUM_PARALLEL=1, and the cycle budget is 120s shared with
-        // every other open position and the entry gate. Reviewing two positions every
-        // 30-second cycle would exceed it and the loop would log "Open positions were not
-        // evaluated this cycle".
-        var held = DateTime.UtcNow - trade.OpenedAt;
-
-        if (reviewer is null || held < tuning.ExitReviewAfter)
-            return new ExitDecision(false, null, currentPrice, changePct, dynamicStop, dynamicTarget);
-
-        var sinceReview = trade.LastExitReviewAt is { } last
-            ? DateTime.UtcNow - last
-            : TimeSpan.MaxValue;
-
-        if (sinceReview < tuning.ExitReviewEvery)
-            return new ExitDecision(false, null, currentPrice, changePct, dynamicStop, dynamicTarget);
-
-        var review = await ReviewExitAsync(trade, currentPrice, changePct, opts, ct);
-
-        // Stamped whatever the answer was, including "could not answer". The stamp paces
-        // the NEXT question, so a failed review must still consume its slot — otherwise an
-        // Ollama outage turns into a retry every 30 seconds against a service that is down.
-        var reviewedAt = DateTime.UtcNow;
-
-        // The reason travels with the stamp from here on. It used to be logged and
-        // dropped, and `docker logs` does not survive a deploy — the container is
-        // recreated, not restarted — so a redeploy destroyed the reasoning behind every
-        // LLM_EXIT that preceded it. Trade 164, the worst LIVE trade so far, was cut at
-        // its first review and why is no longer recoverable. H33 is judged on this.
-        if (review is { Unavailable: false, Cut: true })
-            return Exit("LLM_EXIT", currentPrice, changePct, dynamicStop, dynamicTarget,
-                        reviewedAt, review.Reason);
-
-        // A HOLD is kept too. The sequence of HOLDs before a CUT is what shows whether
-        // an extra look changed anything, which is the whole question H33 asks.
-        if (review is { Unavailable: false })
-            return new ExitDecision(
-                false, null, currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt,
-                review.Reason);
-
-        // ── Fallback: the rule that was already earning ───────────────────────
+        // That ordering was deliberate when it was built: the comment above records that
+        // the OFI rule, left running every cycle, closed positions long before a review
+        // was ever due (3.83h mean hold to an OFI exit against a 2h first review), so the
+        // model would effectively never have been asked. With nothing to defer to, the
+        // pacing has nothing to protect and the rule runs on its own cadence again.
         //
-        // Reached only when the review was due and the model could not answer. An exit has
-        // no safe default the way the entry gate does — silence there costs an opportunity,
-        // silence here costs either a position or a round trip — so rather than guess, this
-        // runs the 15-bucket rule that produced +4.647R over 30 exits.
-        log.LogWarning(
-            "[XFlow] Trade {Id}: exit review unavailable ({Why}). Falling back to the " +
-            "{Bars}-bucket OFI rule for this review.",
-            trade.Id, review.Reason, tuning.FlowOfiBars);
-
+        // Reachable only when UseFlowOfiExit is true, which it is NOT in the live
+        // configuration (H44 set it false on both sections). Nothing here changes what
+        // the bot does today; it changes what turning that switch back on would mean.
         var reversal = await OfiTurnedAgainstAsync(trade, ct);
 
         if (reversal is not null)
@@ -893,82 +823,10 @@ public sealed class CrossVenueFlowStrategy(
                 "[XFlow] Trade {Id} {Side} closing on OFI reversal at {Change:P2}: {Why}",
                 trade.Id, trade.Side, changePct, reversal);
 
-            return Exit("OFI_REVERSAL", currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt);
+            return Exit("OFI_REVERSAL", currentPrice, changePct, dynamicStop, dynamicTarget);
         }
 
-        return new ExitDecision(
-            false, null, currentPrice, changePct, dynamicStop, dynamicTarget, reviewedAt);
-    }
-
-    /// <summary>
-    /// Assemble the evidence an exit decision needs and put it to the model.
-    ///
-    /// Reads the closed buckets from the position's own open time, so the sequence the
-    /// model sees is the position's own history rather than a fixed trailing window. The
-    /// live bucket is dropped by <see cref="CrossVenueFlowScorer.OfiByClosedBucket"/> for
-    /// the reason given there: the aggregation worker rewrites it every two minutes.
-    /// </summary>
-    private async Task<ExitReview> ReviewExitAsync(
-        BotTrade trade, decimal currentPrice, decimal changePct, BotOptions opts,
-        CancellationToken ct)
-    {
-        try
-        {
-            var elapsed = DateTime.UtcNow - trade.OpenedAt;
-            var since   = (int)Math.Ceiling(Math.Max(0, elapsed.TotalMinutes) / 15.0);
-            var needed  = Math.Min(since + 2, 96);
-
-            var set = await flowRepo.GetRecentAsync(trade.Symbol, needed, ct);
-            if (set.VenueCount == 0)
-                return ExitReview.NotReviewed("no flow buckets to show the model");
-
-            var age = set.Age(DateTime.UtcNow);
-            if (age > tuning.MaxBarAge)
-                return ExitReview.NotReviewed(
-                    $"newest bucket is {age.TotalMinutes:F0} min old, past the " +
-                    $"{tuning.MaxBarAge.TotalMinutes:F0} min limit");
-
-            var closed = CrossVenueFlowScorer
-                .OfiByClosedBucket(set.ByVenue, DateTime.UtcNow, needed)
-                .Where(b => b.Bucket.AddMinutes(15) > trade.OpenedAt)
-                .ToList();
-
-            if (closed.Count == 0)
-                return ExitReview.NotReviewed("no bucket has closed since this position opened");
-
-            var candles = await flowRepo.GetRecentCandlesAsync(trade.Symbol, 300, ct);
-
-            var stopDist = trade.StopPrice is { } sp && trade.EntryPrice > 0m
-                ? Math.Abs(trade.EntryPrice - sp) / trade.EntryPrice
-                : 0m;
-
-            var candidate = new ExitCandidate(
-                TradeId:      trade.Id,
-                Symbol:       trade.Symbol,
-                Side:         trade.Side,
-                Strategy:     trade.Strategy,
-                EntryPrice:   trade.EntryPrice,
-                CurrentPrice: currentPrice,
-                ChangePct:    changePct,
-                UnrealisedR:  stopDist > 0m ? changePct / stopDist : 0m,
-                HeldHours:    elapsed.TotalHours,
-                MaxHoldHours: opts.MaxHoldMinutes / 60.0,
-                StopPrice:    trade.StopPrice   ?? 0m,
-                TargetPrice:  trade.TargetPrice ?? 0m,
-                Move1hPct:    MovePct(candles, 60),
-                Move4hPct:    MovePct(candles, 240),
-                Buckets:      closed);
-
-            return await reviewer!.ReviewAsync(candidate, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Never closes a position. Assembling the evidence failing is the same class of
-            // event as the model being down, and resolves the same way: the caller runs the
-            // deterministic rule.
-            log.LogError(ex, "[XFlow] Could not assemble the exit brief for trade {Id}.", trade.Id);
-            return ExitReview.NotReviewed($"could not assemble the brief: {ex.Message}");
-        }
+        return new ExitDecision(false, null, currentPrice, changePct, dynamicStop, dynamicTarget);
     }
 
     /// <summary>
@@ -1321,86 +1179,6 @@ public sealed class FlowStrategyOptions
     /// by H15; both entries carry the numbers and the decision rules.
     /// </summary>
     public int FlowOfiBars { get; set; } = 10;
-
-    /// <summary>
-    /// How long a position is left alone before the model is first asked whether to cut it.
-    ///
-    /// **DEPLOYED VALUE IS ONE HOUR AND MATCHES THIS DEFAULT, since H39 on 2026-10-13.**
-    /// It was 30 minutes between H35 (2026-10-08) and H39, set via
-    /// `DipStrategy__ExitReviewAfter` / `FlowStrategy__ExitReviewAfter` in docker-compose,
-    /// where both lines still carry the value explicitly. H39 is an operator decision
-    /// taken against the measurement: over the 15 LLM_EXIT trades under the 30-minute
-    /// cadence the early look added +3.677R against carrying the same signals to stop or
-    /// target, where the 60-minute cadence before it had cost −3.355R over 38. Its case is
-    /// that 3 of the 11 positions cut at the first look went on to reach +1R.
-    ///
-    /// H35 exists because H33 could not measure anything without it. H33 moved
-    /// <see cref="ExitReviewEvery"/>, the gap between review one and review two, and
-    /// over 20 hours and 10 trades no position ever reached a second review: the
-    /// longest hold was 61 minutes and every LLM_EXIT fired at minute 60 or 61. THIS
-    /// parameter was the binding one the whole time. It was called "the companion
-    /// knob" when H33 shipped, and that was wrong.
-    ///
-    /// **One hour since 2026-09-24 (H28). It was two, and that was the expensive number.**
-    ///
-    /// Time from entry to the position's own best price, measured from OKX ticks over the
-    /// 15 closed trades with geometry:
-    ///
-    ///     min 0.2   Q1 18.6   MEDIAN 62.3   Q3 92.7   max 162.1   minutes
-    ///     12 of 15 peaked before minute 120
-    ///
-    /// The first look was landing at minute 120 on a distribution whose median is 62. Four
-    /// fifths of the time the model was being shown the aftermath. Moving the FIRST review
-    /// is most of this change: it puts the opening question at the median peak instead of
-    /// an hour past it.
-    ///
-    /// What a cadence can recover, assuming a PERFECT reviewer that always cuts at the best
-    /// checkpoint it is ever shown:
-    ///
-    ///     every 120 min   +0.883 R        every 60 min   +2.052 R
-    ///     every  30 min   +2.655 R        the paths offered  +3.682 R
-    ///
-    /// Below this the position is managed by its stop, its target, the ratchet and the
-    /// max-hold cap. The old note here said 2h deliberately let a position live through the
-    /// window where the OFI rule did its cutting; that reasoning predates the ratchet, which
-    /// now covers that window every cycle and for free.
-    /// </summary>
-    public TimeSpan ExitReviewAfter { get; set; } = TimeSpan.FromHours(1);
-
-    /// <summary>
-    /// Minimum gap between two reviews of the same position.
-    ///
-    /// **DEPLOYED VALUE IS 30 MINUTES, NOT THIS DEFAULT.** H33, 2026-10-06, set via
-    /// `DipStrategy__ExitReviewEvery` / `FlowStrategy__ExitReviewEvery`.
-    ///
-    /// Two things on the record about it. The throughput arithmetic below is stale in
-    /// the bot's favour: re-measured 2026-10-06, a call takes 20.7-25.7s rather than
-    /// 42-43, the entry gate it shared the budget with was deleted by H30, and the
-    /// most positions ever open at once is 1 — worst case 52s against the same 120s.
-    ///
-    /// And it has still never taken effect. A gap between reviews cannot bind while
-    /// nothing survives review one; see <see cref="ExitReviewAfter"/>, which H35 moved
-    /// to 30 minutes on 2026-10-08 so that this one finally gets a chance to.
-    ///
-    /// **Also one hour since 2026-09-24 (H28), and this half is the one that costs.**
-    ///
-    /// A call is 42-43s measured, on 2 vCPU with Ollama at NUM_PARALLEL=1, inside a 120s
-    /// cycle budget shared with the entry gate. At two hours this was ~2 calls per trade.
-    /// At one hour it is ~4, and the worst case moves from comfortable to tight: two open
-    /// positions falling due in the same cycle plus one gate call is roughly 135s against a
-    /// 120s budget, and the loop logs "Open positions were not evaluated this cycle".
-    ///
-    /// That is the risk being accepted, not one being denied. It is bounded rather than
-    /// unbounded -- max_open_trades_per_strategy is 2 and reviews are paced per position by
-    /// last_exit_review_at, so a cycle can owe at most a few calls, never sixteen. The
-    /// 15-minute bucket grid, which would cost ~16 calls per trade, remains out of reach.
-    ///
-    /// **Watch for this, first, in the window**: reviews returning Unavailable more often,
-    /// and any "not evaluated this cycle" line at all. Either means the cadence bought
-    /// Ollama's queue rather than the model's judgement, and one hour was too fast for this
-    /// host. See AiExitReviewer for the arithmetic it was originally paced against.
-    /// </summary>
-    public TimeSpan ExitReviewEvery { get; set; } = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Close a position that has given back too much of its own best excursion.
