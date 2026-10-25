@@ -111,7 +111,7 @@ public sealed class OkxOrderEngine(
 
     public async Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
-        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        decimal positionPct, CancellationToken ct,
         StopGeometry? geometry = null,
         string? entryPath = null)
     {
@@ -146,7 +146,7 @@ public sealed class OkxOrderEngine(
 
         var sized = await EntrySizing.ResolveAsync(
             featureRepo, symbol, capitalUsd, positionPct, sizingOpts.RiskPctPerTrade,
-            okxOptions.MaxOrderNotionalUsd, geometry, confidence, useAiSizing, ct);
+            okxOptions.MaxOrderNotionalUsd, geometry, ct);
 
         var size     = sized.Size;
         var notional = sized.NotionalUsd;
@@ -166,12 +166,6 @@ public sealed class OkxOrderEngine(
                 "(from {Pct:P0} of {Capital})",
                 sized.VolatilityPct, size.VolatilityScalar, sized.AskedNotionalUsd,
                 positionPct, capitalUsd);
-
-        if (useAiSizing && size.ConfidenceScalar != 1.0m)
-            log.LogInformation(
-                "[OKX] AI-sized: confidence={Conf:P0} scalar={Scalar:F2} adjustedPct={Pct:P1}",
-                confidence, size.ConfidenceScalar, size.AdjustedPct);
-
         if (sized.CapBound)
         {
             // Restate the risk AFTER the cap. The risk-based sizing above already

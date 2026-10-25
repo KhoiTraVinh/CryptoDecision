@@ -1150,16 +1150,14 @@ public sealed class TradingBotService(
                             }
                         }
 
-                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol} confidence={Conf:P0}{Rationale}",
+                        log.LogInformation("[TradingBot] Opening {Strat} ({Side}) position {Num}/{Max} for {Symbol}{Rationale}",
                             strat, decision.Side, stratTrades.Count + 1, opts.MaxOpenTradesPerStrategy, opts.Symbol,
-                            decision.Confidence,
                             decision.Rationale != null ? $" [{decision.Rationale}]" : "");
 
                         try
                         {
                             var trade = await orderEngine.OpenPositionAsync(
                                 opts.Symbol, strat, decision.Side, currentPrice.Value, opts.CapitalUsd, opts.PositionPctOfCapital, ct,
-                                decision.Confidence, opts.UseAiSizing,
                                 // Passed into the engine, not attached afterwards: the
                                 // exchange-side OCO is armed inside OpenPositionAsync
                                 // and it is the stop that survives this process dying.
@@ -1200,7 +1198,7 @@ public sealed class TradingBotService(
                             // does not survive the container.
                             await SafeRecordAsync(
                                 repo.RecordEntryEvidenceAsync(
-                                    trade.Id, decision.Composite, decision.Confidence,
+                                    trade.Id, decision.Composite,
                                     decision.Rationale, ct),
                                 "entry evidence");
 
@@ -1341,8 +1339,7 @@ public sealed class TradingBotService(
                 SignalAt:    now,
                 Flow:        flow,
                 Geometry:    geometry,
-                SignalPrice: price,
-                Confidence:  decision.Confidence));
+                SignalPrice: price));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

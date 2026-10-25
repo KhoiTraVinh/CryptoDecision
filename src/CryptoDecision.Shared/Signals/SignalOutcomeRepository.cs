@@ -12,8 +12,7 @@ public sealed record SignalRecord(
     DateTime     SignalAt,
     FlowVerdict  Flow,
     StopGeometry Geometry,
-    decimal      SignalPrice,
-    decimal      Confidence);
+    decimal      SignalPrice);
 
 /// <summary>How much of the table is labelled, and over what span.</summary>
 public sealed record OutcomeCoverage(int Decided, int Pending, DateTime? First, DateTime? Last)
@@ -70,12 +69,12 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
                 symbol, side, strategy, bucket_start, signal_at,
                 aggregate_z, aggregate_ofi, agreeing_venues, participating_venues,
                 excluded_venues, dispersion_bps, atr_pct, signal_price,
-                stop_pct, target_pct, reward_risk, confidence, venue_votes, trigger_value)
+                stop_pct, target_pct, reward_risk, venue_votes, trigger_value)
             VALUES (
                 @symbol, @side, @strategy, @bucket, @signalAt,
                 @z, @ofi, @agree, @part,
                 @excluded, @disp, @atr, @price,
-                @stopPct, @targetPct, @rr, @conf, @votes, @trigger)
+                @stopPct, @targetPct, @rr, @votes, @trigger)
             ON CONFLICT (symbol, side, bucket_start, strategy) DO NOTHING
             RETURNING id
             """;
@@ -112,7 +111,6 @@ public sealed class SignalOutcomeRepository(NpgsqlDataSource dataSource)
             cmd.Parameters.AddWithValue("stopPct",  geo.StopPct);
             cmd.Parameters.AddWithValue("targetPct", geo.TargetPct);
             cmd.Parameters.AddWithValue("rr",       geo.RewardRisk);
-            cmd.Parameters.AddWithValue("conf",     r.Confidence);
             // How hard the rule fired, in its own units -- see sql/039 and
             // FlowVerdict.TriggerValue. 0 is written as NULL: no surviving rule can fire
             // at zero strength, so a 0 here means "not recorded" and must not be ranked

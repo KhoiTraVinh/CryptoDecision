@@ -270,7 +270,6 @@ public sealed class DatabaseInitializer(
                 -- entry_composite is numeric so "were these taken near the
                 -- threshold?" is a SQL question rather than a text search.
                 ADD COLUMN IF NOT EXISTS entry_composite  NUMERIC(8, 3),
-                ADD COLUMN IF NOT EXISTS entry_confidence NUMERIC(6, 4),
                 ADD COLUMN IF NOT EXISTS entry_rationale  TEXT,
                 -- Which entry rule opened the position: RATIO or HIGH_VOLUME. A
                 -- column and not a substring of entry_rationale, because the code

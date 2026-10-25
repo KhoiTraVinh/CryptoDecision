@@ -24,7 +24,7 @@ public interface IOrderEngine
     /// out of step, it is the strategy being silently overridden by whatever
     /// bot_config happens to say.
     /// </param>
-    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false, StopGeometry? geometry = null, string? entryPath = null);
+    Task<BotTrade> OpenPositionAsync(string symbol, string strategy, string side, decimal price, decimal capitalUsd, decimal positionPct, CancellationToken ct, StopGeometry? geometry = null, string? entryPath = null);
     Task<BotTrade> CloseTradeAsync(BotTrade trade, decimal exitPrice, string reason, CancellationToken ct);
 
     /// <summary>
@@ -189,7 +189,7 @@ public sealed class PaperOrderEngine(
 
     public async Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
-        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        decimal positionPct, CancellationToken ct,
         StopGeometry? geometry = null,
         string? entryPath = null)
     {
@@ -205,7 +205,7 @@ public sealed class PaperOrderEngine(
         // simulation, since the cap only ever shrinks the order.
         var sized = await EntrySizing.ResolveAsync(
             featureRepo, symbol, capitalUsd, positionPct, state.Options.RiskPctPerTrade,
-            okxOptions.MaxOrderNotionalUsd, geometry, confidence, useAiSizing, ct);
+            okxOptions.MaxOrderNotionalUsd, geometry, ct);
 
         var size     = sized.Size;
         var notional = sized.NotionalUsd;
@@ -228,12 +228,6 @@ public sealed class PaperOrderEngine(
         // and carries the fee separately; the two modes now agree.
         var filledNotional = Math.Round(qty * price, 4);
         var entryFee       = Math.Round(filledNotional * EntryFeeRate, 8);
-
-        if (useAiSizing && size.ConfidenceScalar != 1.0m)
-            log.LogInformation(
-                "[PaperBot] AI-sized: confidence={Conf:P0} scalar={Scalar:F2} adjustedPct={Pct:P1}",
-                confidence, size.ConfidenceScalar, size.AdjustedPct);
-
         // Risk-based sizing reports a scalar of 1.0 — the volatility adjustment lives
         // in the stop distance there, not in a haircut on the notional — so this only
         // ever fires on the fallback path, which is where it is meaningful.

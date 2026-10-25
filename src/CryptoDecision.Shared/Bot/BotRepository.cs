@@ -18,13 +18,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     /// failing it must never cost a position: the caller swallows the error.
     /// </summary>
     public async Task RecordEntryEvidenceAsync(
-        long tradeId, decimal? composite, decimal confidence, string? rationale,
+        long tradeId, decimal? composite, string? rationale,
         CancellationToken ct = default)
     {
         const string sql = """
             UPDATE bot_trades
             SET entry_composite  = @composite,
-                entry_confidence = @confidence,
                 entry_rationale  = @rationale
             WHERE id = @id
             """;
@@ -34,7 +33,6 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("id", tradeId);
         cmd.Parameters.AddWithValue("composite",
             composite.HasValue ? composite.Value : DBNull.Value);
-        cmd.Parameters.AddWithValue("confidence", NpgsqlDbType.Numeric, confidence);
         cmd.Parameters.AddWithValue("rationale",
             string.IsNullOrWhiteSpace(rationale) ? DBNull.Value : rationale);
 

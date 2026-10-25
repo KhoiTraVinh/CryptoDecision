@@ -4,16 +4,14 @@ namespace CryptoDecision.Shared.Bot;
 /// <param name="NotionalUsd">USD to commit, after every adjustment.</param>
 /// <param name="AdjustedPct">Fraction of capital this represents.</param>
 /// <param name="VolatilityScalar">How far volatility shrank the position (1.0 = untouched).</param>
-/// <param name="ConfidenceScalar">How far AI confidence scaled it (1.0 = untouched).</param>
 public sealed record PositionSize(
     decimal NotionalUsd,
     decimal AdjustedPct,
-    double  VolatilityScalar,
-    decimal ConfidenceScalar
+    double  VolatilityScalar
 );
 
 /// <summary>
-/// How large a position should be, given capital, volatility and confidence.
+/// How large a position should be, given capital and volatility.
 ///
 /// Shared by the paper and the live engine on purpose. Two copies of this
 /// arithmetic would drift, and the copy that drifts silently is the one nobody
@@ -21,6 +19,13 @@ public sealed record PositionSize(
 /// mode costs a misleading backtest while the same bug live costs money. One
 /// implementation means the numbers an operator validated on paper are the
 /// numbers the exchange is asked for.
+///
+/// Confidence scaling used to live here, gated by bot_config.use_ai_sizing: it
+/// multiplied the position by 0.5 + confidence, clamped to [0.5, 1.5]. Both
+/// inputs were dead. The flag was false throughout, and the only strategy that
+/// sets a confidence sets a literal 0 — "Confidence: there isn't one", because
+/// the expression behind it (|AggregateZ| / (EnterZ * 2)) lost its numerator
+/// when the venue-scoring rule was deleted on 2026-09-11. Removed 2026-10-25.
 /// </summary>
 public static class PositionSizer
 {
@@ -30,9 +35,7 @@ public static class PositionSizer
     public static PositionSize Resolve(
         decimal capitalUsd,
         decimal positionPct,
-        double  currentVolatilityPct,
-        decimal confidence,
-        bool    useAiSizing)
+        double  currentVolatilityPct)
     {
         // Volatility-adjusted sizing: above the calibration point the position
         // shrinks in proportion, floored at half size. Never scaled up — a quiet
@@ -40,19 +43,10 @@ public static class PositionSizer
         var volScalar   = Math.Clamp(BaseVolatilityPct / Math.Max(currentVolatilityPct, 0.5), 0.5, 1.0);
         var adjustedPct = positionPct * (decimal)volScalar;
 
-        // AI confidence sizing: confidence 0.0 → 0.5x, 0.5 → 1.0x, 1.0 → 1.5x.
-        var confidenceScalar = 1.0m;
-        if (useAiSizing && confidence > 0m)
-        {
-            confidenceScalar = Math.Clamp(0.5m + confidence, 0.5m, 1.5m);
-            adjustedPct     *= confidenceScalar;
-        }
-
         return new PositionSize(
             NotionalUsd:      Math.Round(capitalUsd * adjustedPct, 2),
             AdjustedPct:      adjustedPct,
-            VolatilityScalar: volScalar,
-            ConfidenceScalar: confidenceScalar);
+            VolatilityScalar: volScalar);
     }
 
     /// <summary>
@@ -91,28 +85,14 @@ public static class PositionSizer
     public static PositionSize ResolveByRisk(
         decimal capitalUsd,
         decimal riskPctOfCapital,
-        decimal stopPct,
-        decimal confidence,
-        bool    useAiSizing)
+        decimal stopPct)
     {
         if (stopPct <= 0m)
             throw new ArgumentOutOfRangeException(
                 nameof(stopPct), stopPct,
                 "Stop distance must be positive; sizing off a zero stop implies an unbounded position.");
 
-        var riskUsd = capitalUsd * Math.Max(0m, riskPctOfCapital);
-
-        // Confidence scaling stays available but is applied to the *risk*, not to the
-        // notional, so a confident trade risks more rather than accidentally risking
-        // the same amount through a wider stop. Capped at 1.5× as before: a strong
-        // reading is a reason for a normal position, not a licence for a large one.
-        var confidenceScalar = 1.0m;
-        if (useAiSizing && confidence > 0m)
-        {
-            confidenceScalar = Math.Clamp(0.5m + confidence, 0.5m, 1.5m);
-            riskUsd *= confidenceScalar;
-        }
-
+        var riskUsd  = capitalUsd * Math.Max(0m, riskPctOfCapital);
         var notional = riskUsd / stopPct;
 
         return new PositionSize(
@@ -120,7 +100,6 @@ public static class PositionSizer
             AdjustedPct:      capitalUsd > 0m ? notional / capitalUsd : 0m,
             // Reported as 1.0 because nothing here scales on volatility any more. The
             // volatility adjustment lives in the stop distance, which is the input.
-            VolatilityScalar: 1.0,
-            ConfidenceScalar: confidenceScalar);
+            VolatilityScalar: 1.0);
     }
 }

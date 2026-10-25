@@ -446,10 +446,6 @@ public sealed record BotOptions
     // outlived them. A configuration flag that cannot change behaviour is worse than
     // no flag — an operator setting use_ai_agent = true saw it persist, and nothing
     // happened.
-
-    /// <summary>Enable AI-based position sizing: higher confidence = larger position.</summary>
-    public bool    UseAiSizing         { get; set; } = false;
-
     /// <summary>
     /// Hard ceiling on entries opened per UTC day, for this symbol and execution mode.
     /// Zero disables the cap.
@@ -534,7 +530,6 @@ public sealed record BotStatus(
 public sealed record EntryDecision(
     bool     Pass,
     string   Side       = "BUY",
-    decimal  Confidence = 1.0m,
     string?  Rationale  = null,
     decimal? Composite  = null,
     CryptoDecision.Shared.Signals.StopGeometry? Geometry = null,

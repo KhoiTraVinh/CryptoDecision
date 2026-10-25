@@ -63,7 +63,7 @@ public sealed class RoutingOrderEngine(
 
     public Task<BotTrade> OpenPositionAsync(
         string symbol, string strategy, string side, decimal price, decimal capitalUsd,
-        decimal positionPct, CancellationToken ct, decimal confidence = 1.0m, bool useAiSizing = false,
+        decimal positionPct, CancellationToken ct,
         StopGeometry? geometry = null,
         string? entryPath = null)
     {
@@ -71,7 +71,7 @@ public sealed class RoutingOrderEngine(
 
         if (opts.PaperMode)
             return paper.OpenPositionAsync(
-                symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing,
+                symbol, strategy, side, price, capitalUsd, positionPct, ct,
                 geometry, entryPath);
 
         var venue = ResolveVenue(opts.Exchange);
@@ -86,7 +86,7 @@ public sealed class RoutingOrderEngine(
             venue, symbol, strategy, side);
 
         return okx.OpenPositionAsync(
-            symbol, strategy, side, price, capitalUsd, positionPct, ct, confidence, useAiSizing,
+            symbol, strategy, side, price, capitalUsd, positionPct, ct,
             geometry, entryPath);
     }
 

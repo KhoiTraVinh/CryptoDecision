@@ -399,25 +399,6 @@ public sealed class CrossVenueFlowStrategy(
                     $"Stop {geometry.StopPct:P2} against target {geometry.TargetPct:P2} is " +
                     $"{geometry.RewardRisk:F2}:1 after fees, under the {tuning.MinRewardRisk:F2}:1 " +
                     $"minimum (ATR {volatility.AtrPct:F2}%).");
-
-            // ── Confidence: there isn't one ───────────────────────────────────
-            //
-            // This was |AggregateZ| / (EnterZ * 2). Neither surviving rule computes an
-            // aggregate z — FlowRatio reads one bucket's ratio, CandleReversal reads price
-            // — so AggregateZ has been structurally 0 since 2026-09-11 and the expression
-            // has evaluated to 0 on every entry since. Removing EnterZ only made that
-            // visible; it did not change a number.
-            //
-            // Zero is also the SAFE value rather than merely the honest one. PositionSizer
-            // applies confidence scaling only when `useAiSizing && confidence > 0`, so 0
-            // leaves the scalar at 1.0 and sizing stays purely risk-based. Substituting
-            // 1.0 to look neutral would silently multiply every order by 1.5 the moment
-            // use_ai_sizing was switched on.
-            //
-            // If a rule ever produces a real confidence measure, it belongs on FlowVerdict
-            // where the rule that knows it can set it.
-            const decimal confidence = 0m;
-
             log.LogInformation(
                 "[XFlow] {Symbol} {Side} — z={Z:F2}, {Agree}/{Part} venues, dispersion {Disp:F1}bps, " +
                 "stop {Stop:P2} target {Target:P2} ({Rr:F2}:1, ATR {Atr:F2}%)",
@@ -428,7 +409,6 @@ public sealed class CrossVenueFlowStrategy(
             return new EntryDecision(
                 Pass:       true,
                 Side:       verdict.Side!,
-                Confidence: confidence,
                 Rationale:  verdict.Reason,
                 // The aggregate z, not a 0-100 composite. Stored so the question that
                 // could not be answered after the last losing run — "were these entries

@@ -77,8 +77,6 @@ public static class EntrySizing
         decimal            riskPctPerTrade,
         decimal            maxOrderNotionalUsd,
         StopGeometry?      geometry,
-        decimal            confidence,
-        bool               useAiSizing,
         CancellationToken  ct)
     {
         PositionSize size;
@@ -88,7 +86,7 @@ public static class EntrySizing
         if (geometry is { StopPct: > 0m } g)
         {
             size      = PositionSizer.ResolveByRisk(
-                            capitalUsd, riskPctPerTrade, g.StopPct, confidence, useAiSizing);
+                            capitalUsd, riskPctPerTrade, g.StopPct);
             riskBased = true;
         }
         else
@@ -96,8 +94,7 @@ public static class EntrySizing
             var feature = await featureRepo.GetTodayAsync(symbol, ct);
             volatilityPct = feature?.Volatility ?? FallbackVolatilityPct;
             size          = PositionSizer.Resolve(
-                                capitalUsd, positionPct, (double)volatilityPct.Value,
-                                confidence, useAiSizing);
+                                capitalUsd, positionPct, (double)volatilityPct.Value);
             riskBased     = false;
         }
 
