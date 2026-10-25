@@ -49,7 +49,7 @@ and `flow_bars_15m`. See **Operating the bot** below.
 | **Ingestion** | .NET 9 worker | 3 exchange WebSockets → Channels → Kafka | yes |
 | **Processor** | .NET 9 worker | Kafka → `COPY` → `flow_bars_15m` + daily features | yes |
 | **Bot** | .NET 9 worker | Scorer → risk engine → OKX orders (or paper) | yes |
-| **Ollama** | ollama/ollama | Serves `qwen2.5:3b` to the EXIT reviewer. The entry gate it was first added for was DELETED by H30 on 2026-09-29 | yes |
+| **Polymarket** | .NET 9 worker | Esports/entry-only bot: rests 1c bids on match winners. No database, no exit — see `src/CryptoDecision.PolymarketService/README.md` | yes |
 | **Kafka** | KRaft, no ZooKeeper | Trade + kline transport | yes |
 | **PostgreSQL** | 16 | `trades` partitioned daily, 7-day retention | yes |
 
@@ -124,32 +124,41 @@ Refusals carry named codes:
 | `NO_CLOSED_BUCKET` | nothing to score yet |
 | `FLOW_BARS_STALE` | newest bucket older than `MaxBarAge` — ingestion has stopped |
 
-### The early exit is now the model's call (H24, 2026-09-20)
+### The early exit, and the model that used to make the call
 
-**Deployed cadence: first look after 1h, then at most once every 30m.** Both are set in
-docker-compose on BOTH strategy sections, not left to the code default. The first look has
-moved four times — 2h (H24), 1h (H28), 30m (H35), 1h again (H39, 2026-10-13) — so read the
-compose lines rather than this sentence if they ever disagree.
+**There is no early exit in the running configuration.** `UseFlowOfiExit` is false on both
+strategy sections (H44, 2026-10-16), so a position is closed by the stop, the target, or
+the 3-hour max hold, and by nothing else.
 
-`AiExitReviewer` is asked whether force remains behind the position or the trend has
-turned; CUT closes it as `LLM_EXIT`. It is given the closed 15-minute buckets since entry,
-each with its OFI and its notional in $M — so the "is buying coming back against my short"
-question is already a thing the model is asked, and `LLM_EXIT` is the answer's track
-record, not a feature still to be built.
+Between 2026-09-20 and 2026-10-25 this section described a language model deciding it.
+`AiExitReviewer` was handed a position and asked CUT or HOLD, and a CUT closed it as
+`LLM_EXIT`. It was measured and it lost: **30 closes for −$3.74**, the worst line in the
+book. H44 switched it off; the code was removed on 2026-10-25 along with the Ollama
+container, which by then had served 13,220 requests to its own healthcheck and zero to
+`/api/generate`.
 
-The 15-bucket `OFI_REVERSAL` rule no longer runs every cycle — it runs ONLY when a review
-was due and the model could not answer (Ollama down, timed out, unparseable). That fallback
-is deliberate, though the reason stated for it has aged: `OFI_REVERSAL` was the only exit
-with positive R when H24 shipped, and on the book as it now stands it is the exit that
+The entry gate before it scored no better. Of 320 signals it refused 138, and the refusals
+averaged **+0.065R** against **−0.051R** for the ones it admitted — it was rejecting the
+better half. H30 deleted it on 2026-09-29.
+
+What that leaves, and what turning the switch back on now means
+---------------------------------------------------------------
+The 10/15-bucket `OFI_REVERSAL` rule still exists. It sums buy and sell notional over the
+last `FlowOfiBars` closed buckets and closes when the imbalance points against the trade.
+It used to sit UNDER the reviewer — reachable only when a review was due and the model
+could not answer — so setting `UseFlowOfiExit` true now means something different from
+what it meant before: the rule runs every cycle, on its own, which is what it did when it
+measured +4.647R over 30 exits.
+
+Its record is worth reading both ways before switching it on. On the book as it stood at
+H24 it was the only exit with positive R; on the larger book it is also the exit that
 leaves the most behind — 31 exits, +5.395R realised against +9.318R had those positions
 been carried to stop or target.
 
-The cadence was measured, not chosen, and the arithmetic has been re-measured since: a call
-costs 20.7-25.7s on this 2-vCPU host with Ollama at `NUM_PARALLEL=1`, not the 42-43s H24
-worked from, and the entry gate it shared the 120s cycle budget with was deleted by H30.
-See H24, H28, H33, H35 and H39 for each move and its decision rule, and
-`bot_trades.last_exit_review_at` for the pacing clock, which is per position and survives a
-restart.
+If a model is ever wanted here again, the shape to use is a shadow verdict written to
+`signal_outcomes` and scored later without acting on it. That is how the entry gate was
+caught, and it is the only reason that failure is a measured number rather than an opinion.
+
 ### CANDLE_REVERSAL — the dip rule, and the majority of the trade stream
 
 Buy after price has fallen `ReversalDropPct` (0.60%) over `ReversalBars` (2) closed
@@ -260,86 +269,30 @@ cycle — the abstention log is throttled and once left the state 33 minutes sta
 hold two strategies' verdicts and whichever ran last silently overwrote the other. Those six
 columns still exist and are read by nothing.
 
-## The LLM gate
+## The LLM gate (deleted)
 
-**The model does not decide entries.** `CrossVenueFlowStrategy` does. When
-`require_ai_gate` is on, `qwen2.5:3b` is handed one finished proposal and may only
-**refuse** it. It cannot choose direction, size, stop or target — there is no argument for
-any of them. Every failure mode (Ollama down, timeout, unparseable, empty) resolves to *no
-entry*, which costs an opportunity and never a position.
+There is no gate. H30 deleted it on 2026-09-29 and the model it ran on was removed on
+2026-10-25. This heading survives because the question "where does the model decide
+things?" keeps getting asked, and the answer is worth stating once: **nowhere, and the
+measurement is why.**
 
-Verdicts are cached per `(symbol, side, 15-minute bucket)`: the loop runs every 30 seconds
-while the evidence only changes on the quarter hour, and the model does not answer the same
-question the same way twice.
+The gate was handed one finished proposal and could only refuse it — never direction, size,
+stop or target. It still scored badly. Across 320 signals recorded in `signal_outcomes` it
+refused 138, and those refusals averaged **+0.065R** while the ones it admitted averaged
+**−0.051R**. It was not noise around zero; it was sorting the wrong way.
 
-**The gate approved 45 of 45 and refused nothing, and it was not the model's fault.** All
-four grounds the prompt allowed it to refuse on were arithmetically unreachable: dispersion
-needs a ceiling and `MaxDispersionBps` is 0; thin evidence needs an excluded venue and
-neither surviving rule scores venues; a losing day needs half the daily limit against a
-worst day of $0.65; concentration needs two open positions while the per-side cap is
-checked *before* the gate is called. The model said so on every call — *"is not subject to
-any grounds for skipping"*. A bigger model or a tool loop would have changed nothing.
+Its first version was worse in a more instructive way: it approved 45 of 45 and refused
+nothing, and that was not the model's fault. All four grounds the prompt allowed it to
+refuse on were arithmetically unreachable on this account, and the model said so on every
+call — *"is not subject to any grounds for skipping"*. A bigger model would have changed
+nothing. H17 replaced those grounds with four the account could actually meet, and the
+numbers above are what that version scored.
 
-**H17 (2026-09-19) replaced them with four grounds this account can actually meet**,
-computed from its own closed trades in one query (`BotRepository.GetGateEvidenceAsync`) and
-marked AVAILABLE / NOT AVAILABLE in the brief:
-
-| ground | condition |
-|---|---|
-| this setup is losing | **any** slice below with n≥5 and mean R < 0 |
-| trend against the entry | 4-hour move beyond ±2.0% against the proposed side |
-| one event twice | same `entry_path` fired inside 120 minutes |
-| concentration | a position already open on this side **across every strategy** |
-
-**H19 (2026-09-19) made the first ground a table rather than a number.** The gate is shown
-the same account history cut three ways, each with its own count, and the ground fires when
-any slice that has enough trades is negative:
-
-```
-CANDLE_REVERSAL LONG              16 closed,  10 won, mean R +0.290
-CANDLE_REVERSAL in 12-20 UTC       6 closed,   3 won, mean R -0.199
-CANDLE_REVERSAL overall           17 closed,  10 won, mean R +0.211
-```
-
-Those are real production values, and they are the case that justifies the cut: the narrow
-slice says the setup is fine, the session slice says *not in this window*, and before H19
-the gate could only see the first. A slice under 5 trades prints its count and is marked
-"too thin to read" rather than being hidden — "no evidence" and "evidence that says nothing"
-are different, and omitting the thin one invites the model to read the wide slice as the
-narrow one.
-
-The **session** split is 12:00–20:00 UTC against everything else. Replaying all 68 recorded
-signals with the deployed exit set, that window totals **−10.745R over 32 trades** against
-+9.923R over 36 outside it, and every threshold from 06:00 to 18:00 splits the same
-direction. Only half of that finding survives the outlier check, and it is the useful half:
-the two largest trades both fall inside the *favourable* window, so "accept the winners"
-halves when they are removed while "refuse the losers" does not move at all. It ships as
-evidence behind a veto and not as a reason to size up. See H19, including why 19 days cannot
-separate "the US session trends" from "these particular 19 days trended during the US
-session".
-
-It is a **base rate and not a rule** on purpose. `if (hour >= 12 && hour < 20) refuse;`
-would freeze one measurement in place forever; a count and a mean drift toward zero on their
-own if the effect was noise, and the ground quietly stops being available.
-
-That last one is the concentration question nothing was asking: `max_open_per_side` is
-scoped **per strategy**, so CANDLE_REVERSAL and XVENUE_FLOW can each hold a LONG and both
-checks pass.
-
-Each ground reduces to a threshold, and a threshold belongs in `RiskEngine`. What the model
-is asked for is the **combination** — the prompt says one available ground is usually not
-enough and two or more usually is. If any single ground turns out to be decisive alone,
-move it into code and take it out of the brief, or this becomes a 35-second inference call
-performing an `if`.
-
-**It has never refused, so there is no evidence it refuses well.** The first audit of it,
-on five trades, scored the live gate at −3.00R against +1.00R for approving everything.
-H17 carries the decision rule; judge it there, not here.
-
-Retrieval of similar past signals was broken in the same way and fixed alongside: its
-distance summed four quantities that are **constant** for both surviving rules, so it
-returned the five most recent signals wearing similarity's label — and it did not filter by
-strategy, so a price rule was shown a flow rule's outcomes as precedent.
+The full tables are in HYPOTHESES.md under H17 and H30. The part worth carrying forward is
+the method rather than the verdict: `signal_outcomes` records signals that were REFUSED as
+well as taken, and scores both afterwards. Without that column this failure would have been
+invisible, because a gate that refuses well and a gate that refuses badly look identical
+from the trade ledger alone.
 
 ## Risk engine
 
@@ -406,11 +359,6 @@ docker compose up -d
 Startup order is fixed and not incidental: `postgres → db-check → processor → db-migrate
 → bot`. `DatabaseInitializer` (in Processor) owns the base tables; `sql/*.sql` are
 increments on top of them, so running SQL first fails at `006`.
-
-First boot pulls `qwen2.5:3b` (~1.9 GB) into a named volume. `OLLAMA_KEEP_ALIVE=-1` keeps
-it resident, which costs ~2.6 GB of RAM permanently for a model called a handful of times a
-day — lower it to `30m` if the host needs the memory, at the price of a ~13 s cold load on
-the first gate call.
 
 ## Migrations
 
