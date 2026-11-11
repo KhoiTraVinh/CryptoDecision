@@ -56,6 +56,15 @@ public sealed class EsportsEntryWorker(
     /// <summary>orderId to the token it rests on, so orders on finished matches can be found and cancelled.</summary>
     private readonly Dictionary<string, string> _restingOrders = [];
 
+    /// <summary>
+    /// Recent midpoints per token, newest last. The abandon rule needs to know whether a
+    /// token has been pinned at the bottom or is still moving, and the bot keeps no
+    /// database - so the window lives here and is rebuilt from the books it already
+    /// fetches every cycle. Pruned to <see cref="PolymarketOptions.AbandonWindowMinutes"/>,
+    /// which bounds it at a few dozen entries per token.
+    /// </summary>
+    private readonly Dictionary<string, List<(DateTimeOffset At, decimal Mid)>> _recentMids = [];
+
 
     private IReadOnlyList<EsportsMarket> _markets = [];
     private DateTimeOffset _marketsAt = DateTimeOffset.MinValue;
@@ -86,6 +95,12 @@ public sealed class EsportsEntryWorker(
             string.Join(", ", _opt.Games), _opt.MaxDailyUsd, _opt.RestBothSides);
 
         log.LogInformation("Arming thresholds: {Arm}", _opt.ArmSummary());
+
+        log.LogInformation(
+            _opt.AbandonEnabled
+                ? "Abandon floors: {Floors} over a {Window}-minute window"
+                : "Abandon rule OFF (floors would be {Floors} over {Window} minutes)",
+            _opt.AbandonSummary(), _opt.AbandonWindowMinutes);
 
 
         // Throws rather than returning quietly. A BackgroundService that just returns
@@ -249,6 +264,10 @@ public sealed class EsportsEntryWorker(
         if (open.Count == 0) return;
 
         var books = await clob.GetBooksAsync(open.SelectMany(m => m.TokenIds).Distinct().ToList(), ct);
+
+        RecordMids(books, now);
+        await AbandonQuietOrdersAsync(ct);
+
         var placed = 0;
         var armed = 0;
         var nearest = 1m;
@@ -541,6 +560,79 @@ public sealed class EsportsEntryWorker(
         {
             foreach (var id in stale) _restingOrders.Remove(id);
             log.LogInformation("Cancelled {Count} orders left on matches that are over", cancelled);
+        }
+    }
+
+    /// <summary>
+    /// Appends this cycle's midpoints and drops anything older than the abandon window.
+    /// Tokens that stopped being scanned fall out with their last entry.
+    /// </summary>
+    private void RecordMids(IReadOnlyDictionary<string, OrderBook> books, DateTimeOffset now)
+    {
+        var cutoff = now - TimeSpan.FromMinutes(_opt.AbandonWindowMinutes);
+
+        foreach (var (tokenId, book) in books)
+        {
+            if (book.Mid is not { } mid) continue;
+
+            if (!_recentMids.TryGetValue(tokenId, out var series))
+                _recentMids[tokenId] = series = [];
+
+            series.Add((now, mid));
+            series.RemoveAll(p => p.At < cutoff);
+        }
+
+        foreach (var tokenId in _recentMids.Where(kv => kv.Value.Count == 0).Select(kv => kv.Key).ToList())
+            _recentMids.Remove(tokenId);
+    }
+
+    /// <summary>
+    /// Cancels resting bids on tokens that have gone quiet at the bottom.
+    ///
+    /// A 1c bid only pays when somebody dumps into it while the match is still moving. Once
+    /// the midpoint has sat at or below the game's floor for the whole window, the book has
+    /// settled on the result and any fill from here is a dead token bought at 1c - on the
+    /// measured history those fills won 3 times in 840. Leaving the order open costs
+    /// nothing in collateral, which is exactly why it has to be cancelled deliberately.
+    ///
+    /// Requires a full window of evidence: a token seen for the first time this cycle has
+    /// no history yet and is left alone rather than cancelled on one reading.
+    /// </summary>
+    private async Task AbandonQuietOrdersAsync(CancellationToken ct)
+    {
+        if (!_opt.AbandonEnabled || _restingOrders.Count == 0 || _opt.DryRun) return;
+
+        var gameOf = _markets
+            .SelectMany(m => m.TokenIds.Select(t => (Token: t, m.Game)))
+            .GroupBy(x => x.Token)
+            .ToDictionary(g => g.Key, g => g.First().Game, StringComparer.Ordinal);
+
+        var window = TimeSpan.FromMinutes(_opt.AbandonWindowMinutes);
+        var quiet = new List<string>();
+
+        foreach (var (orderId, tokenId) in _restingOrders)
+        {
+            if (!_recentMids.TryGetValue(tokenId, out var series) || series.Count == 0) continue;
+
+            // One reading is not a window. Without this a restart cancels everything it
+            // finds resting before it has watched any of it.
+            if (series[^1].At - series[0].At < window) continue;
+
+            var floor = _opt.AbandonFor(gameOf.GetValueOrDefault(tokenId, ""));
+            if (series.Max(p => p.Mid) > floor) continue;
+
+            quiet.Add(orderId);
+        }
+
+        if (quiet.Count == 0) return;
+
+        var cancelled = await clob.CancelOrdersAsync(quiet, ct);
+        if (cancelled > 0)
+        {
+            foreach (var id in quiet) _restingOrders.Remove(id);
+            log.LogInformation(
+                "Abandoned {Count} resting orders: midpoint stayed at or under the floor for {Window} minutes ({Floors})",
+                cancelled, _opt.AbandonWindowMinutes, _opt.AbandonSummary());
         }
     }
 

@@ -272,6 +272,66 @@ public sealed class PolymarketOptions
     public string ArmSummary() =>
         string.Join(", ", ArmBelowAskByGame.Select(kv => $"{kv.Key}={kv.Value}").Append($"other={ArmBelowAsk}"));
 
+    // ── Abandoning a resting order ────────────────────────────────────────────
+
+    /// <summary>
+    /// Cancel a resting bid once its token has spent <see cref="AbandonWindowMinutes"/>
+    /// pinned at or below this midpoint. The order costs nothing to leave open, so this
+    /// is not about budget: it is about WHICH fills the order is still able to catch.
+    ///
+    /// Measured on this bot's own 1,063 fills since 2026-10-12 (10 winners). Splitting
+    /// them by the token's own midpoint at the moment it filled:
+    ///
+    ///     mid above 0.10:   222 fills, 7 winners  (3.15%)
+    ///     mid at or below:  840 fills, 3 winners  (0.36%)
+    ///
+    /// A fill at 1c while the mid is still 0.10+ means somebody dumped into a thin bid
+    /// during a live swing - the match is still moving. A fill at 1c with the mid already
+    /// at 0.02 means the book has agreed the side is dead, and it is: those fills land a
+    /// median of 0.2 minutes before the match is decided, a quarter of them after.
+    ///
+    /// The threshold cannot be applied when the order is PLACED - arming requires the ask
+    /// at or below <see cref="ArmBelowAsk"/>, so the mid is necessarily low at that moment
+    /// and every order, winners included, would be blocked. It has to be a cancellation
+    /// rule on an order already resting, evaluated against a short price memory.
+    ///
+    /// The directly measured split is not reachable either: by the time a fill happens the
+    /// order had to be there already. What is reachable is cancelling orders whose token
+    /// has gone quiet at the bottom, and that recovers about half the edge - on the same
+    /// 1,063 fills it keeps all 10 winners while dropping 358 losing fills, turning
+    /// -$3.96 into +$83.55. Do not expect the 3.15% number from it.
+    /// </summary>
+    public decimal AbandonBelow { get; set; } = 0.10m;
+
+    /// <summary>
+    /// Per-game overrides, same format and matching as <see cref="ArmBelowAskByGameCsv"/>.
+    /// CS2 and Valorant carry a lower floor because all three of their winners filled with
+    /// the mid between 0.026 and 0.045, where LoL and Dota 2 winners filled at 0.107+.
+    /// That split rests on three events; it is the user's call, not a measured law.
+    /// </summary>
+    public string AbandonBelowByGameCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="AbandonBelowByGameCsv"/>.</summary>
+    public Dictionary<string, decimal> AbandonBelowByGame { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The abandon floor that applies to one market.</summary>
+    public decimal AbandonFor(string game) =>
+        AbandonBelowByGame.TryGetValue(game, out var v) ? v : AbandonBelow;
+
+    /// <summary>One-line summary of the abandon floors, for the startup log.</summary>
+    public string AbandonSummary() =>
+        string.Join(", ", AbandonBelowByGame.Select(kv => $"{kv.Key}={kv.Value}").Append($"other={AbandonBelow}"));
+
+    /// <summary>
+    /// How far back the "has this token gone quiet" check looks. 5 minutes was the best of
+    /// 3/5/10/20 on the measured fills; 10 and 20 cancel almost nothing because a dying
+    /// token is usually still drifting down inside the window.
+    /// </summary>
+    public double AbandonWindowMinutes { get; set; } = 5;
+
+    /// <summary>Set to false to measure the rule without acting on it.</summary>
+    public bool AbandonEnabled { get; set; } = true;
+
     /// <summary>Ignore matches scheduled to end further out than this. Cuts the scan universe.</summary>
     public double MaxHoursToEnd { get; set; } = 24;
 
@@ -387,6 +447,33 @@ public sealed class PolymarketOptions
                 ArmBelowAskByGame[name] = price;
             }
         }
+
+        if (AbandonBelowByGame.Count == 0)
+        {
+            var csv = string.IsNullOrWhiteSpace(AbandonBelowByGameCsv)
+                ? "Counter-Strike=0.06,Valorant=0.06,LoL=0.10,Dota 2=0.10"
+                : AbandonBelowByGameCsv;
+
+            foreach (var pair in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = pair.LastIndexOf('=');
+                if (eq <= 0)
+                    throw new InvalidOperationException($"Polymarket:AbandonBelowByGameCsv has \"{pair}\", expected Game=price");
+
+                var name = pair[..eq].Trim();
+                if (!decimal.TryParse(pair[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var price))
+                    throw new InvalidOperationException($"Polymarket:AbandonBelowByGameCsv has \"{pair}\", which is not a number");
+
+                if (price < 0m || price >= 1m)
+                    throw new InvalidOperationException($"Polymarket:AbandonBelowByGameCsv has {name}={price}; must be in [0, 1)");
+
+                AbandonBelowByGame[name] = price;
+            }
+        }
+
+        if (AbandonWindowMinutes <= 0)
+            throw new InvalidOperationException("Polymarket:AbandonWindowMinutes must be greater than zero");
 
         if (PolygonRpcUrls.Length == 0)
             PolygonRpcUrls =
