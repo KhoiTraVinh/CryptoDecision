@@ -11,6 +11,13 @@ namespace CryptoDecision.PolymarketService.Polymarket;
 /// That choice matters more than it looks. An in-process set forgets everything on
 /// restart, and a bot that forgets re-buys the same losing longshot every time it is
 /// redeployed. Positions are on-chain and survive the container.
+///
+/// Reads v2. Polymarket retired data-api v1 on 2026-11-04 and the old `/positions` has
+/// answered 410 Gone ever since - which this service logged 11,810 times in 24 hours
+/// while quietly running its duplicate-entry defence on a stale picture. v2 differs in
+/// three ways that all have to change together: rows arrive wrapped in `data`, paging is
+/// cursor-only (`offset` is rejected outright), and the fields are snake_case with
+/// `size` renamed to `current_size`.
 /// </summary>
 public sealed class DataApiClient(
     HttpClient http,
@@ -28,31 +35,52 @@ public sealed class DataApiClient(
     {
         if (string.IsNullOrWhiteSpace(address)) return [];
 
-        var url = $"{_opt.DataApiUrl}/positions?user={Uri.EscapeDataString(address)}&sizeThreshold=0.01&limit=500";
-
-        using var response = await http.GetAsync(url, ct);
-        response.EnsureSuccessStatusCode();
-
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        if (doc.RootElement.ValueKind != JsonValueKind.Array) return [];
-
         var positions = new List<ExchangePosition>();
-        foreach (var p in doc.RootElement.EnumerateArray())
+        string? cursor = null;
+
+        // Cursor pages, not offsets: v2 rejects `offset` outright. The cap is a guard
+        // against a cursor that never terminates, not an expected limit - 10 pages is
+        // 5,000 positions.
+        for (var page = 0; page < MaxPages; page++)
         {
-            var tokenId = Str(p, "asset");
-            var conditionId = Str(p, "conditionId");
-            if (string.IsNullOrEmpty(tokenId) || string.IsNullOrEmpty(conditionId)) continue;
+            var url = $"{_opt.DataApiUrl}/v2/positions?user={Uri.EscapeDataString(address)}&limit=500";
+            if (!string.IsNullOrEmpty(cursor)) url += $"&cursor={Uri.EscapeDataString(cursor)}";
 
-            var size = Dec(p, "size");
-            if (size <= 0) continue;
+            using var response = await http.GetAsync(url, ct);
+            response.EnsureSuccessStatusCode();
 
-            positions.Add(new ExchangePosition(
-                tokenId, conditionId, Str(p, "title") ?? "", Str(p, "outcome") ?? "", size, Dec(p, "avgPrice")));
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+
+            // v2 wraps the rows: { "data": [...], "pagination": { "next_cursor": ... } }.
+            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+                break;
+
+            foreach (var p in data.EnumerateArray())
+            {
+                var tokenId = Str(p, "token_id");
+                var conditionId = Str(p, "condition_id");
+                if (string.IsNullOrEmpty(tokenId) || string.IsNullOrEmpty(conditionId)) continue;
+
+                var size = Dec(p, "current_size");
+                if (size <= 0) continue;
+
+                positions.Add(new ExchangePosition(
+                    tokenId, conditionId, Str(p, "title") ?? "", Str(p, "outcome") ?? "", size, Dec(p, "avg_price")));
+            }
+
+            cursor = doc.RootElement.TryGetProperty("pagination", out var pg)
+                ? Str(pg, "next_cursor")
+                : null;
+
+            if (string.IsNullOrEmpty(cursor) || data.GetArrayLength() == 0) break;
         }
 
         log.LogDebug("Data API reports {Count} open positions for {Address}", positions.Count, address);
         return positions;
     }
+
+    /// <summary>Guard against a cursor that keeps handing back a next page.</summary>
+    private const int MaxPages = 10;
 
     private static string? Str(JsonElement p, string name) =>
         p.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
