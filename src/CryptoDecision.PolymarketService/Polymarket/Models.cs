@@ -21,22 +21,6 @@ public sealed record OrderBook(string TokenId, IReadOnlyList<BookLevel> Bids, IR
 {
     /// <summary>Cheapest price someone is willing to sell at, or null when nobody is offering.</summary>
     public decimal? BestAsk => Asks.Count > 0 ? Asks[0].Price : null;
-
-    /// <summary>Highest price someone is willing to buy at, or null when nobody is bidding.</summary>
-    public decimal? BestBid => Bids.Count > 0 ? Bids[0].Price : null;
-
-    /// <summary>
-    /// Midpoint, which is what Polymarket's own price history reports - so a threshold
-    /// measured against that history has to be compared against this, not against the ask.
-    /// Falls back to whichever side exists when the book is one-sided.
-    /// </summary>
-    public decimal? Mid => (BestBid, BestAsk) switch
-    {
-        ({ } b, { } a) => (b + a) / 2m,
-        (null, { } a) => a,
-        ({ } b, null) => b,
-        _ => null,
-    };
 }
 
 /// <summary>CLOB API credentials, derived once from the wallet key.</summary>
