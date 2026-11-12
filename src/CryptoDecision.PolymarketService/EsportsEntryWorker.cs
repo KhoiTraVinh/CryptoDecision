@@ -80,9 +80,9 @@ public sealed class EsportsEntryWorker(
         _opt.Validate();
 
         log.LogInformation(
-            "Esports entry bot starting. Mode={Mode} Stake=${Stake} Levels=[{Levels}] MinVolume=${Volume} Games=[{Games}] DailyCap=${Cap} BothSides={Both}",
+            "Esports entry bot starting. Mode={Mode} Stake={Stake} Levels=[{Levels}] MinVolume=${Volume} Games=[{Games}] DailyCap=${Cap} BothSides={Both}",
             _opt.DryRun ? "DRY RUN (no orders sent)" : "LIVE (real money)",
-            _opt.StakeUsd, string.Join(", ", _opt.EntryPrices), _opt.MinVolumeUsd,
+            _opt.StakeSummary(), string.Join(", ", _opt.EntryPrices), _opt.MinVolumeUsd,
             string.Join(", ", _opt.Games), _opt.MaxDailyUsd, _opt.RestBothSides);
 
         log.LogInformation("Arming thresholds: {Arm}", _opt.ArmSummary());
@@ -380,11 +380,15 @@ public sealed class EsportsEntryWorker(
         // in the measured history is a round number - 100, 80, 250, 200, 150 - and a
         // ragged 6.66 buys nothing a clean 6 does not. The stake is therefore a ceiling,
         // not a target: $0.20 at 3c is 6 shares for $0.18.
-        var shares = Math.Floor(_opt.StakeUsd / level);
+        // Read per order, not once at startup: the overnight window changes this under a
+        // process that may run for days.
+        var stake = _opt.StakeFor(DateTimeOffset.UtcNow);
+
+        var shares = Math.Floor(stake / level);
         if (shares < MinOrderShares)
         {
             log.LogWarning("Stake ${Stake} at {Level} is only {Shares} whole shares, under Polymarket's {Min}-share minimum; skipping",
-                _opt.StakeUsd, level, shares, MinOrderShares);
+                stake, level, shares, MinOrderShares);
             return false;
         }
 

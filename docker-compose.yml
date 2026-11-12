@@ -587,6 +587,15 @@ services:
 
       Polymarket__EntryPricesCsv:  "${POLY_ENTRY_PRICES:-}"
       Polymarket__StakeUsd:        "${POLY_STAKE_USD:-0.20}"
+
+      # Stake rut gon ban dem. 0 = tat lich, dung mot muc stake ca ngay.
+      # Gio la gio DIA PHUONG theo LocalUtcOffsetHours (mac dinh +7, gio VN).
+      # NightEndHour nho hon NightStartHour thi cua so vat qua nua dem.
+      Polymarket__NightStakeUsd:       "${POLY_NIGHT_STAKE_USD:-0}"
+      Polymarket__NightStartHour:      "${POLY_NIGHT_START_HOUR:-22}"
+      Polymarket__NightEndHour:        "${POLY_NIGHT_END_HOUR:-6}"
+      Polymarket__LocalUtcOffsetHours: "${POLY_UTC_OFFSET_HOURS:-7}"
+
       Polymarket__MaxDailyUsd:     "${POLY_MAX_DAILY_USD:-15}"
       Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-25000}"
       Polymarket__ScanIntervalSeconds: "${POLY_SCAN_SECONDS:-5}"

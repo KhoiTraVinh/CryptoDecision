@@ -57,6 +57,83 @@ public sealed class PolymarketOptions
     public decimal StakeUsd { get; set; } = 0.20m;
 
     /// <summary>
+    /// Stake used during the overnight window instead of <see cref="StakeUsd"/>.
+    /// **0 disables the schedule** and one stake applies all day.
+    ///
+    /// What this is for, stated honestly so it is not mistaken for a measured edge.
+    /// Split by hour of fill over 1,115 entries since 2026-10-12, 00:00-07:00 local
+    /// returned -28.5% against +36.8% for the rest of the day, and skipping the window
+    /// outright would have turned +$29.88 into +$60.56. That looks decisive and is not:
+    ///
+    ///   - the sign reverses between months — October paid +9% overnight against -41%
+    ///     by day, November -39% against +57%
+    ///   - a permutation test over 20,000 relabellings puts p at 0.27
+    ///   - moving the boundary one hour swings the total by $40, because the whole
+    ///     result rests on 11 winning entries
+    ///
+    /// So the night is not known to be worse. Reducing the stake rather than stopping
+    /// is what makes this defensible: the window keeps trading, so it keeps producing
+    /// the observations that would settle the question, at a fifth of the exposure.
+    /// Stopping would have ended the measurement instead.
+    /// </summary>
+    public decimal NightStakeUsd { get; set; } = 0m;
+
+    /// <summary>
+    /// Start of the reduced-stake window, local hour, inclusive. 22 by operator decision
+    /// on 2026-11-12, widening it from midnight after the two hours either side measured
+    /// negative on their own: 22:00 lost $7.30 over 80 entries and 23:00 lost $17.34 over
+    /// 83, against a +$29.88 total for the period. 22:00-06:00 is the worst-performing
+    /// window of those tried (-$96.14 inside, +$126.02 outside).
+    ///
+    /// Read that as consistent, not as proof — it is the same 11-win sample whose sign
+    /// reverses between months. See <see cref="NightStakeUsd"/>.
+    /// </summary>
+    public int NightStartHour { get; set; } = 22;
+
+    /// <summary>
+    /// End of the reduced-stake window, local hour, exclusive. A value below
+    /// <see cref="NightStartHour"/> wraps past midnight, so 22-6 is a six-hour window.
+    /// </summary>
+    public int NightEndHour { get; set; } = 6;
+
+    /// <summary>
+    /// Hours to add to UTC to get the local clock the window is expressed in.
+    /// Default 7 for Vietnam.
+    ///
+    /// A fixed offset rather than a time zone id on purpose. The runtime image carries no
+    /// tzdata, so <c>FindSystemTimeZoneById</c> throws there and would only be found in
+    /// production; and Vietnam has had no DST since 1975, which makes the offset exactly
+    /// right rather than merely convenient. Anywhere that does observe DST this would
+    /// drift by an hour for part of the year.
+    /// </summary>
+    public int LocalUtcOffsetHours { get; set; } = 7;
+
+    /// <summary>
+    /// The stake that applies at <paramref name="utcNow"/>.
+    ///
+    /// Read at placement, so an order resting across the boundary keeps the size it was
+    /// placed with. Re-sizing it would mean cancelling and re-posting, which gives up
+    /// queue position at the one price level the whole strategy depends on being first at.
+    /// </summary>
+    public decimal StakeFor(DateTimeOffset utcNow)
+    {
+        if (NightStakeUsd <= 0 || NightStartHour == NightEndHour) return StakeUsd;
+
+        var hour = utcNow.ToOffset(TimeSpan.FromHours(LocalUtcOffsetHours)).Hour;
+        var inWindow = NightStartHour < NightEndHour
+            ? hour >= NightStartHour && hour < NightEndHour
+            : hour >= NightStartHour || hour < NightEndHour;
+
+        return inWindow ? NightStakeUsd : StakeUsd;
+    }
+
+    /// <summary>One line for the startup log, so the running schedule is never a guess.</summary>
+    public string StakeSummary() =>
+        NightStakeUsd <= 0 || NightStartHour == NightEndHour
+            ? $"${StakeUsd} all day"
+            : $"${NightStakeUsd} from {NightStartHour:00}:00 to {NightEndHour:00}:00 (UTC{LocalUtcOffsetHours:+#;-#;+0}), ${StakeUsd} otherwise";
+
+    /// <summary>
     /// Hard ceiling on USD spent per UTC day. Counted in memory, so a restart resets it —
     /// it is a runaway brake, not an accounting record. **0 disables it.**
     ///
@@ -400,6 +477,27 @@ public sealed class PolymarketOptions
         Games = Games.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
         if (StakeUsd <= 0) throw new InvalidOperationException("Polymarket:StakeUsd must be > 0");
+
+        if (NightStakeUsd < 0)
+            throw new InvalidOperationException("Polymarket:NightStakeUsd must be >= 0 (0 disables the schedule)");
+        if (NightStartHour is < 0 or > 23)
+            throw new InvalidOperationException($"Polymarket:NightStartHour is {NightStartHour}; must be 0-23");
+        if (NightEndHour is < 0 or > 23)
+            throw new InvalidOperationException($"Polymarket:NightEndHour is {NightEndHour}; must be 0-23");
+        if (LocalUtcOffsetHours is < -12 or > 14)
+            throw new InvalidOperationException($"Polymarket:LocalUtcOffsetHours is {LocalUtcOffsetHours}; must be -12..14");
+
+        // A night stake too small to buy the exchange minimum is not a smaller position,
+        // it is silently no position at all — the window would log a skip per market and
+        // look like a dead bot. Fail here instead, where the number is visible.
+        if (NightStakeUsd > 0 && EntryPrices.Length > 0)
+        {
+            var cheapest = EntryPrices.Min();
+            if (Math.Floor(NightStakeUsd / cheapest) < 5m)
+                throw new InvalidOperationException(
+                    $"Polymarket:NightStakeUsd ${NightStakeUsd} buys only {Math.Floor(NightStakeUsd / cheapest)} whole shares " +
+                    $"at {cheapest}, under Polymarket's 5-share minimum");
+        }
         foreach (var p in EntryPrices)
             if (p < MinAskPrice || p >= 1m)
                 throw new InvalidOperationException($"Polymarket:EntryPrices has {p}; must be in [{MinAskPrice}, 1)");

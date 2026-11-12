@@ -1,3 +1,4 @@
+using System.Net;
 using CryptoDecision.PolymarketService;
 using CryptoDecision.PolymarketService.Polymarket;
 using Serilog;
@@ -26,10 +27,22 @@ try
 
     // Polymarket rate-limits by IP and all three hosts are read on every cycle, so each
     // client gets a timeout short enough that a hung call cannot stall the scan loop.
-    builder.Services.AddHttpClient<GammaClient>(c => c.Timeout = TimeSpan.FromSeconds(20));
-    builder.Services.AddHttpClient<ClobClient>(c => c.Timeout = TimeSpan.FromSeconds(20));
-    builder.Services.AddHttpClient<DataApiClient>(c => c.Timeout = TimeSpan.FromSeconds(20));
-    builder.Services.AddHttpClient<ChainClient>(c => c.Timeout = TimeSpan.FromSeconds(15));
+    //
+    // Compression is not an optimisation here, it is mandatory. Gamma now answers
+    // /events with 406 and {"error":"gzip_required"} for any page of more than 50, and
+    // the scan asks for 100 - so without this the market list comes back empty on every
+    // cycle and the bot sits idle while believing nothing is tradable. HttpClient does
+    // not negotiate encoding on its own, so the handler has to opt in.
+    static void Compressed(IHttpClientBuilder b) =>
+        b.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+        });
+
+    Compressed(builder.Services.AddHttpClient<GammaClient>(c => c.Timeout = TimeSpan.FromSeconds(20)));
+    Compressed(builder.Services.AddHttpClient<ClobClient>(c => c.Timeout = TimeSpan.FromSeconds(20)));
+    Compressed(builder.Services.AddHttpClient<DataApiClient>(c => c.Timeout = TimeSpan.FromSeconds(20)));
+    Compressed(builder.Services.AddHttpClient<ChainClient>(c => c.Timeout = TimeSpan.FromSeconds(15)));
 
     builder.Services.AddHostedService<EsportsEntryWorker>();
 
