@@ -105,7 +105,7 @@ public sealed class GammaClient(
     /// <summary>Counters for one scan. A class rather than ref parameters, which async forbids.</summary>
     private sealed class Skipped
     {
-        public int Kind, Volume, Window;
+        public int Kind, Volume, Window, Game;
     }
 
     /// <summary>
@@ -145,9 +145,9 @@ public sealed class GammaClient(
         }
 
         log.LogInformation(
-            "Gamma scan: {Kept} markets kept; skipped {Kind} by kind, {Volume} under ${MinVolume} volume, " +
-            "{Window} outside the time window",
-            results.Count, skipped.Kind, skipped.Volume, _opt.MinVolumeUsd, skipped.Window);
+            "Gamma scan: {Kept} markets kept; skipped {Kind} by kind, {Game} by game, " +
+            "{Volume} under ${MinVolume} volume, {Window} outside the time window",
+            results.Count, skipped.Kind, skipped.Game, skipped.Volume, _opt.MinVolumeUsd, skipped.Window);
 
         return results;
     }
@@ -157,6 +157,7 @@ public sealed class GammaClient(
         ref var skippedKind = ref skipped.Kind;
         ref var skippedVolume = ref skipped.Volume;
         ref var skippedWindow = ref skipped.Window;
+        ref var skippedGame = ref skipped.Game;
         if (Bool(m, "closed") == true) return null;
         if (Bool(m, "active") == false) return null;
         if (Bool(m, "enableOrderBook") == false) return null;
@@ -208,10 +209,29 @@ public sealed class GammaClient(
                 return null;
             }
 
-            // Games is no longer a gate - the gate is the Esports tag plus the shape above.
-            // But the game still has to be named, because the arming threshold is per game
-            // now and an unresolved game quietly takes the fallback instead.
             game = ResolveGame(question, leagues);
+        }
+
+        // Games is a gate again, as of 2026-11-14. The Esports tag on its own admits every
+        // title Polymarket lists under it - a StarCraft II market was entered at 1c on
+        // 2026-11-08, and Rainbow Six Siege is one scan away from the same - while the
+        // arming thresholds, the volume floor and every measurement behind them were
+        // derived from these four games only.
+        //
+        // This is NOT the prefix whitelist that was removed for keeping 164 of 611
+        // markets. That one matched the question text alone, so a market titled after its
+        // tournament ("IEM Cologne: Liquid vs. FaZe") had nothing to match. ResolveGame
+        // reads the event tags second precisely so those resolve, and the gate is applied
+        // to its answer rather than to the raw prefix.
+        //
+        // A market that resolves to neither - no alias in the prefix, no game in the tags -
+        // is dropped. That is the intended direction: unrecognised means the per-game
+        // arming threshold would silently fall back, and an unknown game is exactly what
+        // this gate exists to refuse.
+        if (_opt.Games.Length > 0 && !_opt.Games.Contains(game, StringComparer.OrdinalIgnoreCase))
+        {
+            skippedGame++;
+            return null;
         }
 
         var volume = Dec(m, "volumeNum") ?? Dec(m, "volume") ?? 0m;

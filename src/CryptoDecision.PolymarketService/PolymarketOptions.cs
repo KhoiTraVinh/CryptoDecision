@@ -345,9 +345,52 @@ public sealed class PolymarketOptions
     public decimal ArmFor(string game) =>
         ArmBelowAskByGame.TryGetValue(game, out var v) ? v : ArmBelowAsk;
 
+    /// <summary>
+    /// Floor of the arming band: a side is only armed while its ask is at or above this.
+    /// **0 disables the floor** and arming is a ceiling test alone, as it has always been.
+    ///
+    /// This exists because the ceiling cannot tell two very different situations apart.
+    /// A side drifting down through 4c is a team losing badly with the map still running;
+    /// a side first seen at 1.5c is a map that has already ENDED, and the only reason the
+    /// book still quotes it is that settlement has not caught up. Both pass "ask below
+    /// 0.04", and a 1c bid resting under the second one fills on a result that is already
+    /// decided - which is the operator's observation on 2026-11-14, from watching the
+    /// entries: the ones that reach 1c during the map, rather than on the way down, lose.
+    ///
+    /// The floor turns the ceiling into a band. Miss the band entirely - 0.10 to 0.001
+    /// between two scans - and nothing is placed, which is the intended outcome, because
+    /// a gap that wide is a map ending rather than a price discovering.
+    ///
+    /// Note this is deliberately the opposite trade-off to the one <see cref="ArmBelowAsk"/>
+    /// documents for gap-downs. A wider ceiling chases collapses the scan cannot see; this
+    /// floor refuses them. They cannot both be right, and the floor is the one with a
+    /// stated reason to prefer it: a gap-down caught at 1c is only worth owning if the map
+    /// is still live, and by definition we did not see it be.
+    /// </summary>
+    public decimal ArmAboveAsk { get; set; } = 0m;
+
+    /// <summary>Per-game override of <see cref="ArmAboveAsk"/>, same "Game=price" form.</summary>
+    public string ArmAboveAskByGameCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="ArmAboveAskByGameCsv"/>.</summary>
+    public Dictionary<string, decimal> ArmAboveAskByGame { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The arming floor that applies to one market. 0 means no floor.</summary>
+    public decimal ArmFloorFor(string game) =>
+        ArmAboveAskByGame.TryGetValue(game, out var v) ? v : ArmAboveAsk;
+
     /// <summary>One-line summary of the thresholds, for the startup log.</summary>
-    public string ArmSummary() =>
-        string.Join(", ", ArmBelowAskByGame.Select(kv => $"{kv.Key}={kv.Value}").Append($"other={ArmBelowAsk}"));
+    public string ArmSummary()
+    {
+        var games = ArmBelowAskByGame.Keys.Union(ArmAboveAskByGame.Keys, StringComparer.OrdinalIgnoreCase);
+        var parts = games.Select(g =>
+        {
+            var floor = ArmFloorFor(g);
+            return floor > 0m ? $"{g}={floor}-{ArmFor(g)}" : $"{g}={ArmFor(g)}";
+        });
+        return string.Join(", ", parts.Append(
+            ArmAboveAsk > 0m ? $"other={ArmAboveAsk}-{ArmBelowAsk}" : $"other={ArmBelowAsk}"));
+    }
 
     /// <summary>Ignore matches scheduled to end further out than this. Cuts the scan universe.</summary>
     public double MaxHoursToEnd { get; set; } = 24;
@@ -464,6 +507,51 @@ public sealed class PolymarketOptions
                 ArmBelowAskByGame[name] = price;
             }
         }
+
+        if (ArmAboveAskByGame.Count == 0 && !string.IsNullOrWhiteSpace(ArmAboveAskByGameCsv))
+        {
+            foreach (var pair in ArmAboveAskByGameCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = pair.LastIndexOf('=');
+                if (eq <= 0)
+                    throw new InvalidOperationException($"Polymarket:ArmAboveAskByGameCsv has \"{pair}\", expected Game=price");
+
+                var name = pair[..eq].Trim();
+                if (!decimal.TryParse(pair[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var price))
+                    throw new InvalidOperationException($"Polymarket:ArmAboveAskByGameCsv has \"{pair}\", which is not a number");
+
+                if (price < 0m || price >= 1m)
+                    throw new InvalidOperationException($"Polymarket:ArmAboveAskByGameCsv has {name}={price}; must be in [0, 1)");
+
+                ArmAboveAskByGame[name] = price;
+            }
+        }
+
+        // A band that cannot contain anything arms nothing, silently, for every market of
+        // that game - the failure mode that looks exactly like a working bot in a quiet
+        // hour. Catch it here, where the numbers are visible, rather than in a week of
+        // cycle lines reading "0 collapsing".
+        foreach (var game in ArmAboveAskByGame.Keys.Union(ArmBelowAskByGame.Keys, StringComparer.OrdinalIgnoreCase))
+        {
+            var floor = ArmFloorFor(game);
+            if (floor > 0m && floor >= ArmFor(game))
+                throw new InvalidOperationException(
+                    $"Polymarket: arming band for {game} is {floor}-{ArmFor(game)}; the floor must be below the ceiling");
+        }
+
+        if (ArmAboveAsk > 0m && ArmAboveAsk >= ArmBelowAsk)
+            throw new InvalidOperationException(
+                $"Polymarket: arming band is {ArmAboveAsk}-{ArmBelowAsk}; the floor must be below the ceiling");
+
+        // The order has to rest ABOVE the entry level, so a floor at or under the level
+        // would admit exactly the asks TryPlaceAsync then rejects as "already below".
+        var highestLevel = EntryPrices.Length > 0 ? EntryPrices.Max() : 0m;
+        foreach (var game in ArmAboveAskByGame.Keys)
+            if (ArmAboveAskByGame[game] > 0m && ArmAboveAskByGame[game] <= highestLevel)
+                throw new InvalidOperationException(
+                    $"Polymarket: arming floor for {game} is {ArmAboveAskByGame[game]}, at or below the entry level {highestLevel}; " +
+                    "nothing in that range can rest on the book");
 
         if (PolygonRpcUrls.Length == 0)
             PolygonRpcUrls =

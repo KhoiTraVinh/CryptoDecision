@@ -56,6 +56,12 @@ public sealed class EsportsEntryWorker(
     /// <summary>orderId to the token it rests on, so orders on finished matches can be found and cancelled.</summary>
     private readonly Dictionary<string, string> _restingOrders = [];
 
+    /// <summary>
+    /// Sides seen under the arming floor this cycle — a map that has already ended rather
+    /// than one still being lost. Reset per cycle; only ever read by the cycle log.
+    /// </summary>
+    private int _skippedBelowBand;
+
 
     private IReadOnlyList<EsportsMarket> _markets = [];
     private DateTimeOffset _marketsAt = DateTimeOffset.MinValue;
@@ -259,6 +265,7 @@ public sealed class EsportsEntryWorker(
         // waiting correctly from one that is broken.
         var tooLate = 0;
         var alreadyDone = 0;
+        _skippedBelowBand = 0;
 
         foreach (var market in open)
         {
@@ -302,10 +309,10 @@ public sealed class EsportsEntryWorker(
         _lastCycleLog = DateTimeOffset.UtcNow;
 
         log.LogInformation(
-            "Cycle: {Markets} in play, {Open} watched, {Armed} collapsing past {Arm} -> {Placed} placed " +
-            "({TooLate} already below the level, {Done} done earlier). " +
+            "Cycle: {Markets} in play, {Open} watched, {Armed} inside the band {Arm} -> {Placed} placed " +
+            "({TooLate} already below the level, {Done} done earlier, {Gapped} under the floor). " +
             "{Resting} resting, ${Committed} today. Lowest ask {Nearest} on {Where}",
-            _markets.Count, open.Count, armed, _opt.ArmBelowAsk, placed, tooLate, alreadyDone,
+            _markets.Count, open.Count, armed, _opt.ArmSummary(), placed, tooLate, alreadyDone, _skippedBelowBand,
             _restingOrders.Count, _committedToday,
             nearest < 1m ? nearest.ToString("0.###") : "none",
             nearest < 1m ? nearestOn : "-");
@@ -364,7 +371,19 @@ public sealed class EsportsEntryWorker(
         }
 
         var arm = _opt.ArmFor(market.Game);
-        var collapsing = sides.Where(s => s.Ask <= arm).OrderBy(s => s.Ask).ToList();
+        var floor = _opt.ArmFloorFor(market.Game);
+
+        // Below the floor is not "even more collapsed", it is a different event: the map
+        // is over and the book has not caught up. Counted separately so the cycle line can
+        // show the rule firing - a filter nobody can see working is a filter nobody can
+        // trust, which is how the last one sat dead for days.
+        if (floor > 0m)
+            _skippedBelowBand += sides.Count(s => s.Ask < floor && s.Ask > 0m);
+
+        var collapsing = sides
+            .Where(s => s.Ask <= arm && s.Ask >= floor)
+            .OrderBy(s => s.Ask)
+            .ToList();
         if (collapsing.Count == 0) yield break;
 
         foreach (var s in _opt.RestBothSides ? collapsing : collapsing.Take(1))
