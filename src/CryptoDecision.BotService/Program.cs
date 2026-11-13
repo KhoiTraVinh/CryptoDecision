@@ -204,6 +204,17 @@ if (builder.Configuration.GetValue("ClientApi:Enabled", false))
     builder.Services.AddSingleton<ClientLinkStore>();
     builder.Services.AddSingleton<ClientApiQueries>();
     builder.Services.AddHostedService<ClientApiHttpServer>();
+
+    // The bot signs with the APP-LINKED key instead of Okx:ApiKey, which is what makes
+    // removing those variables from the server safe. Registered as ONE instance behind
+    // both types, so the API handlers invalidate the very cache the signing path reads.
+    builder.Services.AddSingleton<LinkedOkxCredentialSource>();
+    builder.Services.AddSingleton<IOkxCredentialSource>(
+        sp => sp.GetRequiredService<LinkedOkxCredentialSource>());
+}
+else
+{
+    builder.Services.AddSingleton<IOkxCredentialSource, ConfiguredOkxCredentialSource>();
 }
 
 var host = builder.Build();
@@ -249,7 +260,16 @@ foreach (var s in registered)
 // set aside. A check whose precondition cannot be met is one more thing to read and
 // nothing to learn from, which is the same class of dead weight as the rules it named.
 
-var liveRefusal = okxOptions.DescribeRefusal();
+// Primed before anything asks, so the first cycle gets a real answer rather than
+// "not loaded yet", and so the banner below can name the account being traded.
+var credentialSource = host.Services.GetRequiredService<IOkxCredentialSource>();
+await credentialSource.PrimeAsync(CancellationToken.None);
+
+// Which account this process can spend from is the single most important fact about
+// it, so it is stated on its own line rather than inferred from the armed/disabled one.
+startupLog.LogWarning("[Startup] Signing with {Source}.", credentialSource.Describe());
+
+var liveRefusal = okxOptions.DescribeRefusal() ?? credentialSource.DescribeRefusal();
 
 if (liveRefusal is not null)
     startupLog.LogInformation(

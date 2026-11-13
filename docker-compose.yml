@@ -327,9 +327,31 @@ services:
       # deliberately set. bot_config.paper_mode=false is the second, separate
       # switch. Okx__DemoTrading=true routes every order to OKX's simulated
       # account, which is where a new configuration belongs first.
+      # Empty is now a NORMAL state, not a misconfiguration. With the client API on,
+      # the bot signs with the key linked through the app (client_link) and these are
+      # expected to be absent — see IOkxCredentialSource. OkxOptions.DescribeRefusal
+      # no longer checks them; the credential source does.
       Okx__ApiKey:                     "${OKX_API_KEY:-}"
       Okx__ApiSecret:                  "${OKX_API_SECRET:-}"
       Okx__Passphrase:                 "${OKX_PASSPHRASE:-}"
+
+      # ── Client API: the phone app's endpoint ──────────────────────────────
+      #
+      # Lives here, in the file CI rsyncs, and NOT in a side compose file. It was in
+      # one until 11-13 and every CI deploy silently dropped it: the deploy runs
+      # `docker compose -f docker-compose.yml -f docker-compose.prod.yml`, so a third
+      # file is simply not read, and the API came back up with none of this set.
+      #
+      # Off by default. A box that only trades the operator's own account never opens
+      # a port that can accept somebody else's API key.
+      ClientApi__Enabled:              "${CLIENT_API_ENABLED:-false}"
+      ClientApi__Port:                 "${CLIENT_API_PORT:-8090}"
+      ClientApi__MinAmountUsd:         "${CLIENT_API_MIN_AMOUNT_USD:-10}"
+      ClientApi__HistoryInstId:        "${CLIENT_API_HISTORY_INSTID:-SOL-USDT-SWAP}"
+      # No default: ClientLinkStore throws at construction without it rather than
+      # accept a customer's OKX secret it cannot encrypt. Generate with
+      # `openssl rand -base64 32`.
+      ClientApi__EncryptionKey:        "${CLIENT_API_ENCRYPTION_KEY:-}"
       Okx__DemoTrading:                "${OKX_DEMO_TRADING:-true}"
       Okx__EnableLiveTrading:          "${OKX_ENABLE_LIVE_TRADING:-false}"
       Okx__MaxOrderNotionalUsd:        "${OKX_MAX_ORDER_NOTIONAL_USD:-100}"
@@ -397,6 +419,17 @@ services:
       # 0.70:1 after fees.
       DipStrategy__TargetRiskMultiple:  "${TARGET_RISK_MULTIPLE:-0.75}"
       FlowStrategy__TargetRiskMultiple: "${TARGET_RISK_MULTIPLE:-0.75}"
+      #
+      # ── The stop floor, previously a code constant only ────────────────────
+      #
+      # FlowGeometryDefaults.MinStopPct is 2.00% and nothing mapped it here, so
+      # MIN_STOP_PCT in .env was dead text. Same value either way today, which is
+      # exactly why it could sit wrong without anyone noticing. H45's grid is the
+      # argument for 2.00%: every column says wider is better, monotonically,
+      # because dollar risk is fixed so notional = risk$/stop% and a narrower stop
+      # buys a bigger position that pays the same round trip twice over.
+      DipStrategy__MinStopPct:  "${MIN_STOP_PCT:-0.020}"
+      FlowStrategy__MinStopPct: "${MIN_STOP_PCT:-0.020}"
       #
       # ── H42: target back to 2.0R, ratchet OFF, max hold 3h. 2026-10-16 ─────
       #
@@ -482,6 +515,26 @@ services:
       # the best one in the book: small falls in quiet tape, 44 trades, +0.1259 mean R.
       # The operator has the table and chose the threshold anyway.
       DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
+      #
+      # ── CANDLE_REVERSAL long-only. Operator, 2026-11-13 ────────────────────
+      #
+      # THIS LINE WAS MISSING AND THE SETTING WAS DEAD. DIP_LONG_ONLY=true sat in
+      # .env on the host from 11-13 with nothing mapping it into the container, so
+      # the bot went on taking shorts while the operator believed it would not.
+      # Found 11-13 by reading the container's env instead of the .env file — which
+      # is the only way to tell these apart, and worth doing for any setting that
+      # matters.
+      #
+      # What it gives up, measured: ReversalLongOnly's own docs put the short side
+      # at +0.348% over two hours across 1,562 closed buckets once the rise
+      # threshold is 1.00%, which it is. Live, 2 short trades returned +$0.043. So
+      # this is not a losing arm being removed — it is the live system being
+      # narrowed to the LONG-only population H43 actually measured.
+      #
+      # FlowStrategy is FlowRatio mode and never reads the reversal thresholds, so
+      # XVENUE_FLOW shorts are untouched and this one line does not break the
+      # both-sections convention H33 set.
+      DipStrategy__Signal__ReversalLongOnly: "${DIP_LONG_ONLY:-false}"
       DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
       FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
 
@@ -634,6 +687,36 @@ services:
       # duoc bang bien moi truong thay vi phai build lai.
       Polymarket__ExchangeAddress:        "${POLY_EXCHANGE_ADDRESS:-0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E}"
       Polymarket__NegRiskExchangeAddress: "${POLY_NEGRISK_EXCHANGE_ADDRESS:-0xC5d563A36AE78145C45a50134d48A1215220f80a}"
+    restart: unless-stopped
+
+  # ── Cloudflare tunnel: publishes the client API to the customer's phone ─────
+  #
+  # Scaled to zero unless CLOUDFLARED_REPLICAS is set, so a deployment that does
+  # not serve an app never starts it. Here rather than in a side compose file for
+  # the reason given on the ClientApi block above: CI reads exactly two -f files,
+  # and anything outside them is dropped on every deploy.
+  #
+  # QUICK tunnel — no Cloudflare account and no domain, at the cost of a fresh
+  # random *.trycloudflare.com hostname every time this container starts. That is
+  # why the app takes its server address as a field instead of having one built
+  # into the APK. Read the current hostname with:
+  #   docker logs cloudflared 2>&1 | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com'
+  #
+  # Cloudflare documents quick tunnels as test-only and caps them at 200
+  # concurrent requests. Moving to a named tunnel later is a token and two lines.
+  #
+  # No ports and no volumes: it reaches the API over the compose network as
+  # bot:8090, so that port is never published on the host. The API speaks plain
+  # HTTP and carries a customer's OKX secret — publishing it, even to the LAN,
+  # would put that secret on the wire in the clear.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    deploy:
+      replicas: ${CLOUDFLARED_REPLICAS:-0}
+    command: tunnel --no-autoupdate --url http://bot:8090
+    depends_on:
+      - bot
     restart: unless-stopped
 
 volumes:

@@ -48,6 +48,7 @@ public sealed class OkxOrderEngine(
     OkxTradingClient   trading,
     OkxInstrumentCache instruments,
     OkxOptions         okxOptions,
+    IOkxCredentialSource credentials,
     BotRepository      repo,
     IFeatureRepository featureRepo,
     BotStateService    state,
@@ -66,6 +67,14 @@ public sealed class OkxOrderEngine(
     {
         var configRefusal = okxOptions.DescribeRefusal();
         if (configRefusal is not null) return configRefusal;
+
+        // Asked of the credential SOURCE, not of OkxOptions, because the key being
+        // traded may be the app-linked one rather than anything in the environment.
+        // With nothing linked this is what stops the bot entering — and it has to be a
+        // refusal rather than an exception at signing time, or every cycle would log a
+        // stack trace instead of a reason an operator can act on.
+        var credentialRefusal = credentials.DescribeRefusal();
+        if (credentialRefusal is not null) return credentialRefusal;
 
         // ── Can this key actually place an order? ──
         //

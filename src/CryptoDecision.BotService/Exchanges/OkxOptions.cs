@@ -147,8 +147,11 @@ public sealed class OkxOptions
         if (!EnableLiveTrading)
             return "live trading is not armed on this deployment (Okx:EnableLiveTrading is false).";
 
-        if (!HasCredentials)
-            return "OKX API credentials are not configured (Okx:ApiKey, Okx:ApiSecret, Okx:Passphrase).";
+        // The credential check used to live here. It moved to IOkxCredentialSource,
+        // which is the only thing that knows whether this process trades the operator's
+        // configured key or an app-linked one — with the client API on, Okx:ApiKey is
+        // expected to be ABSENT and that is not a misconfiguration.
+        // OkxOrderEngine.DescribeRefusal asks both.
 
         if (MaxOrderNotionalUsd <= 0m)
             return $"Okx:MaxOrderNotionalUsd is {MaxOrderNotionalUsd}, so every order would be refused.";
