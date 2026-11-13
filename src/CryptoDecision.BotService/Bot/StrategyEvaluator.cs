@@ -134,9 +134,29 @@ public sealed class StrategyEvaluator
         //
         // Closed as HV_TIMEOUT rather than TIMEOUT so H31 can be judged without having to
         // infer which cap fired from the hold time.
-        var isWave  = string.Equals(trade.EntryPath, EntryPaths.HighVolume, StringComparison.Ordinal);
-        var maxHold = isWave && opts.HighVolumeMaxHoldMinutes > 0
-            ? opts.HighVolumeMaxHoldMinutes
+        var isWave  = EntryPaths.IsWaiver(trade.EntryPath);
+
+        // ── Operator 2026-11-13: the reversal leg gets a longer leash ─────────
+        //
+        // A waiver entry opened on the opposite side to the waiver trade before it
+        // carries EntryPaths.HighVolumeReversal, and gets HighVolumeReversalMaxHoldMinutes
+        // (180) instead of H31's 60. The operator's reason: a move needs longer to react
+        // to than it needed to start, so the leg that fades it cannot be judged inside
+        // the hour that was measured on the leg that rides it.
+        //
+        // H31 measured the waiver entry as ONE population. This splits it, so the leash
+        // is a hypothesis under test — see HighVolumeReversalMaxHoldMinutes for the
+        // four-trade replay behind it and how to judge it.
+        //
+        // 0 on the reversal knob falls back to the single leash, which is the revert.
+        var isReversal = string.Equals(trade.EntryPath, EntryPaths.HighVolumeReversal, StringComparison.Ordinal);
+
+        var waveHold = isReversal && opts.HighVolumeReversalMaxHoldMinutes > 0
+            ? opts.HighVolumeReversalMaxHoldMinutes
+            : opts.HighVolumeMaxHoldMinutes;
+
+        var maxHold = isWave && waveHold > 0
+            ? waveHold
             : opts.MaxHoldMinutes;
 
         // A negative hold is checked separately from the untrusted-clock case because

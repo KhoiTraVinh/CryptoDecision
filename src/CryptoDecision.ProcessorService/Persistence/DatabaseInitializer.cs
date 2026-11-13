@@ -204,7 +204,13 @@ public sealed class DatabaseInitializer(
                         -- reason in this method's summary: BotConfigRepository selects it
                         -- by name, so a database without it fails the whole config read
                         -- and the bot never starts.
-                        ADD COLUMN IF NOT EXISTS max_open_total INTEGER NOT NULL DEFAULT 5;
+                        ADD COLUMN IF NOT EXISTS max_open_total INTEGER NOT NULL DEFAULT 5,
+                        -- Separate leash for the LONG side of a waiver entry. Selected
+                        -- by name in BotConfigRepository like the two above, so a
+                        -- database without it fails the whole config read and the bot
+                        -- never starts — which is why it is mirrored here and not left
+                        -- to a migration file alone.
+                        ADD COLUMN IF NOT EXISTS high_volume_reversal_max_hold_minutes INTEGER NOT NULL DEFAULT 180;
                 END IF;
             END
             $$;

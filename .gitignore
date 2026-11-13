@@ -25,3 +25,14 @@ Thumbs.db
 
 # pg_dump output — data, not code. Regenerate with the pg_dump in the runbook.
 seed.sql
+
+# ── Mobile app ────────────────────────────────────────────────────────────────
+# Kept out of the repo entirely, operator's call 2026-11-13. Note what this also
+# keeps out: mobile/www/config.js carries the tunnel hostname and the server's
+# egress IP, and a built APK is a signed artifact rather than source.
+/mobile/
+
+# Tunnel + client API compose override. Untracked ON PURPOSE — docker-compose.yml
+# is tracked, and a `git reset --hard origin/main` on the box deleted edits to it
+# once. Untracked files survive that, so the tunnel config does too.
+/docker-compose.tunnel.yml

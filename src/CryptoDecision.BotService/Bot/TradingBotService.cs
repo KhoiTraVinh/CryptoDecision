@@ -669,7 +669,7 @@ public sealed class TradingBotService(
         // Set bot_config.suspend_on_high_volume = false to remove it, live, without a
         // deploy. H26 carries the decision rule.
         var hvHolder = opts.SuspendOnHighVolume
-            ? openTrades.FirstOrDefault(t => t.EntryPath == EntryPaths.HighVolume)
+            ? openTrades.FirstOrDefault(t => EntryPaths.IsWaiver(t.EntryPath))
             : null;
 
         foreach (var trade in openTrades)
@@ -849,7 +849,7 @@ public sealed class TradingBotService(
             {
                 var hvLive = state.GetOpenTrades().FirstOrDefault(t =>
                     string.Equals(t.Symbol, opts.Symbol, StringComparison.OrdinalIgnoreCase)
-                    && t.EntryPath == EntryPaths.HighVolume);
+                    && EntryPaths.IsWaiver(t.EntryPath));
 
                 if (hvLive is not null
                     && !string.Equals(strat, hvLive.Strategy, StringComparison.OrdinalIgnoreCase))
@@ -1049,10 +1049,10 @@ public sealed class TradingBotService(
                         // per-side limit is: a gate call costs 25-42 seconds and there is
                         // no point spending it on an entry that cannot be placed.
                         if (opts.MaxOpenHighVolume > 0
-                            && decision.Flow?.EntryPath == EntryPaths.HighVolume)
+                            && EntryPaths.IsWaiver(decision.Flow?.EntryPath))
                         {
                             var openHighVolume = stratTrades.Count(t =>
-                                t.EntryPath == EntryPaths.HighVolume);
+                                EntryPaths.IsWaiver(t.EntryPath));
 
                             if (openHighVolume >= opts.MaxOpenHighVolume)
                             {
@@ -1109,12 +1109,34 @@ public sealed class TradingBotService(
                         // the lock is simply gone. HighVolumeTpLockMinutes exists only so
                         // a side cannot stay locked forever if the opposite signal never
                         // arrives — a safety valve, not a tuned number. 0 = never expires.
-                        if (decision.Flow?.EntryPath == EntryPaths.HighVolume)
+                        // Set inside the block below and read at the OpenPositionAsync call,
+                        // so the entry is written with the path it actually took. False for
+                        // every non-waiver entry and for the first waiver trade of all.
+                        var isWaiverReversal = false;
+
+                        if (EntryPaths.IsWaiver(decision.Flow?.EntryPath))
                         {
                             var lastHv = accountTrades
-                                .Where(t => t.EntryPath == EntryPaths.HighVolume)
+                                .Where(t => EntryPaths.IsWaiver(t.EntryPath))
                                 .OrderByDescending(t => t.OpenedAt)
                                 .FirstOrDefault();
+
+                            // ── Operator 2026-11-13: the reversal leg gets a longer leash ──
+                            //
+                            // Opposite side to the waiver trade before it, and on this path
+                            // the side IS the sign of the flow, so this is the flow having
+                            // turned over. The operator's reason: a move needs longer to
+                            // react to than it needed to start, so the leg that fades it
+                            // cannot be judged inside H31's hour.
+                            //
+                            // Deliberately NOT conditioned on the previous trade having
+                            // taken its target — the operator was asked and chose every
+                            // reversal, not just the post-TP ones, which is the commoner
+                            // case by far: only one waiver position in 22 has ever exited
+                            // at target. The target LOCK below still turns on tookTarget;
+                            // these are two different rules that happen to read the same row.
+                            isWaiverReversal = lastHv is not null
+                                && !string.Equals(lastHv.Side, decision.Side, StringComparison.OrdinalIgnoreCase);
 
                             var tookTarget = lastHv?.CloseReason is "TP" or "EXCHANGE_TP";
 
@@ -1166,7 +1188,13 @@ public sealed class TradingBotService(
                                 // it on the INSERT, so there is no window where the row
                                 // exists without it. A follow-up UPDATE would leave a gap
                                 // in which a crash frees the slot the limit above holds.
-                                decision.Flow?.EntryPath);
+                                //
+                                // The reversal leg is recorded as its own path rather than
+                                // a flag, so the hold leash reads it back off the row and
+                                // "how did the reversal leg do?" stays a SQL question.
+                                isWaiverReversal
+                                    ? EntryPaths.HighVolumeReversal
+                                    : decision.Flow?.EntryPath);
 
                             state.AddOpenTrade(trade);
                             state.SetLastEntryAt(strat, DateTime.UtcNow);

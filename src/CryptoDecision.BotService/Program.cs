@@ -1,5 +1,6 @@
 using CryptoDecision.Shared.Bot;
 using CryptoDecision.BotService.Bot;
+using CryptoDecision.BotService.ClientApi;
 using CryptoDecision.BotService.Exchanges;
 using CryptoDecision.BotService.Health;
 using CryptoDecision.BotService.Infrastructure;
@@ -182,6 +183,28 @@ builder.Services.AddHealthChecks()
     .AddNpgSql(pgConnStr, name: "postgres", tags: ["db"])
     .AddCheck<TradingLoopHealthCheck>("trading_loop", tags: ["bot"]);
 builder.Services.AddHostedService<HealthCheckHttpServer>();
+
+// ─── Client API: the phone app's endpoint ─────────────────────────────────────
+// Off unless ClientApi:Enabled is true, so a box that only runs the operator's own
+// account never opens a port that can accept somebody else's API key.
+//
+// ClientLinkStore throws at construction when ClientApi__EncryptionKey is missing or
+// the wrong length, which takes the host down at startup. That is deliberate: the
+// alternative is a service that accepts a customer's OKX secret and stores it in a
+// form it cannot protect.
+if (builder.Configuration.GetValue("ClientApi:Enabled", false))
+{
+    builder.Services.AddHttpClient(OkxReadClient.HttpClientName, c =>
+    {
+        c.BaseAddress = new Uri(okxOptions.BaseUrl);
+        c.Timeout     = TimeSpan.FromSeconds(okxOptions.TimeoutSeconds);
+    });
+    builder.Services.AddSingleton<OkxReadClient>();
+    builder.Services.AddSingleton<OkxCredentialVerifier>();
+    builder.Services.AddSingleton<ClientLinkStore>();
+    builder.Services.AddSingleton<ClientApiQueries>();
+    builder.Services.AddHostedService<ClientApiHttpServer>();
+}
 
 var host = builder.Build();
 

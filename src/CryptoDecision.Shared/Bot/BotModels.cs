@@ -380,6 +380,42 @@ public sealed record BotOptions
     public int     HighVolumeMaxHoldMinutes { get; set; } = 60;
 
     /// <summary>
+    /// Minutes a waiver entry carrying <see cref="Signals.EntryPaths.HighVolumeReversal"/>
+    /// may be held, in place of <see cref="HighVolumeMaxHoldMinutes"/>. 0 falls back to
+    /// that one, which restores the single-leash behaviour exactly.
+    ///
+    /// **180, the operator's rule, 2026-11-13**: the reversal leg is the waiver entry
+    /// opened on the OPPOSITE side to the waiver trade before it, and on that path the
+    /// side is the sign of the flow — so it is the leg that fades the move rather than
+    /// rides it. A move needs longer to react to than it needed to start, so that leg
+    /// cannot be judged inside the hour H31 measured on the leg that rides it.
+    ///
+    /// NOT the post-TP case only. The operator was asked and chose every reversal: only
+    /// one waiver position in 22 has ever exited at target, so a post-TP-only rule would
+    /// almost never fire. The separate target LOCK still turns on the previous trade
+    /// having taken its target; these two rules read the same row and are not the same rule.
+    ///
+    /// H31 measured the waiver entry as ONE population and found nothing worth holding
+    /// past the first hour. Splitting it is a new claim and the sample behind it is four
+    /// trades, which is not evidence. Replayed on klines_1m from each entry, signed to
+    /// the trade's own direction:
+    ///
+    ///     SHORT (n 2)   60m -1.83%   120m -2.43%   180m -4.77%
+    ///     LONG  (n 2)   60m -1.78%   120m -1.79%   180m +0.26%
+    ///
+    /// That long row turns over entirely on ONE trade recovering to +2.15%, and those
+    /// four were not even split by reversal-vs-ride — the split this parameter actually
+    /// makes has never been measured at all. Treat it as the operator's hypothesis under
+    /// test. Judge it the way H31 was judged, once there are enough of each:
+    ///
+    ///     SELECT entry_path, count(*), round(avg(pnl_pct * 100), 3), round(sum(pnl_usd), 4)
+    ///     FROM bot_trades WHERE close_reason = 'HV_TIMEOUT' GROUP BY entry_path;
+    ///
+    /// Set to 0 if the reversal leg is not clearly better for the extra two hours.
+    /// </summary>
+    public int     HighVolumeReversalMaxHoldMinutes { get; set; } = 180;
+
+    /// <summary>
     /// Cooldown between entries in seconds.
     ///
     /// 900 = 15 minutes, one bucket. The signal cannot change until the next bucket

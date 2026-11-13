@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "architecture-diagram",
+      "name": "mobile-www",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["serve", "docs", "-l", "3456"],
-      "port": 3456
+      "runtimeArgs": ["--yes", "serve", "mobile/www", "-l", "5599", "--no-clipboard"],
+      "port": 5599
     }
   ]
 }

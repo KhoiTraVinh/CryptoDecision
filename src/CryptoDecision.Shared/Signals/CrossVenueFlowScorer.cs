@@ -373,6 +373,37 @@ public static class EntryPaths
     /// took whichever side was heavier. See H11 — measured, and shipped knowing it.
     /// </summary>
     public const string HighVolume = "HIGH_VOLUME";
+
+    /// <summary>
+    /// Same waiver entry, but opened on the OPPOSITE side to the waiver trade before it.
+    /// On this path the side is the sign of the flow, so an entry on the other side is by
+    /// construction the flow having turned over.
+    ///
+    /// Operator rule, 2026-11-13: these get HighVolumeReversalMaxHoldMinutes instead of
+    /// HighVolumeMaxHoldMinutes, because a move needs longer to react to than to start.
+    /// A separate entry_path value and not a flag column, so "how did the reversal leg
+    /// do?" stays a SQL question — the same reason entry_path exists at all.
+    ///
+    /// NOT MEASURED. H31 measured the waiver entry as ONE population and found nothing
+    /// worth holding past the first hour; this splits that population on a four-trade
+    /// replay whose long row turns over on a single trade. Judge it the way H31 was
+    /// judged, once there are enough of each:
+    ///
+    ///     SELECT entry_path, side, count(*), round(avg(pnl_pct * 100), 3)
+    ///     FROM bot_trades WHERE close_reason = 'HV_TIMEOUT' GROUP BY 1, 2;
+    /// </summary>
+    public const string HighVolumeReversal = "HIGH_VOLUME_REVERSAL";
+
+    /// <summary>
+    /// Whether an entry_path is one of the news-print waiver paths. Every position limit,
+    /// the target lock and the hold leash key off this rather than off <see cref="HighVolume"/>
+    /// directly: <see cref="HighVolumeReversal"/> is still a waiver entry and must be
+    /// counted, capped and locked exactly like one. Missing a single call site here is a
+    /// limit that silently stops binding, which is the failure this class was written for.
+    /// </summary>
+    public static bool IsWaiver(string? entryPath) =>
+        string.Equals(entryPath, HighVolume, StringComparison.Ordinal)
+        || string.Equals(entryPath, HighVolumeReversal, StringComparison.Ordinal);
 }
 
 /// <summary>
