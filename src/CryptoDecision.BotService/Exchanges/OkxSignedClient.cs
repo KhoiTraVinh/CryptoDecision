@@ -29,6 +29,7 @@ public sealed class OkxApiException(string code, string message) : Exception(mes
 public sealed class OkxSignedClient(
     IHttpClientFactory factory,
     OkxOptions         opts,
+    IOkxCredentialSource credentials,
     ILogger<OkxSignedClient> log)
 {
     public const string HttpClientName = "okx";
@@ -73,9 +74,13 @@ public sealed class OkxSignedClient(
 
         if (signed)
         {
-            if (!opts.HasCredentials)
-                throw new OkxApiException("NO_CREDENTIALS",
-                    "OKX credentials are not configured, so no signed request can be made.");
+            // Which account this signs for is the credential source's decision, not
+            // this method's: the operator's configured key, or the app-linked one,
+            // depending on how the process was registered.
+            var creds = await credentials.GetAsync(ct)
+                ?? throw new OkxApiException("NO_CREDENTIALS",
+                    "No OKX credentials are available, so no signed request can be made — "
+                  + (credentials.DescribeRefusal() ?? "reason unknown."));
 
             // OKX signs the timestamp, the verb, the path *including* its query
             // string, and the raw request body — in that order, over the base64
@@ -83,13 +88,13 @@ public sealed class OkxSignedClient(
             var timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
             var prehash   = timestamp + method.Method.ToUpperInvariant() + pathWithQuery + (body ?? "");
 
-            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.ApiSecret));
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(creds.Secret));
             var signature  = Convert.ToBase64String(hmac.ComputeHash(Encoding.UTF8.GetBytes(prehash)));
 
-            req.Headers.Add("OK-ACCESS-KEY",        opts.ApiKey);
+            req.Headers.Add("OK-ACCESS-KEY",        creds.ApiKey);
             req.Headers.Add("OK-ACCESS-SIGN",       signature);
             req.Headers.Add("OK-ACCESS-TIMESTAMP",  timestamp);
-            req.Headers.Add("OK-ACCESS-PASSPHRASE", opts.Passphrase);
+            req.Headers.Add("OK-ACCESS-PASSPHRASE", creds.Passphrase);
         }
 
         // Demo trading is a header, not a different host. It has to be set on every

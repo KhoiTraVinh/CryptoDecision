@@ -26,6 +26,7 @@ public sealed class ClientApiHttpServer(
     OkxCredentialVerifier verifier,
     OkxReadClient okx,
     OkxOptions okxOptions,
+    IOkxCredentialSource credentials,
     BotConfigRepository configRepo,
     StrategyEvaluator evaluator,
     IConfiguration config,
@@ -176,6 +177,10 @@ public sealed class ClientApiHttpServer(
         var token = await store.LinkAsync(
             apiKey, secret, pass, check.Permissions!, check.Uid, ct);
 
+        // Without this the bot keeps signing with whatever it cached for up to the
+        // source TTL — on a RE-link that means orders going to the previous key.
+        (credentials as LinkedOkxCredentialSource)?.Invalidate();
+
 
         log.LogWarning(
             "[ClientApi] OKX key {Masked} LINKED (uid {Uid}, perm {Perm}). This server can now "
@@ -211,6 +216,10 @@ public sealed class ClientApiHttpServer(
         if (link is null) return;
 
         await store.UnlinkAsync(ct);
+
+        // Unlink is a kill switch, so it takes effect now rather than whenever the
+        // cached credentials happen to expire.
+        (credentials as LinkedOkxCredentialSource)?.Invalidate();
 
 
         log.LogWarning(
