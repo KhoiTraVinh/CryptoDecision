@@ -146,6 +146,42 @@ public sealed record FlowSignalOptions(
     int     ReversalBars                  = 2,
 
     /// <summary>
+    /// Refuse a long when the last N closed 15-minute candles are ALL red (close &lt; open).
+    /// 0 disables it.
+    ///
+    /// Operator's rule, 2026-11-14, after three stop-outs on the long side while SOL fell
+    /// 9.2% in fifteen hours.
+    ///
+    /// **N MATTERS ENORMOUSLY, and 2 is the wrong number.** The entry condition is already
+    /// "fell ReversalDropPct over ReversalBars", and a 0.60% fall across two bars is almost
+    /// always two red bars — so at 2 this restates the entry instead of adding to it and
+    /// blocks 25 of 28 closed trades (89%), leaving three. At 3 it is a different rule: two
+    /// red candles are the normal shape of a dip, a third says the dip is still extending.
+    ///
+    /// By streak length at entry, on the 28 closed CANDLE_REVERSAL trades:
+    ///
+    ///     0 red   n  2   +$0.0432      3 red   n 10   -$1.8956   2 stops
+    ///     1 red   n  1   +$0.4197      4 red   n  2   -$0.3683   1 stop
+    ///     2 red   n 12   +$0.2741      5 red   n  1   +$0.2533
+    ///
+    /// At N=3 it blocks 13 of 28 (46%) carrying -$2.0106 and keeps 15 carrying +$0.7370,
+    /// taking the rule from -$1.27 to +$0.74.
+    ///
+    /// It survives the split that killed the alternatives. Halved by trade count, the
+    /// BLOCKED group is negative in both halves — -$0.2536 over 6 and -$1.7570 over 7 —
+    /// and blocking improves both halves (+1.03 to +1.28, and -2.30 to -0.54). A trend
+    /// filter and a post-stop side block were both measured the same way this session and
+    /// both reversed sign between halves.
+    ///
+    /// Registered as thin anyway: 6 and 7 blocked trades per half. And it does not make the
+    /// rule profitable — the kept group is still -$0.54 in the second half. It removes a
+    /// loss; it does not create an edge.
+    ///
+    /// "close &lt; open" and "each close below the previous close" were both measured and
+    /// select the same trades here.
+    int     BlockRedCandles               = 0,
+
+    /// <summary>
     /// For <see cref="FlowEntryMode.FlowRatio"/>: bucket notional at or above which the
     /// ratio test is SKIPPED and the entry is taken with whichever side traded more,
     /// however narrow its lead. 0 disables the exception and leaves the ratio in charge.
@@ -495,6 +531,25 @@ public static class CrossVenueFlowScorer
         // reader comes to believe the bot might short. ReversalRisePct,
         // ReversalBarsShort and ReversalLongOnly went with it.
         var isDip = dipMovePct <= -options.ReversalDropPct;
+
+        // ── Operator 2026-11-14: refuse a long into consecutive red candles ───
+        //
+        // See BlockRedCandles for the measurement, which says this blocks 89% of
+        // entries and separates nothing. It is here because the operator asked for it
+        // after three stop-outs, and it is off by default.
+        if (options.BlockRedCandles > 0 && closed.Count >= options.BlockRedCandles)
+        {
+            var red = 0;
+            for (var i = 0; i < options.BlockRedCandles; i++)
+                if (closed[^(i + 1)].Close < closed[^(i + 1)].Open) red++;
+
+            if (red == options.BlockRedCandles)
+                return FlowVerdict.Abstain(
+                    "RED_CANDLES",
+                    $"The last {options.BlockRedCandles} closed 15m candle(s) are red, so no long " +
+                    "is taken. A configured refusal, not an absent signal — the dip threshold " +
+                    $"itself {(isDip ? "WAS" : "was not")} met.");
+        }
 
         if (!isDip)
             return FlowVerdict.Abstain(

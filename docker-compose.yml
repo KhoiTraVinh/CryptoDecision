@@ -515,6 +515,22 @@ services:
       # the best one in the book: small falls in quiet tape, 44 trades, +0.1259 mean R.
       # The operator has the table and chose the threshold anyway.
       DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
+      #
+      # ── Operator 2026-11-14: refuse a long into N consecutive red 15m candles ──
+      #
+      # N=3, and the number is the whole rule. At 2 it restates the entry condition —
+      # a 0.60% fall over two bars is almost always two red bars — and blocks 89% of
+      # entries. At 3 it blocks 46%, because two red candles are the normal shape of a
+      # dip and a third says the dip is still extending.
+      #
+      # Measured on 28 closed trades: blocks 13 carrying -.0106, keeps 15 carrying
+      # +/usr/bin/bash.7370, taking CANDLE_REVERSAL from -.27 to +/usr/bin/bash.74. Halved by trade count
+      # the blocked group is negative in BOTH halves (-0.25 over 6, -1.76 over 7), which
+      # a trend filter and a post-stop side block both failed this same session.
+      #
+      # Thin: 6 and 7 blocked trades per half. It removes a loss, it does not create an
+      # edge — the kept group is still negative in the second half. 0 disables.
+      DipStrategy__Signal__BlockRedCandles: "${DIP_BLOCK_RED_CANDLES:-0}"
       DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
       FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
 
