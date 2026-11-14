@@ -392,6 +392,55 @@ public sealed class PolymarketOptions
             ArmAboveAsk > 0m ? $"other={ArmAboveAsk}-{ArmBelowAsk}" : $"other={ArmBelowAsk}"));
     }
 
+    /// <summary>
+    /// Round count at which a map is treated as decided: resting orders on it are pulled
+    /// and no new ones go on. **0 disables it.** 12 for CS2, where the map ends at 13.
+    ///
+    /// The reasoning, which is the operator's and is the sharpest thing anyone has said
+    /// about this book: on a 1c resting bid, THE FILL AND THE LOSS ARE THE SAME EVENT. A
+    /// side only collapses onto 1c at the instant its map is lost, so the bid that fills
+    /// is the bid that was about to be worthless. When the trailing team genuinely comes
+    /// back, the price never falls far enough to fill at all. Refusing the last round of
+    /// a decided map therefore gives up almost no winning fills while removing a whole
+    /// class of guaranteed losers - and CS2 is where it matters, at -$32.77 in November
+    /// against +$66.00 for Dota 2.
+    ///
+    /// Equality, not "at least". Past the regulation win the map is in overtime, the
+    /// numbers keep climbing, and 12 stops meaning match point - so the block lifts there
+    /// and the arming band takes over again, by operator decision on 2026-11-14. Note
+    /// 12-12 is caught by the equality too: nobody is at match point there, but the state
+    /// lasts one round and blocking it costs nothing.
+    ///
+    /// Timing is comfortable rather than tight. From a side reaching the threshold to the
+    /// map ending is at least one more round, about two minutes, against a five-second
+    /// scan; the feed was measured updating within that.
+    /// </summary>
+    public int DecidedAtRounds { get; set; } = 0;
+
+    /// <summary>
+    /// Games the round block applies to, comma separated. Empty means every game, which is
+    /// only sensible if <see cref="DecidedAtRounds"/> suits them all - it does not, since
+    /// Dota 2 and LoL have no round count of this shape at all.
+    /// </summary>
+    public string DecidedGamesCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="DecidedGamesCsv"/>.</summary>
+    public HashSet<string> DecidedGames { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether this market's map counts as decided right now.
+    ///
+    /// A missing score is NOT decided: the feed omits rounds for roughly a third of live
+    /// CS2 matches, and treating that silence as a stop would quietly halve the game's
+    /// volume on no evidence. Operator decision on 2026-11-14 was to keep trading those.
+    /// </summary>
+    public bool IsDecided(EsportsMarket market) =>
+        DecidedAtRounds > 0
+        && market.Score is { } s
+        && (DecidedGames.Count == 0 || DecidedGames.Contains(market.Game))
+        && !s.InOvertime(DecidedAtRounds)
+        && s.Leader == DecidedAtRounds;
+
     /// <summary>Ignore matches scheduled to end further out than this. Cuts the scan universe.</summary>
     public double MaxHoursToEnd { get; set; } = 24;
 
@@ -539,6 +588,13 @@ public sealed class PolymarketOptions
                 throw new InvalidOperationException(
                     $"Polymarket: arming band for {game} is {floor}-{ArmFor(game)}; the floor must be below the ceiling");
         }
+
+        if (DecidedGames.Count == 0 && !string.IsNullOrWhiteSpace(DecidedGamesCsv))
+            foreach (var g in DecidedGamesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                DecidedGames.Add(g);
+
+        if (DecidedAtRounds < 0)
+            throw new InvalidOperationException($"Polymarket:DecidedAtRounds is {DecidedAtRounds}; must be >= 0 (0 disables it)");
 
         if (ArmAboveAsk > 0m && ArmAboveAsk >= ArmBelowAsk)
             throw new InvalidOperationException(

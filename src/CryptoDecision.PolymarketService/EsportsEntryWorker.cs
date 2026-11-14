@@ -62,6 +62,9 @@ public sealed class EsportsEntryWorker(
     /// </summary>
     private int _skippedBelowBand;
 
+    /// <summary>Markets skipped this cycle because the map is at match point. Reset per cycle.</summary>
+    private int _skippedDecided;
+
 
     private IReadOnlyList<EsportsMarket> _markets = [];
     private DateTimeOffset _marketsAt = DateTimeOffset.MinValue;
@@ -266,9 +269,15 @@ public sealed class EsportsEntryWorker(
         var tooLate = 0;
         var alreadyDone = 0;
         _skippedBelowBand = 0;
+        _skippedDecided = 0;
 
         foreach (var market in open)
         {
+            // Decided on the scoreboard, whatever the book says. Checked before anything
+            // else so a map at match point cannot arm, cannot place, and does not even
+            // count toward "nearest ask" - it is not a market we are in any more.
+            if (_opt.IsDecided(market)) { _skippedDecided++; continue; }
+
             // How close the market is to arming. Without this a quiet bot and a broken
             // one print the same line, and most cycles are quiet by design.
             foreach (var t in market.TokenIds)
@@ -310,9 +319,11 @@ public sealed class EsportsEntryWorker(
 
         log.LogInformation(
             "Cycle: {Markets} in play, {Open} watched, {Armed} inside the band {Arm} -> {Placed} placed " +
-            "({TooLate} already below the level, {Done} done earlier, {Gapped} under the floor). " +
+            "({TooLate} already below the level, {Done} done earlier, {Gapped} under the floor, " +
+            "{Decided} at match point). " +
             "{Resting} resting, ${Committed} today. Lowest ask {Nearest} on {Where}",
             _markets.Count, open.Count, armed, _opt.ArmSummary(), placed, tooLate, alreadyDone, _skippedBelowBand,
+            _skippedDecided,
             _restingOrders.Count, _committedToday,
             nearest < 1m ? nearest.ToString("0.###") : "none",
             nearest < 1m ? nearestOn : "-");
@@ -556,14 +567,28 @@ public sealed class EsportsEntryWorker(
         if (_restingOrders.Count == 0 || _opt.DryRun) return;
 
         var live = _markets.SelectMany(m => m.TokenIds).ToHashSet();
-        var stale = _restingOrders.Where(kv => !live.Contains(kv.Value)).Select(kv => kv.Key).ToList();
+
+        // A map at match point is finished in every way that matters to a 1c bid. Leaving
+        // the order up is the whole failure: it fills at the moment the map is lost, which
+        // is the only moment the price can reach it. Refusing to place a NEW order here
+        // would do almost nothing, because by the time a side reaches the threshold the
+        // order has been resting for several minutes already.
+        var decided = _markets.Where(m => _opt.IsDecided(m)).SelectMany(m => m.TokenIds).ToHashSet();
+
+        var over = _restingOrders.Where(kv => !live.Contains(kv.Value)).Select(kv => kv.Key).ToList();
+        var atMatchPoint = _restingOrders.Where(kv => live.Contains(kv.Value) && decided.Contains(kv.Value))
+                                         .Select(kv => kv.Key).ToList();
+
+        var stale = over.Concat(atMatchPoint).Distinct().ToList();
         if (stale.Count == 0) return;
 
         var cancelled = await clob.CancelOrdersAsync(stale, ct);
         if (cancelled > 0)
         {
             foreach (var id in stale) _restingOrders.Remove(id);
-            log.LogInformation("Cancelled {Count} orders left on matches that are over", cancelled);
+            log.LogInformation(
+                "Cancelled {Count} resting orders: {Over} on matches that are over, {MatchPoint} on maps at {Rounds} rounds",
+                cancelled, over.Count, atMatchPoint.Count, _opt.DecidedAtRounds);
         }
     }
 

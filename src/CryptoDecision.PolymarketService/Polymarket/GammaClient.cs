@@ -74,6 +74,38 @@ public sealed class GammaClient(
     }
 
     /// <summary>
+    /// <summary>
+    /// Live round score from the event's <c>score</c> field, or null when it is not available.
+    ///
+    /// The field is <c>"12-10|1-1|Bo3"</c> - rounds on the current map, maps won, format -
+    /// and it does update per round: measured on 2026-11-14 over five minutes, live matches
+    /// moved 6-3 to 8-4, 3-0 to 3-3 and 4-3 to 6-4, which is real CS2 pacing. It is also
+    /// absent far more often than it is present overall, because a finished-but-unclosed
+    /// event reverts to the placeholder; among matches actually in progress it was there
+    /// for 5 of 7.
+    ///
+    /// The placeholder is "000-000" and the guard against it is the digit count, not the
+    /// value: a real 0-0 is two single digits. Returning null rather than (0,0) matters -
+    /// a caller that blocks on a score would otherwise read "no data" as "nothing scored
+    /// yet" and happily trade a map that is already at match point.
+    /// </summary>
+    private static MatchScore? ParseScore(JsonElement ev)
+    {
+        if (!ev.TryGetProperty("score", out var s) || s.ValueKind != JsonValueKind.String) return null;
+
+        var head = (s.GetString() ?? "").Split('|')[0];
+        var dash = head.IndexOf('-');
+        if (dash <= 0 || dash == head.Length - 1) return null;
+
+        var left = head[..dash];
+        var right = head[(dash + 1)..];
+        if (left.Length > 2 || right.Length > 2) return null;          // "000-000"
+
+        return int.TryParse(left, out var a) && int.TryParse(right, out var b)
+            ? new MatchScore(a, b)
+            : null;
+    }
+
     private static IReadOnlyList<(int Id, string Label)> EventTags(JsonElement ev)
     {
         if (!ev.TryGetProperty("tags", out var tags) || tags.ValueKind != JsonValueKind.Array) return [];
@@ -288,11 +320,12 @@ public sealed class GammaClient(
 
             // Competition lives on the event, not the market, so it is read once here.
             var leagues = EventTags(ev);
+            var score = ParseScore(ev);
 
             foreach (var m in markets.EnumerateArray())
             {
                 var outcome = Map(m, leagues, now, skipped);
-                if (outcome is not null) results.Add(outcome);
+                if (outcome is not null) results.Add(outcome with { Score = score });
             }
         }
 

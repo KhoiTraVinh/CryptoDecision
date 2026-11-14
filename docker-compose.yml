@@ -678,6 +678,11 @@ services:
       Polymarket__ArmAboveAsk:          "${POLY_ARM_ABOVE_ASK:-0}"
       Polymarket__ArmAboveAskByGameCsv: "${POLY_ARM_MIN_BY_GAME:-}"
 
+      # Chan khi mot ben dat dung so round nay (CS2 ket thuc o 13 -> dat 12).
+      # 0 = tat. Vao hiep phu thi tu go chan, quay ve dai arm.
+      Polymarket__DecidedAtRounds:  "${POLY_DECIDED_ROUNDS:-0}"
+      Polymarket__DecidedGamesCsv:  "${POLY_DECIDED_GAMES:-}"
+
       # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
       # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
       # khop moi 32 ngay. Moi muc tren 0.01 do duoc deu phang hoac am, nen muc gia cho
