@@ -38,7 +38,8 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    COALESCE(max_open_high_volume, 1) AS max_open_high_volume,
                    COALESCE(suspend_on_high_volume, TRUE) AS suspend_on_high_volume,
                    COALESCE(max_open_total, 5) AS max_open_total,
-                   COALESCE(max_consecutive_losses, 5) AS max_consecutive_losses
+                   COALESCE(max_consecutive_losses, 5) AS max_consecutive_losses,
+                   COALESCE(fixed_notional_usd, 0) AS fixed_notional_usd
             FROM bot_config WHERE id = 1
             """;
 
@@ -82,6 +83,7 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
             SuspendOnHighVolume      = r.GetBoolean(r.GetOrdinal("suspend_on_high_volume")),
             MaxOpenTotal             = r.GetInt32(r.GetOrdinal("max_open_total")),
             MaxConsecutiveLosses     = r.GetInt32(r.GetOrdinal("max_consecutive_losses")),
+            FixedNotionalUsd         = r.GetDecimal(r.GetOrdinal("fixed_notional_usd")),
         };
     }
 
@@ -239,6 +241,22 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     }
 
     /// <summary>Write stop command to DB (used by API).</summary>
+    /// <summary>
+    /// Sets the order notional the customer chose in the app. 0 restores risk-based
+    /// sizing. Bounds are the caller's job — the client API checks them against
+    /// Okx:MaxOrderNotionalUsd before calling.
+    /// </summary>
+    public async Task SetFixedNotionalAsync(decimal notionalUsd, CancellationToken ct = default)
+    {
+        const string sql =
+            "UPDATE bot_config SET fixed_notional_usd = @n, updated_at = NOW() WHERE id = 1";
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("n", notionalUsd);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task StopBotAsync(CancellationToken ct = default)
     {
         const string sql = "UPDATE bot_config SET enabled = FALSE, updated_at = NOW() WHERE id = 1";

@@ -155,11 +155,18 @@ public sealed class OkxOrderEngine(
 
         var sized = await EntrySizing.ResolveAsync(
             featureRepo, symbol, capitalUsd, positionPct, sizingOpts.RiskPctPerTrade,
-            okxOptions.MaxOrderNotionalUsd, geometry, ct);
+            okxOptions.MaxOrderNotionalUsd, geometry, sizingOpts.FixedNotionalUsd, ct);
 
         var size     = sized.Size;
         var notional = sized.NotionalUsd;
 
+        if (sizingOpts.FixedNotionalUsd > 0m)
+            log.LogInformation(
+                "[OKX] Size set in the app: {Amount} per trade over a {Stop:P2} stop = " +
+                "{Notional} notional, {RiskUsd:F2} USD at risk.",
+                sizingOpts.FixedNotionalUsd, geometry!.StopPct, notional,
+                notional * geometry.StopPct);
+        else
         if (sized.RiskBased)
             log.LogInformation(
                 "[OKX] Risk-based size: {Risk:P2} of {Capital} capital over a {Stop:P2} stop = " +

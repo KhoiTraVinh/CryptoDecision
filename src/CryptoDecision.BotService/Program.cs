@@ -63,7 +63,7 @@ builder.Services.AddSingleton<ITradingStrategy, CrossVenueFlowStrategy>();
 // ── The dip rule, running in parallel ────────────────────────────────────────
 //
 // CANDLE_REVERSAL: buy after price has fallen ReversalDropPct over ReversalBars closed
-// 15-minute bars, short after it has risen ReversalRisePct over ReversalBarsShort. Price
+// 15-minute bars. Long only since 2026-11-14; the short arm was deleted. Price
 // only — no order flow is read.
 //
 // H13 carries the pre-launch measurement, which was negative in every configuration and

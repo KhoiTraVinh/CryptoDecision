@@ -515,26 +515,6 @@ services:
       # the best one in the book: small falls in quiet tape, 44 trades, +0.1259 mean R.
       # The operator has the table and chose the threshold anyway.
       DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
-      #
-      # ── CANDLE_REVERSAL long-only. Operator, 2026-11-13 ────────────────────
-      #
-      # THIS LINE WAS MISSING AND THE SETTING WAS DEAD. DIP_LONG_ONLY=true sat in
-      # .env on the host from 11-13 with nothing mapping it into the container, so
-      # the bot went on taking shorts while the operator believed it would not.
-      # Found 11-13 by reading the container's env instead of the .env file — which
-      # is the only way to tell these apart, and worth doing for any setting that
-      # matters.
-      #
-      # What it gives up, measured: ReversalLongOnly's own docs put the short side
-      # at +0.348% over two hours across 1,562 closed buckets once the rise
-      # threshold is 1.00%, which it is. Live, 2 short trades returned +$0.043. So
-      # this is not a losing arm being removed — it is the live system being
-      # narrowed to the LONG-only population H43 actually measured.
-      #
-      # FlowStrategy is FlowRatio mode and never reads the reversal thresholds, so
-      # XVENUE_FLOW shorts are untouched and this one line does not break the
-      # both-sections convention H33 set.
-      DipStrategy__Signal__ReversalLongOnly: "${DIP_LONG_ONLY:-false}"
       DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
       FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
 

@@ -210,7 +210,10 @@ public sealed class DatabaseInitializer(
                         -- database without it fails the whole config read and the bot
                         -- never starts — which is why it is mirrored here and not left
                         -- to a migration file alone.
-                        ADD COLUMN IF NOT EXISTS high_volume_reversal_max_hold_minutes INTEGER NOT NULL DEFAULT 180;
+                        ADD COLUMN IF NOT EXISTS high_volume_reversal_max_hold_minutes INTEGER NOT NULL DEFAULT 180,
+                        -- The app's "amount per trade". Selected by name like the rest,
+                        -- so a database without it fails the whole config read.
+                        ADD COLUMN IF NOT EXISTS fixed_notional_usd NUMERIC(12, 2) NOT NULL DEFAULT 0;
                 END IF;
             END
             $$;

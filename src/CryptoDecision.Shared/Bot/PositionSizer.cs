@@ -102,4 +102,36 @@ public static class PositionSizer
             // volatility adjustment lives in the stop distance, which is the input.
             VolatilityScalar: 1.0);
     }
+
+    /// <summary>
+    /// Size from a notional the operator named outright, rather than from a risk
+    /// budget. This is what the phone app's "amount per trade" means: the customer
+    /// says how large the position is, and the risk that follows is whatever the stop
+    /// distance makes it — which is why the app shows amount x stop% beside the field.
+    /// </summary>
+    /// <param name="notionalUsd">Position size in USD. Must be positive.</param>
+    /// <param name="stopPct">
+    /// Distance to the stop, as a fraction. Not used to derive the size here; it is
+    /// taken so the refusal below matches <see cref="ResolveByRisk"/> — a zero stop is
+    /// a broken geometry either way and should not quietly produce a position.
+    /// </param>
+    public static PositionSize ResolveByNotional(decimal notionalUsd, decimal stopPct)
+    {
+        if (stopPct <= 0m)
+            throw new ArgumentOutOfRangeException(
+                nameof(stopPct), stopPct,
+                "Stop distance must be positive; a named notional with no stop is an unprotected position.");
+
+        if (notionalUsd <= 0m)
+            throw new ArgumentOutOfRangeException(
+                nameof(notionalUsd), notionalUsd,
+                "A named notional must be positive; 0 means 'use the risk rule' and is handled by the caller.");
+
+        return new PositionSize(
+            NotionalUsd:      Math.Round(notionalUsd, 2),
+            // Against capital this is not meaningful here — the figure did not come
+            // from capital — so it is left at the share the stop actually risks.
+            AdjustedPct:      stopPct,
+            VolatilityScalar: 1.0);
+    }
 }

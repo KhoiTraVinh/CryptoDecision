@@ -77,13 +77,23 @@ public static class EntrySizing
         decimal            riskPctPerTrade,
         decimal            maxOrderNotionalUsd,
         StopGeometry?      geometry,
+        decimal            fixedNotionalUsd,
         CancellationToken  ct)
     {
         PositionSize size;
         decimal?     volatilityPct = null;
         bool         riskBased;
 
-        if (geometry is { StopPct: > 0m } g)
+        // The customer's own figure from the app, when they have set one. Taken as the
+        // notional directly, because that is what the app promises on the screen: it
+        // shows "most you can lose per trade" as amount x stop%, which is only true if
+        // the amount IS the position size. The ceiling below still applies.
+        if (fixedNotionalUsd > 0m && geometry is { StopPct: > 0m } fixedGeom)
+        {
+            size      = PositionSizer.ResolveByNotional(fixedNotionalUsd, fixedGeom.StopPct);
+            riskBased = false;
+        }
+        else if (geometry is { StopPct: > 0m } g)
         {
             size      = PositionSizer.ResolveByRisk(
                             capitalUsd, riskPctPerTrade, g.StopPct);

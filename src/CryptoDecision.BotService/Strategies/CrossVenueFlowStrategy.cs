@@ -99,10 +99,6 @@ public sealed class CrossVenueFlowStrategy(
             DescribeExitPolicy() +
             $"LONG when price has fallen at least {tuning.Signal.ReversalDropPct:F2}% over " +
             $"{tuning.Signal.ReversalBars} closed 15m bar(s)" +
-            (tuning.Signal.ReversalLongOnly
-                ? ", long only"
-                : $"; SHORT when it has risen {tuning.Signal.ReversalRisePct:F2}% over " +
-                  $"{tuning.Signal.ReversalBarsShort} bar(s)") +
             ". PRICE ONLY for the signal — no order flow is read. signal_outcomes records " +
             "AggregateZ = 0 meaning 'not measured', not 'measured as nothing'. " +
             (tuning.Signal.MaxEntryVolumeUsd > 0m

@@ -281,7 +281,7 @@ public sealed class ClientApiHttpServer(
 
         await WriteAsync(http, 200, new
         {
-            amountPerTradeUsd = link.AmountPerTradeUsd,
+            amountPerTradeUsd = (await configRepo.GetConfigAsync(ct))?.FixedNotionalUsd is > 0m and var a ? a : (decimal?)null,
             minAmountUsd      = min,
             maxAmountUsd      = max,
             stopPct           = await LiveStopPctAsync(ct),
@@ -335,7 +335,8 @@ public sealed class ClientApiHttpServer(
             return;
         }
 
-        await store.SetAmountPerTradeAsync(amount.Value, ct);
+        // bot_config, not client_link: this is the column EntrySizing actually reads.
+        await configRepo.SetFixedNotionalAsync(amount.Value, ct);
         log.LogInformation(
             "[ClientApi] Size for {Masked} set to ${Amount}. Applies to the next entry; "
           + "open positions keep the size they were opened with.",

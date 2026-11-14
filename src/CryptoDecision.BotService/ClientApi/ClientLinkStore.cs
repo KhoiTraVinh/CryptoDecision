@@ -9,7 +9,6 @@ public sealed record ClientLink(
     string ApiKeyMasked,
     string Permissions,
     string? OkxUid,
-    decimal? AmountPerTradeUsd,
     DateTime LinkedAt);
 
 /// <summary>
@@ -103,9 +102,6 @@ public sealed class ClientLinkStore
         var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
                            .Replace('+', '-').Replace('/', '_').TrimEnd('=');
 
-        // Re-linking keeps amount_per_trade_usd: the customer set a size they meant, and
-        // silently resetting it to the server default because they rotated a key is how
-        // a position comes back ten times larger than they expect.
         const string sql = """
             INSERT INTO client_link
                 (id, api_key, secret_enc, passphrase_enc, permissions, okx_uid, token_hash, linked_at)
@@ -133,18 +129,6 @@ public sealed class ClientLinkStore
         return token;
     }
 
-    /// <summary>Stores the position size the customer chose. Bounds are the caller's job.</summary>
-    public async Task SetAmountPerTradeAsync(decimal amountUsd, CancellationToken ct)
-    {
-        const string sql =
-            "UPDATE client_link SET amount_per_trade_usd = @a WHERE id = 1";
-
-        await using var conn = await _db.OpenConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("a", amountUsd);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
     public async Task<bool> UnlinkAsync(CancellationToken ct)
     {
         await using var conn = await _db.OpenConnectionAsync(ct);
@@ -160,7 +144,7 @@ public sealed class ClientLinkStore
         const string sql = """
             UPDATE client_link SET last_seen_at = now()
             WHERE id = 1 AND token_hash = @th
-            RETURNING api_key, permissions, okx_uid, amount_per_trade_usd, linked_at
+            RETURNING api_key, permissions, okx_uid, linked_at
             """;
 
         await using var conn = await _db.OpenConnectionAsync(ct);
@@ -174,8 +158,7 @@ public sealed class ClientLinkStore
             Mask(r.GetString(0)),
             r.GetString(1),
             r.IsDBNull(2) ? null : r.GetString(2),
-            r.IsDBNull(3) ? null : r.GetDecimal(3),
-            r.GetDateTime(4));
+            r.GetDateTime(3));
     }
 
     /// <summary>

@@ -205,7 +205,7 @@ public sealed class PaperOrderEngine(
         // simulation, since the cap only ever shrinks the order.
         var sized = await EntrySizing.ResolveAsync(
             featureRepo, symbol, capitalUsd, positionPct, state.Options.RiskPctPerTrade,
-            okxOptions.MaxOrderNotionalUsd, geometry, ct);
+            okxOptions.MaxOrderNotionalUsd, geometry, state.Options.FixedNotionalUsd, ct);
 
         var size     = sized.Size;
         var notional = sized.NotionalUsd;

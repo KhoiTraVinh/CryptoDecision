@@ -240,6 +240,19 @@ public sealed record BotOptions
     public int          SameSideLossBlockMinutes { get; set; } = 60;
 
     /// <summary>
+    /// Order notional in USD, set by the customer in the app. 0 falls back to the
+    /// risk-based rule (capital x risk_pct_per_trade / stop_pct). Always capped by
+    /// Okx:MaxOrderNotionalUsd, so it can lower the order but never raise it past the
+    /// per-order ceiling.
+    ///
+    /// Added 2026-11-14 to fix a setting that lied: the app stored this figure on
+    /// client_link and NOTHING in the order path read it, so the operator raised the
+    /// amount to $20 and orders kept opening at the old size. One column, on the
+    /// record the order engines already receive, rather than two that can drift.
+    /// </summary>
+    public decimal      FixedNotionalUsd { get; set; } = 0m;
+
+    /// <summary>
     /// Concurrent positions opened through the FlowRatio high-volume waiver. 0 disables.
     ///
     /// 1, and separate from MaxOpenPerSide because the two constrain different things.
