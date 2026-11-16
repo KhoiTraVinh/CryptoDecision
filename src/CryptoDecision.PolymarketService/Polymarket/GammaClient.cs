@@ -75,6 +75,56 @@ public sealed class GammaClient(
 
     /// <summary>
     /// <summary>
+    /// Current round score for specific events, in one request.
+    ///
+    /// This exists because the full market sweep is on a two-minute clock and a CS2 round
+    /// lasts about the same, so a cancel driven off that sweep arrives after the map has
+    /// already ended - measured on 2026-11-15/16, two of three cancels landed 21 and 34
+    /// seconds after the order had already been filled. The score has to move faster than
+    /// the market list, and it can: Gamma accepts repeated <c>id=</c> and answers with just
+    /// those events, so the handful we have money resting on cost a single small call.
+    ///
+    /// Returns only what it could read. A missing entry means "no answer", never "0-0" -
+    /// the caller must keep treating absence as "do not act".
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, MatchScore>> FetchScoresAsync(
+        IReadOnlyCollection<string> eventIds, CancellationToken ct)
+    {
+        var found = new Dictionary<string, MatchScore>();
+        if (eventIds.Count == 0) return found;
+
+        var query = string.Join("&", eventIds.Where(id => !string.IsNullOrEmpty(id))
+                                             .Distinct()
+                                             .Select(id => $"id={Uri.EscapeDataString(id)}"));
+        if (query.Length == 0) return found;
+
+        try
+        {
+            using var response = await http.GetAsync($"{_opt.GammaUrl}/events?{query}", ct);
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return found;
+
+            foreach (var ev in doc.RootElement.EnumerateArray())
+            {
+                var id = Str(ev, "id");
+                if (string.IsNullOrEmpty(id)) continue;
+                if (ParseScore(ev) is { } s) found[id] = s;
+            }
+        }
+        catch (Exception ex)
+        {
+            // A stale score is the normal state between sweeps, so a failure here is not
+            // worth stopping a cycle for - it just means this tick acts on what it had.
+            log.LogWarning(ex, "Score refresh for {Count} events failed; keeping the previous scores", eventIds.Count);
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// Live round score from the event's <c>score</c> field, or null when it is not available.
     ///
     /// The field is <c>"12-10|1-1|Bo3"</c> - rounds on the current map, maps won, format -
@@ -321,11 +371,12 @@ public sealed class GammaClient(
             // Competition lives on the event, not the market, so it is read once here.
             var leagues = EventTags(ev);
             var score = ParseScore(ev);
+            var eventId = Str(ev, "id") ?? "";
 
             foreach (var m in markets.EnumerateArray())
             {
                 var outcome = Map(m, leagues, now, skipped);
-                if (outcome is not null) results.Add(outcome with { Score = score });
+                if (outcome is not null) results.Add(outcome with { Score = score, EventId = eventId });
             }
         }
 

@@ -438,8 +438,35 @@ public sealed class PolymarketOptions
         DecidedAtRounds > 0
         && market.Score is { } s
         && (DecidedGames.Count == 0 || DecidedGames.Contains(market.Game))
-        && !s.InOvertime(DecidedAtRounds)
-        && s.Leader == DecidedAtRounds;
+        && s.Leader >= DecidedAtRounds
+        && s.Leader <= RegulationRounds;
+
+    /// <summary>
+    /// The round count that ends the map in regulation - 13 for CS2. Above it the map is
+    /// in overtime and the block lifts, by operator decision on 2026-11-14.
+    ///
+    /// This is the upper edge of the blocked band, and the band is why it exists. An
+    /// earlier version tested <c>Leader == DecidedAtRounds</c>, which reads correctly but
+    /// is wrong against a sampled feed: scores arrive on a poll, and a poll can land
+    /// either side of the only value it is looking for. At a two-minute refresh and a
+    /// two-minute round, 11 to 13 between two reads is ordinary, and an equality test sees
+    /// nothing at all on exactly the maps it was written to stop.
+    ///
+    /// Defaults to <see cref="DecidedAtRounds"/> + 1 when left at 0.
+    /// </summary>
+    public int RegulationWin { get; set; } = 0;
+
+    private int RegulationRounds => RegulationWin > 0 ? RegulationWin : DecidedAtRounds + 1;
+
+    /// <summary>
+    /// How often to re-read the round score for events we have orders resting on, in
+    /// seconds. **0 disables the fast refresh** and scores only move with the market sweep,
+    /// which is two minutes and demonstrably too slow to cancel in time.
+    ///
+    /// One small Gamma call per tick, covering every event at once, and only while
+    /// something is actually resting.
+    /// </summary>
+    public int ScoreRefreshSeconds { get; set; } = 0;
 
     /// <summary>Ignore matches scheduled to end further out than this. Cuts the scan universe.</summary>
     public double MaxHoursToEnd { get; set; } = 24;

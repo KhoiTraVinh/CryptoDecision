@@ -315,7 +315,24 @@ public sealed class CrossVenueFlowStrategy(
             {
                 var tape = await flowRepo.GetLiveBucketVolumeAsync(opts.Symbol, ct);
 
-                if (tape.TotalUsd >= tuning.Signal.MaxEntryVolumeUsd)
+                // Same single read, second question asked of it: not how MUCH traded,
+                // but how it was CUT UP. A window flooded with small orders is the one
+                // state that measured worse in both sample halves — see MinAvgTradeUsd.
+                if (tuning.Signal.MinAvgTradeUsd > 0m
+                    && tape.TradeCount > 0
+                    && tape.AvgTradeUsd < tuning.Signal.MinAvgTradeUsd)
+                {
+                    verdict = FlowVerdict.Abstain(
+                        "TAPE_TOO_FINE",
+                        $"The rolling 15 minutes traded ${tape.TotalUsd / 1_000_000m:F2}M across " +
+                        $"{tape.TradeCount:N0} fills, a mean of ${tape.AvgTradeUsd:F0} against the " +
+                        $"${tuning.Signal.MinAvgTradeUsd:F0} floor. The price signal fired and is " +
+                        "unchanged; what is refused is taking it into a tape cut this fine. " +
+                        "Measured worst-in-both-halves on 8,853 windows, and 3 of 4 stop-outs.",
+                        verdict.AggregateOfi, verdict.AggregateZ, verdict.AgreeingVenues,
+                        verdict.ParticipatingVenues, verdict.DispersionBps);
+                }
+                else if (tape.TotalUsd >= tuning.Signal.MaxEntryVolumeUsd)
                 {
                     verdict = FlowVerdict.Abstain(
                         "TAPE_TOO_HEAVY",

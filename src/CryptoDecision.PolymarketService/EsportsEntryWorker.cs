@@ -65,6 +65,9 @@ public sealed class EsportsEntryWorker(
     /// <summary>Markets skipped this cycle because the map is at match point. Reset per cycle.</summary>
     private int _skippedDecided;
 
+    /// <summary>When the fast score refresh last ran.</summary>
+    private DateTimeOffset _scoresAt = DateTimeOffset.MinValue;
+
 
     private IReadOnlyList<EsportsMarket> _markets = [];
     private DateTimeOffset _marketsAt = DateTimeOffset.MinValue;
@@ -244,6 +247,18 @@ public sealed class EsportsEntryWorker(
 
             // Markets that just left the eligible set are matches that are over. Anything
             // we left resting on them is exposure on a game nobody is watching.
+            await CancelOrdersOnFinishedMarketsAsync(ct);
+        }
+
+        // Scores on their own, much faster clock. The market sweep above is two minutes
+        // because it is expensive; a CS2 round is about the same length, so a cancel that
+        // waits for it arrives after the map has ended. Only runs while something is
+        // actually resting, and asks for those events alone.
+        if (_opt.ScoreRefreshSeconds > 0 && _opt.DecidedAtRounds > 0 && _restingOrders.Count > 0
+            && now - _scoresAt > TimeSpan.FromSeconds(_opt.ScoreRefreshSeconds))
+        {
+            _scoresAt = now;
+            await RefreshScoresAsync(ct);
             await CancelOrdersOnFinishedMarketsAsync(ct);
         }
 
@@ -562,6 +577,35 @@ public sealed class EsportsEntryWorker(
     /// A resting 1c bid on a finished match is a live order on a game whose result is
     /// already known to everyone watching it.
     /// </summary>
+    /// <summary>
+    /// Re-reads the round score for the events we have orders resting on and writes it
+    /// back onto the cached markets.
+    ///
+    /// Scoped to resting orders on purpose. Everything else can wait for the sweep: a
+    /// market we have no money on cannot cost anything by being one scan stale, and
+    /// widening this to the whole list would put the expensive call back on the fast clock.
+    /// </summary>
+    private async Task RefreshScoresAsync(CancellationToken ct)
+    {
+        var exposed = _markets
+            .Where(m => m.TokenIds.Any(t => _restingOrders.ContainsValue(t)) && m.EventId.Length > 0)
+            .Select(m => m.EventId)
+            .Distinct()
+            .ToList();
+
+        if (exposed.Count == 0) return;
+
+        var scores = await gamma.FetchScoresAsync(exposed, ct);
+        if (scores.Count == 0) return;
+
+        // Records are immutable, so the cached list is rebuilt rather than mutated. A
+        // market whose event is missing from the answer keeps the score it already had:
+        // absence is "no answer", not "nothing scored".
+        _markets = _markets
+            .Select(m => scores.TryGetValue(m.EventId, out var s) ? m with { Score = s } : m)
+            .ToList();
+    }
+
     private async Task CancelOrdersOnFinishedMarketsAsync(CancellationToken ct)
     {
         if (_restingOrders.Count == 0 || _opt.DryRun) return;

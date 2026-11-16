@@ -13,7 +13,15 @@ public sealed record EsportsMarket(
     bool NegRisk,
     DateTimeOffset? EndDate,
     decimal VolumeUsd,
-    MatchScore? Score = null);
+    MatchScore? Score = null,
+
+    /// <summary>
+    /// Gamma event this market belongs to. The score lives on the event rather than the
+    /// market, and the full market sweep is far too slow to drive a cancel off - so the
+    /// id is carried here to let a cheap, targeted refresh ask for just the handful of
+    /// events we actually have money resting on.
+    /// </summary>
+    string EventId = "");
 
 /// <summary>
 /// Live round score of the map being played, read from the event's <c>score</c> field

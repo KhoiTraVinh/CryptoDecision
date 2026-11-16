@@ -516,21 +516,23 @@ services:
       # The operator has the table and chose the threshold anyway.
       DipStrategy__Signal__ReversalDropPct: "${DIP_REVERSAL_DROP_PCT:-0.80}"
       #
-      # ── Operator 2026-11-14: refuse a long into N consecutive red 15m candles ──
+      # ── Operator 2026-11-16: refuse an entry into a tape cut too fine ──────
       #
-      # N=3, and the number is the whole rule. At 2 it restates the entry condition —
-      # a 0.60% fall over two bars is almost always two red bars — and blocks 89% of
-      # entries. At 3 it blocks 46%, because two red candles are the normal shape of a
-      # dip and a third says the dip is still extending.
+      # Mean size of a filled trade over the rolling 15 minutes, in USD. Below this
+      # the entry is refused. 0 disables.
       #
-      # Measured on 28 closed trades: blocks 13 carrying -.0106, keeps 15 carrying
-      # +/usr/bin/bash.7370, taking CANDLE_REVERSAL from -.27 to +/usr/bin/bash.74. Halved by trade count
-      # the blocked group is negative in BOTH halves (-0.25 over 6, -1.76 over 7), which
-      # a trend filter and a post-stop side block both failed this same session.
+      # Best-powered signal this project has tested. 8,853 windows, forward 60-min
+      # return by mean-trade-size quintile, halved by time: the bottom quintile
+      # ($239) is worst in BOTH halves, -0.1244 and -0.3352, against -0.0278 and
+      # -0.1522 for the middle. A trend filter, a post-stop side block and an
+      # order-flow divergence test all failed that same check.
       #
-      # Thin: 6 and 7 blocked trades per half. It removes a loss, it does not create an
-      # edge — the kept group is still negative in the second half. 0 disables.
-      DipStrategy__Signal__BlockRedCandles: "${DIP_BLOCK_RED_CANDLES:-0}"
+      # On live trades: of 24 with tick data, the 4 taken under $272 took 3 of the 4
+      # stop-outs and won none — about 0.8% by chance at a 17% base rate.
+      #
+      # Does not bind on the waiver path: every HIGH_VOLUME entry sat at $338-578,
+      # because a volume spike is made of larger fills. Median window is $336.
+      DipStrategy__Signal__MinAvgTradeUsd: "${DIP_MIN_AVG_TRADE_USD:-0}"
       DipStrategy__UseFlowOfiExit:          "${USE_FLOW_OFI_EXIT:-false}"
       FlowStrategy__UseFlowOfiExit:         "${USE_FLOW_OFI_EXIT:-false}"
 
@@ -682,6 +684,8 @@ services:
       # 0 = tat. Vao hiep phu thi tu go chan, quay ve dai arm.
       Polymarket__DecidedAtRounds:  "${POLY_DECIDED_ROUNDS:-0}"
       Polymarket__DecidedGamesCsv:  "${POLY_DECIDED_GAMES:-}"
+      Polymarket__RegulationWin:    "${POLY_REGULATION_WIN:-0}"
+      Polymarket__ScoreRefreshSeconds: "${POLY_SCORE_REFRESH_SECONDS:-0}"
 
       # Bong da. Do tren 1.570 token cua 806 market da dong: cua thua chi xuong toi 1c o
       # 2,0% so market (vi market dong ngay tieng coi man cuoc), nen ky vong la 1 lenh
