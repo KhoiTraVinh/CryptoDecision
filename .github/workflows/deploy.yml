@@ -179,9 +179,32 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
+
           # Pinned rather than StrictHostKeyChecking=no. Accepting any key on every run
           # is how a deploy pipeline gets pointed at someone else's host.
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          #
+          # Retried, because the single attempt this replaces was the most fragile step
+          # in the file. The tailnet join returns once tailscaled is up, not once a
+          # route to the peer exists -- peer setup can still be negotiating, and over a
+          # DERP relay that takes seconds. ssh-keyscan gives up after 5s by default and
+          # exits 1 when it reads no key, which under `bash -e` failed the whole deploy.
+          #
+          # stderr is no longer discarded. The old `2>/dev/null` threw away the one line
+          # that separates "route not up yet" from "ACL denies tag:ci" from
+          # "DEPLOY_HOST points elsewhere", leaving a bare exit 1 to debug.
+          for attempt in 1 2 3 4 5 6; do
+            if ssh-keyscan -H -T 10 "$HOST" >> ~/.ssh/known_hosts; then
+              echo "Host key pinned on attempt $attempt."
+              exit 0
+            fi
+            echo "Attempt $attempt: no host key yet; waiting for the tailnet route."
+            sleep 10
+          done
+
+          echo "::error::Could not read a host key from the deploy host after 6 attempts (~60s)."
+          echo "Tailnet state on the runner:"
+          tailscale status || true
+          exit 1
 
       # Only what the host actually needs: the two compose files and sql/, which
       # db-migrate mounts. Source code is not shipped — the images carry it.

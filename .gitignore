@@ -1,5 +1,8 @@
 # ── Environment (chứa credentials, không commit) ─────────────────────────────
 .env
+.env.*
+*.env.bak
+.env.bak-*
 
 # ── .NET build artifacts ─────────────────────────────────────────────────────
 src/*/bin/
