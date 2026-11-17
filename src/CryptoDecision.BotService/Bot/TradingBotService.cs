@@ -10,7 +10,7 @@ namespace CryptoDecision.BotService.Bot;
 ///
 /// Polls bot_config from PostgreSQL for start/stop. That row used to be written by
 /// an API on behalf of a dashboard; both are gone, so it is written by hand:
-/// <c>UPDATE bot_config SET enabled = true WHERE id = 1;</c>
+/// <c>UPDATE bot_config SET enabled = true WHERE id = &lt;this process's account&gt;;</c>
 ///
 /// The heartbeat and stats still go back to bot_config. They were put there so a
 /// second process could display them, but the reason that outlives the dashboard is
@@ -26,12 +26,22 @@ public sealed class TradingBotService(
     SignalOutcomeRepository signals,
     // For the per-order notional ceiling, applied when the order is sized.
     OkxOptions            okxOptions,
+    BotAccount            account,
     ILogger<TradingBotService> log) : BackgroundService
 {
+    /// <summary>
+    /// Whether the "there is no configuration for this account" warning has been
+    /// said. Logged once rather than every five seconds, and reset when a row
+    /// appears, so the message is a state change instead of a wall of text.
+    /// </summary>
+    private bool _warnedMissingConfig;
+
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        log.LogInformation("[TradingBot] Worker Service started. Polling bot_config for commands...");
+        log.LogInformation(
+            "[TradingBot] Worker Service started for {Account}. Polling its bot_config row for commands...",
+            account);
 
         // ── Seed in-memory stats from the DB ──
         //
@@ -67,9 +77,28 @@ public sealed class TradingBotService(
                 var dbConfig = await configRepo.GetConfigAsync(stoppingToken);
                 if (dbConfig is null)
                 {
+                    // Idle, not broken -- and the difference is invisible without this.
+                    // A container started for an account that has no bot_config row does
+                    // nothing at all: it polls, finds nothing, and sleeps. That is the
+                    // correct behaviour and the most confusing possible symptom, so it
+                    // says so once and names the fix.
+                    if (!_warnedMissingConfig)
+                    {
+                        _warnedMissingConfig = true;
+                        log.LogWarning(
+                            "[TradingBot] There is no bot_config row for {Account}, so this "
+                          + "container is idle and will stay idle until one exists. Create it "
+                          + "by cloning the operator's settings: CREATE TEMP TABLE a AS SELECT "
+                          + "* FROM bot_config WHERE id = 1; UPDATE a SET id = {Id}, enabled = "
+                          + "false; INSERT INTO bot_config SELECT * FROM a;",
+                            account, account.Id);
+                    }
+
                     await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
                     continue;
                 }
+
+                _warnedMissingConfig = false;
 
                 if (dbConfig.Enabled && !state.IsRunning)
                 {
@@ -496,8 +525,8 @@ public sealed class TradingBotService(
             log.LogError(
                 "[TradingBot] Circuit breaker {Code} tripped: {Message} Disabling the bot in " +
                 "bot_config — it will NOT restart on its own. Review the trades, then re-arm " +
-                "with: UPDATE bot_config SET enabled = true WHERE id = 1;",
-                breach.Code, breach.Message);
+                "with: UPDATE bot_config SET enabled = true WHERE id = {Account};",
+                breach.Code, breach.Message, account.Id);
 
             try
             {

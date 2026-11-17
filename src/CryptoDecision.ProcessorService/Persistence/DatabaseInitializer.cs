@@ -267,6 +267,11 @@ public sealed class DatabaseInitializer(
                 ADD COLUMN IF NOT EXISTS exit_algo_id   TEXT,
                 ADD COLUMN IF NOT EXISTS leverage       NUMERIC(6, 2),
                 ADD COLUMN IF NOT EXISTS margin_mode    TEXT,
+                -- Which account placed it. Mirrors sql/057; repeated here because this
+                -- initializer is what creates bot_trades on a database that has never
+                -- run the sql/ bootstrap, and the bot's every read of this table is
+                -- now filtered by it -- an absent column means no trade is ever found.
+                ADD COLUMN IF NOT EXISTS account_id     INT NOT NULL DEFAULT 1,
                 -- Why the trade was entered, kept with the trade.
                 --
                 -- Every exit reason was recorded and no entry reason was, so a
@@ -310,6 +315,8 @@ public sealed class DatabaseInitializer(
 
         await Exec(conn, """
             CREATE INDEX IF NOT EXISTS idx_bot_trades_symbol ON bot_trades(symbol);
+            CREATE INDEX IF NOT EXISTS bot_trades_account_opened_idx
+                ON bot_trades(account_id, opened_at DESC);
             """, ct);
         await Exec(conn, """
             CREATE INDEX IF NOT EXISTS idx_bot_trades_status ON bot_trades(status);

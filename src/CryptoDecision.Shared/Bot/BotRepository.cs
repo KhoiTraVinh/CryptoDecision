@@ -4,7 +4,7 @@ using NpgsqlTypes;
 namespace CryptoDecision.Shared.Bot;
 
 /// <summary>Persists paper/real trades to the bot_trades table.</summary>
-public sealed class BotRepository(NpgsqlDataSource dataSource)
+public sealed class BotRepository(NpgsqlDataSource dataSource, BotAccount account)
 {
     /// <summary>
     /// Attach the strategy's reasoning to a trade that has just been opened.
@@ -93,11 +93,11 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
     {
         const string sql = """
             INSERT INTO bot_trades
-              (symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at,
+              (account_id, symbol, side, strategy, entry_price, quantity, notional_usd, status, opened_at,
                mode, exchange, entry_order_id, fee_usd, exit_algo_id, leverage, margin_mode,
                entry_path)
             VALUES
-              (@symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt,
+              (@accountId, @symbol, @side, @strategy, @entryPrice, @qty, @notional, @status, @openedAt,
                @mode, @exchange, @entryOrderId, @feeUsd, @exitAlgoId, @leverage, @marginMode,
                @entryPath)
             RETURNING id
@@ -105,6 +105,7 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId",  account.Id);
         cmd.Parameters.AddWithValue("symbol",     t.Symbol);
         cmd.Parameters.AddWithValue("side",       t.Side);
         cmd.Parameters.AddWithValue("strategy",   t.Strategy);
@@ -258,11 +259,13 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
             SELECT {TradeColumns}
             FROM bot_trades
             WHERE status = 'OPEN'
+              AND account_id = @accountId
             ORDER BY opened_at ASC
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         var result = new List<BotTrade>();
@@ -319,12 +322,14 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
         const string sql = $"""
             SELECT {TradeColumns}
             FROM bot_trades
+            WHERE account_id = @accountId
             ORDER BY opened_at DESC
             LIMIT @limit
             """;
 
         await using var conn   = await dataSource.OpenConnectionAsync(ct);
         await using var cmd    = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         cmd.Parameters.AddWithValue("limit", limit);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -357,10 +362,12 @@ public sealed class BotRepository(NpgsqlDataSource dataSource)
               AND status IN ('CLOSED','STOPPED')
               AND (@symbol IS NULL OR symbol = @symbol)
               AND (@mode   IS NULL OR mode   = @mode)
+              AND account_id = @accountId
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         cmd.Parameters.AddWithValue("symbol", symbol ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("mode",   mode   ?? (object)DBNull.Value);
         return (decimal)(await cmd.ExecuteScalarAsync(ct))!;

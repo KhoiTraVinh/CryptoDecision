@@ -1,4 +1,5 @@
 using CryptoDecision.BotService.Exchanges;
+using CryptoDecision.Shared.Bot;
 
 namespace CryptoDecision.BotService.ClientApi;
 
@@ -16,6 +17,7 @@ namespace CryptoDecision.BotService.ClientApi;
 /// </summary>
 public sealed class LinkedOkxCredentialSource(
     ClientLinkStore store,
+    BotAccount account,
     ILogger<LinkedOkxCredentialSource> log) : IOkxCredentialSource
 {
     // Signed calls happen many times a cycle and each read is a database round trip
@@ -49,7 +51,7 @@ public sealed class LinkedOkxCredentialSource(
     {
         var was = _cached;
 
-        var creds = await store.GetCredentialsAsync(ct);
+        var creds = await store.GetCredentialsAsync(account.Id, ct);
         _cached   = creds is { } c ? new OkxCredentials(c.ApiKey, c.Secret, c.Passphrase) : null;
         _loadedAt = DateTime.UtcNow;
         _primed   = true;

@@ -4,7 +4,7 @@ using NpgsqlTypes;
 namespace CryptoDecision.Shared.Bot;
 
 /// <summary>
-/// Reads/writes the singleton bot_config row.
+/// Reads/writes one account's bot_config row.
 ///
 /// This used to bridge an API and the worker: the API wrote start/stop and the full
 /// configuration, the worker polled and executed. The API and its dashboard are
@@ -12,17 +12,36 @@ namespace CryptoDecision.Shared.Bot;
 /// StartBotAsync was removed rather than left as a method with no caller. Starting
 /// the bot is:
 ///
-///     UPDATE bot_config SET enabled = true WHERE id = 1;
+///     UPDATE bot_config SET enabled = true WHERE id = &lt;account&gt;;
 ///
 /// and the worker picks it up within one poll. Everything the worker still writes
 /// here — the heartbeat, the refusal trail, the last verdict, the sizing note — is
 /// written so it survives a container restart and can be read with SQL, which was
 /// always the reason and is not affected by there being no web page.
+///
+/// The row is picked by <see cref="BotAccount"/>, which is fixed for the life of the
+/// process: a container trades exactly one account. The only methods that take an
+/// explicit account id are the two the client API calls, because that API answers
+/// handsets belonging to every account from a single process.
 /// </summary>
-public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
+public sealed class BotConfigRepository(NpgsqlDataSource dataSource, BotAccount account)
 {
     /// <summary>Read the current bot config from the database (used by Bot worker).</summary>
-    public async Task<BotOptions?> GetConfigAsync(CancellationToken ct = default)
+    /// <summary>
+    /// This process's own account. Every caller inside the trading loop wants this
+    /// one -- the account the container was started for.
+    /// </summary>
+    public Task<BotOptions?> GetConfigAsync(CancellationToken ct = default) =>
+        GetConfigAsync(account.Id, ct);
+
+    /// <summary>
+    /// A named account's configuration.
+    ///
+    /// Only the client API needs this. It serves every handset from one process, so
+    /// the account it must read is whichever one is behind the bearer token, not the
+    /// one this process happens to trade.
+    /// </summary>
+    public async Task<BotOptions?> GetConfigAsync(int accountId, CancellationToken ct = default)
     {
         const string sql = """
             SELECT enabled, paper_mode, symbol, exchange, active_strategies,
@@ -40,11 +59,12 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                    COALESCE(max_open_total, 5) AS max_open_total,
                    COALESCE(max_consecutive_losses, 5) AS max_consecutive_losses,
                    COALESCE(fixed_notional_usd, 0) AS fixed_notional_usd
-            FROM bot_config WHERE id = 1
+            FROM bot_config WHERE id = @accountId
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
         await using var r    = await cmd.ExecuteReaderAsync(ct);
         if (!await r.ReadAsync(ct)) return null;
 
@@ -103,11 +123,12 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                 win_count        = @wins,
                 loss_count       = @losses,
                 updated_at       = NOW()
-            WHERE id = 1
+            WHERE id = @accountId
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         cmd.Parameters.AddWithValue("lastEval",    NpgsqlDbType.TimestampTz, lastEvalAt);
         cmd.Parameters.AddWithValue("openCount",   openTradeCount);
         cmd.Parameters.AddWithValue("totalTrades", totalTrades);
@@ -146,11 +167,12 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
                                       END,
                 refusal_count_date  = CURRENT_DATE,
                 updated_at          = NOW()
-            WHERE id = 1
+            WHERE id = @accountId
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         // Truncated: this is meant to be read at a glance, and an exception message with a
         // stack-trace tail would bury the reason itself.
         cmd.Parameters.AddWithValue("reason",
@@ -231,11 +253,12 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
         const string sql = """
             UPDATE bot_config
             SET last_sizing_note = @note, updated_at = NOW()
-            WHERE id = 1
+            WHERE id = @accountId
             """;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         cmd.Parameters.AddWithValue("note", note.Length > 300 ? note[..300] : note);
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -246,22 +269,31 @@ public sealed class BotConfigRepository(NpgsqlDataSource dataSource)
     /// sizing. Bounds are the caller's job — the client API checks them against
     /// Okx:MaxOrderNotionalUsd before calling.
     /// </summary>
-    public async Task SetFixedNotionalAsync(decimal notionalUsd, CancellationToken ct = default)
+    public Task SetFixedNotionalAsync(decimal notionalUsd, CancellationToken ct = default) =>
+        SetFixedNotionalAsync(account.Id, notionalUsd, ct);
+
+    /// <summary>
+    /// As above, for the account behind a bearer token rather than this process's own.
+    /// </summary>
+    public async Task SetFixedNotionalAsync(
+        int accountId, decimal notionalUsd, CancellationToken ct = default)
     {
         const string sql =
-            "UPDATE bot_config SET fixed_notional_usd = @n, updated_at = NOW() WHERE id = 1";
+            "UPDATE bot_config SET fixed_notional_usd = @n, updated_at = NOW() WHERE id = @accountId";
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
         cmd.Parameters.AddWithValue("n", notionalUsd);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task StopBotAsync(CancellationToken ct = default)
     {
-        const string sql = "UPDATE bot_config SET enabled = FALSE, updated_at = NOW() WHERE id = 1";
+        const string sql = "UPDATE bot_config SET enabled = FALSE, updated_at = NOW() WHERE id = @accountId";
         await using var conn = await dataSource.OpenConnectionAsync(ct);
         await using var cmd  = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", account.Id);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

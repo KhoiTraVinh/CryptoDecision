@@ -1,3 +1,4 @@
+using CryptoDecision.Shared.Bot;
 using CryptoDecision.Shared.Signals;
 using Npgsql;
 
@@ -53,6 +54,7 @@ public sealed class SignalOutcomeLabeler(
     NpgsqlDataSource              dataSource,
     SignalOutcomeRepository       repository,
     SignalLabelOptions            options,
+    BotAccount                    account,
     ILogger<SignalOutcomeLabeler> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -145,7 +147,8 @@ public sealed class SignalOutcomeLabeler(
         {
             await using var conn = await dataSource.OpenConnectionAsync(ct);
             await using var cmd  = new NpgsqlCommand(
-                "SELECT max_hold_minutes FROM bot_config WHERE id = 1", conn);
+                "SELECT max_hold_minutes FROM bot_config WHERE id = @accountId", conn);
+            cmd.Parameters.AddWithValue("accountId", account.Id);
 
             if (await cmd.ExecuteScalarAsync(ct) is int minutes && minutes > 0) return minutes;
         }

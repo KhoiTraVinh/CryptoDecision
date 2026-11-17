@@ -39,3 +39,11 @@ services:
 
   polymarket:
     image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/polymarket:${IMAGE_TAG:-latest}
+
+  # The customer's account runs the SAME image as the operator's, by definition:
+  # both are the same build pointed at different bot_config rows, and pulling two
+  # different tags here is how they would silently diverge into trading different
+  # rules. It is named separately only because compose needs a service entry; there
+  # is no second image to build or push.
+  bot-customer:
+    image: ${IMAGE_REGISTRY:?IMAGE_REGISTRY is required}/bot:${IMAGE_TAG:-latest}

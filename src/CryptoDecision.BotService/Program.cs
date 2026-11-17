@@ -97,6 +97,36 @@ builder.Services.AddSingleton<ITradingStrategy>(sp =>
         sp.GetRequiredService<ILogger<CrossVenueFlowStrategy>>());
 });
 
+// ─── Which account is this process? ───────────────────────────────────────────
+//
+// Execution is one process per trading account. The trading loop, its circuit
+// breakers, its open positions and its credentials were all written around a single
+// account and are correct exactly as they stand, provided each process only ever
+// sees one -- so a second customer gets a second container rather than a rewrite of
+// the loop.
+//
+// Unset means account 1, the operator, so a deployment that predates any of this is
+// unchanged. A value that is present but not a positive integer is fatal: the
+// fallback would be account 1, and a typo in a CUSTOMER's container would then place
+// that customer's orders against the operator's funds.
+var accountRaw = builder.Configuration["Bot:AccountId"];
+var botAccount = BotAccount.Operator;
+if (!string.IsNullOrWhiteSpace(accountRaw))
+{
+    if (!int.TryParse(accountRaw, out var parsedAccountId))
+        throw new InvalidOperationException(
+            $"Bot__AccountId is '{accountRaw}', which is not a number. It must match a "
+          + "bot_config.id — 1 for the operator.");
+
+    if (parsedAccountId <= 0)
+        throw new InvalidOperationException(
+            $"Bot__AccountId is {parsedAccountId}. It must be a positive bot_config.id. "
+          + "There is no fallback, because falling back would mean trading account 1.");
+
+    botAccount = new BotAccount(parsedAccountId);
+}
+builder.Services.AddSingleton(botAccount);
+
 // ─── Trading Bot ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<BotStateService>();
 builder.Services.AddSingleton<BotRepository>();
@@ -115,7 +145,11 @@ builder.Services.AddSingleton<SignalLabelOptions>(sp =>
     builder.Configuration.GetSection(SignalLabelOptions.Section).Bind(options);
     return options;
 });
-builder.Services.AddHostedService<SignalOutcomeLabeler>();
+// Research only, and it writes to tables shared by every account, so exactly one
+// process should run it. Two containers labelling the same signals would race to
+// write the same rows for no gain. The operator's container is the one that does.
+if (botAccount.IsOperator)
+    builder.Services.AddHostedService<SignalOutcomeLabeler>();
 builder.Services.AddHttpClient("binance-public", c =>
 {
     c.BaseAddress = new Uri("https://api.binance.com");
@@ -203,7 +237,12 @@ if (builder.Configuration.GetValue("ClientApi:Enabled", false))
     builder.Services.AddSingleton<OkxCredentialVerifier>();
     builder.Services.AddSingleton<ClientLinkStore>();
     builder.Services.AddSingleton<ClientApiQueries>();
-    builder.Services.AddHostedService<ClientApiHttpServer>();
+    // The public listener runs in ONE process. Every account's handset is served by
+    // it -- the bearer token says which account the caller is -- so a second trading
+    // container must not open a second listener on the same port. It still needs
+    // everything above, because it signs with the key that API stored.
+    if (builder.Configuration.GetValue("ClientApi:ServeHttp", true))
+        builder.Services.AddHostedService<ClientApiHttpServer>();
 
     // The bot signs with the APP-LINKED key instead of Okx:ApiKey, which is what makes
     // removing those variables from the server safe. Registered as ONE instance behind
@@ -267,7 +306,9 @@ await credentialSource.PrimeAsync(CancellationToken.None);
 
 // Which account this process can spend from is the single most important fact about
 // it, so it is stated on its own line rather than inferred from the armed/disabled one.
-startupLog.LogWarning("[Startup] Signing with {Source}.", credentialSource.Describe());
+startupLog.LogWarning(
+    "[Startup] This process trades {Account}, signing with {Source}.",
+    botAccount, credentialSource.Describe());
 
 var liveRefusal = okxOptions.DescribeRefusal() ?? credentialSource.DescribeRefusal();
 

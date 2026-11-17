@@ -313,8 +313,15 @@ services:
     # 256m matches the other .NET services here and is still small; the GC mode was
     # the larger half of that problem and is fixed in the csproj.
     mem_limit: 256m
-    environment:
+    environment: &bot-environment
       DOTNET_ENVIRONMENT:              Production
+
+      # ── Which account does this container trade? ──────────────────────────
+      #
+      # Execution is one process per account. Unset means 1, the operator, so this
+      # file behaves exactly as it did before accounts existed. The customer's
+      # container overrides it below.
+      Bot__AccountId:                  "${BOT_ACCOUNT_ID:-1}"
       ConnectionStrings__Postgres:     "Host=postgres;Port=5432;Database=${POSTGRES_DB:-crypto};Username=${POSTGRES_USER:-crypto};Password=${POSTGRES_PASS:-crypto};Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
 
       # ── OKX live order placement ──
@@ -599,6 +606,59 @@ services:
       retries: 3
       start_period: 60s
 
+  # ── A customer's account ────────────────────────────────────────────────────
+  #
+  # The same image as `bot`, pointed at a different account. Everything that makes
+  # a trading decision -- the strategies, the gates, the thresholds -- is shared
+  # through the YAML anchor above, so the two containers cannot drift into trading
+  # different rules by accident. Only two things differ, and both are below.
+  #
+  # Why a second CONTAINER rather than a second account inside one process:
+  # the trading loop, its circuit breakers, its open-position recovery and its
+  # credential cache were all written around a single account and are correct
+  # exactly as they stand, provided each process only ever sees one. Teaching that
+  # loop to interleave two accounts is a deep change to the code that places real
+  # orders; running it twice is not a change to it at all.
+  #
+  # The cost is honest and small: one more .NET process (~100 MB) and one more set
+  # of price-feed connections. A third customer is a third copy of this block.
+  #
+  # It idles harmlessly until BOTH are true: bot_config row 2 exists with
+  # enabled = true, and a key is linked to account 2 through the app. With no key
+  # it logs "no OKX key is linked" and places nothing -- it cannot fall back to
+  # the operator's key, by design (see LinkedOkxCredentialSource).
+  bot-customer:
+    build:
+      context: ./src
+      dockerfile: CryptoDecision.BotService/Dockerfile
+    container_name: bot-customer
+    logging: *default-logging
+    mem_limit: 256m
+    environment:
+      <<: *bot-environment
+
+      # 1. Whose money this one spends.
+      Bot__AccountId:                  "2"
+
+      # 2. No second listener. The client API serves EVERY account's handset from
+      #    the `bot` container -- the bearer token says which account the caller
+      #    is -- so a second one here would be a duplicate service fighting for
+      #    port 8090. It still needs ClientApi__Enabled inherited as true, because
+      #    that is what makes it sign with the app-linked key rather than with
+      #    Okx__ApiKey from the environment.
+      ClientApi__ServeHttp:            "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
   # ── Polymarket esports entry bot ────────────────────────────────────────────
   #
   # Independent of everything above it: no Postgres, no Kafka. It talks

@@ -21,13 +21,14 @@ public sealed class ClientApiQueries(NpgsqlDataSource db)
     /// needs: a stopped loop and a crashed one both report enabled = true, and only the
     /// timestamp separates them.
     /// </summary>
-    public async Task<BotState?> GetBotStateAsync(CancellationToken ct)
+    public async Task<BotState?> GetBotStateAsync(int accountId, CancellationToken ct)
     {
         const string sql =
-            "SELECT enabled, paper_mode, last_eval_at FROM bot_config WHERE id = 1";
+            "SELECT enabled, paper_mode, last_eval_at FROM bot_config WHERE id = @accountId";
 
         await using var conn = await db.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
         await using var r = await cmd.ExecuteReaderAsync(ct);
 
         if (!await r.ReadAsync(ct)) return null;
@@ -40,27 +41,31 @@ public sealed class ClientApiQueries(NpgsqlDataSource db)
     /// <summary>
     /// Counted from <c>bot_trades</c>, which is the bot's own book.
     ///
-    /// Until <c>client_link</c> is wired into the trading path this is the OPERATOR's
-    /// trading, not the customer's. One account, so the numbers happen to be the ones
-    /// the customer wants — but that is a coincidence of the single-tenant setup and
-    /// stops being true the moment a second customer exists. See mobile/README.md.
+    /// Scoped to the account behind the caller's bearer token. It used to be every row
+    /// in the table, which was the same thing only because one account existed; with a
+    /// customer linked, an unscoped count would show them the operator's positions and
+    /// the operator's P&amp;L.
     /// </summary>
-    public async Task<TodayTally> GetTodayAsync(CancellationToken ct)
+    public async Task<TodayTally> GetTodayAsync(int accountId, CancellationToken ct)
     {
         // Day boundary in UTC, matching every other date bucket in this schema. A
         // customer in Australia sees their "today" roll over mid-morning; a local
         // boundary is a real improvement and a real decision, not a tweak to slip in.
         const string sql = """
             SELECT
-                (SELECT count(*) FROM bot_trades WHERE status = 'OPEN'),
-                (SELECT coalesce(sum(pnl_usd), 0) FROM bot_trades
-                   WHERE closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC')),
                 (SELECT count(*) FROM bot_trades
-                   WHERE opened_at >= date_trunc('day', now() AT TIME ZONE 'UTC'))
+                   WHERE status = 'OPEN' AND account_id = @accountId),
+                (SELECT coalesce(sum(pnl_usd), 0) FROM bot_trades
+                   WHERE closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                     AND account_id = @accountId),
+                (SELECT count(*) FROM bot_trades
+                   WHERE opened_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                     AND account_id = @accountId)
             """;
 
         await using var conn = await db.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("accountId", accountId);
         await using var r = await cmd.ExecuteReaderAsync(ct);
 
         if (!await r.ReadAsync(ct)) return new TodayTally(0, 0m, 0);

@@ -28,6 +28,7 @@ public sealed class ClientApiHttpServer(
     OkxOptions okxOptions,
     IOkxCredentialSource credentials,
     BotConfigRepository configRepo,
+    BotAccount self,
     StrategyEvaluator evaluator,
     IConfiguration config,
     ILogger<ClientApiHttpServer> log) : BackgroundService
@@ -174,18 +175,42 @@ public sealed class ClientApiHttpServer(
             return;
         }
 
+        // Which account does this key attach to? Asked BEFORE the link is written,
+        // because the honest answer is sometimes "none": accounts are provisioned by
+        // an operator alongside the container that trades them, so a key arriving
+        // when every slot is taken must be refused rather than parked somewhere no
+        // process is watching.
+        var accountId = await store.AllocateAccountAsync(apiKey, ct);
+        if (accountId is null)
+        {
+            log.LogWarning(
+                "[ClientApi] Link refused for {Masked}: every provisioned account already has "
+              + "a key. Provision another (a bot_config row plus a container started with a "
+              + "matching Bot__AccountId) before linking this one.",
+                ClientLinkStore.Mask(apiKey));
+
+            await WriteAsync(http, 409, new
+            {
+                error = "This server has no free trading account. Contact the operator.",
+            });
+            return;
+        }
+
         var token = await store.LinkAsync(
-            apiKey, secret, pass, check.Permissions!, check.Uid, ct);
+            accountId.Value, apiKey, secret, pass, check.Permissions!, check.Uid, ct);
 
         // Without this the bot keeps signing with whatever it cached for up to the
         // source TTL — on a RE-link that means orders going to the previous key.
-        (credentials as LinkedOkxCredentialSource)?.Invalidate();
+        // Only meaningful when THIS process trades the account that just changed;
+        // other containers pick the change up on their own TTL, within 15 seconds.
+        if (accountId.Value == self.Id)
+            (credentials as LinkedOkxCredentialSource)?.Invalidate();
 
 
         log.LogWarning(
-            "[ClientApi] OKX key {Masked} LINKED (uid {Uid}, perm {Perm}). This server can now "
-          + "place real orders on that account.",
-            ClientLinkStore.Mask(apiKey), check.Uid ?? "?", check.Permissions);
+            "[ClientApi] OKX key {Masked} LINKED to account {Account} (uid {Uid}, perm {Perm}). "
+          + "That account's bot can now place real orders on it.",
+            ClientLinkStore.Mask(apiKey), accountId.Value, check.Uid ?? "?", check.Permissions);
 
         await WriteAsync(http, 200, new
         {
@@ -215,11 +240,13 @@ public sealed class ClientApiHttpServer(
         var link = await AuthAsync(http, ct);
         if (link is null) return;
 
-        await store.UnlinkAsync(ct);
+        await store.UnlinkAsync(link.AccountId, ct);
 
         // Unlink is a kill switch, so it takes effect now rather than whenever the
-        // cached credentials happen to expire.
-        (credentials as LinkedOkxCredentialSource)?.Invalidate();
+        // cached credentials happen to expire. Other containers see it on their own
+        // 15-second TTL, which is what makes the switch work across accounts.
+        if (link.AccountId == self.Id)
+            (credentials as LinkedOkxCredentialSource)?.Invalidate();
 
 
         log.LogWarning(
@@ -255,9 +282,9 @@ public sealed class ClientApiHttpServer(
     /// number by the customer's size to tell them what they can lose. Quoting the wrong
     /// one understates their risk.
     /// </summary>
-    private async Task<decimal?> LiveStopPctAsync(CancellationToken ct)
+    private async Task<decimal?> LiveStopPctAsync(int accountId, CancellationToken ct)
     {
-        var opts = await configRepo.GetConfigAsync(ct);
+        var opts = await configRepo.GetConfigAsync(accountId, ct);
         if (opts is null) return null;
 
         // Worst case across the active strategies: the customer gets one number, and
@@ -281,10 +308,10 @@ public sealed class ClientApiHttpServer(
 
         await WriteAsync(http, 200, new
         {
-            amountPerTradeUsd = (await configRepo.GetConfigAsync(ct))?.FixedNotionalUsd is > 0m and var a ? a : (decimal?)null,
+            amountPerTradeUsd = (await configRepo.GetConfigAsync(link.AccountId, ct))?.FixedNotionalUsd is > 0m and var a ? a : (decimal?)null,
             minAmountUsd      = min,
             maxAmountUsd      = max,
-            stopPct           = await LiveStopPctAsync(ct),
+            stopPct           = await LiveStopPctAsync(link.AccountId, ct),
         });
     }
 
@@ -336,7 +363,7 @@ public sealed class ClientApiHttpServer(
         }
 
         // bot_config, not client_link: this is the column EntrySizing actually reads.
-        await configRepo.SetFixedNotionalAsync(amount.Value, ct);
+        await configRepo.SetFixedNotionalAsync(link.AccountId, amount.Value, ct);
         log.LogInformation(
             "[ClientApi] Size for {Masked} set to ${Amount}. Applies to the next entry; "
           + "open positions keep the size they were opened with.",
@@ -352,13 +379,13 @@ public sealed class ClientApiHttpServer(
         var link = await AuthAsync(http, ct);
         if (link is null) return;
 
-        var state = await queries.GetBotStateAsync(ct);
-        var today = await queries.GetTodayAsync(ct);
+        var state = await queries.GetBotStateAsync(link.AccountId, ct);
+        var today = await queries.GetTodayAsync(link.AccountId, ct);
 
         // Read with the CUSTOMER's key, so the balance is theirs. Everything else on
         // this screen still comes from the bot's own book — see ClientApiQueries.
         decimal? available = null;
-        var creds = await store.GetCredentialsAsync(ct);
+        var creds = await store.GetCredentialsAsync(link.AccountId, ct);
         if (creds is { } c)
             available = await okx.GetAvailableUsdAsync(
                 new OkxCreds(c.ApiKey, c.Secret, c.Passphrase), ct);
@@ -394,7 +421,7 @@ public sealed class ClientApiHttpServer(
         var link = await AuthAsync(http, ct);
         if (link is null) return;
 
-        var creds = await store.GetCredentialsAsync(ct);
+        var creds = await store.GetCredentialsAsync(link.AccountId, ct);
         if (creds is not { } c)
         {
             await WriteAsync(http, 401, new { error = "This device is no longer linked." });
