@@ -57,6 +57,19 @@ public sealed class EsportsEntryWorker(
     private readonly Dictionary<string, string> _restingOrders = [];
 
     /// <summary>
+    /// orderId to the exact level it was placed at, for every order this process placed or
+    /// adopted from the exchange.
+    ///
+    /// Exists because an order can leave the book WITHOUT filling: Polymarket cancels
+    /// resting orders on its own. Measured 2026-11-17 - a 1c bid on Team Spirit vs Aurora,
+    /// placed at 14:38Z on a match that had not started, was gone by 16:27Z with zero
+    /// shares filled and no cancel of ours. <see cref="_placed"/> is add-only, so without
+    /// this map that token stays locked out of re-entry until the process restarts, and
+    /// the match it was waiting for is missed entirely.
+    /// </summary>
+    private readonly Dictionary<string, (string TokenId, decimal Level)> _ourOrders = [];
+
+    /// <summary>
     /// Sides seen under the arming floor this cycle — a map that has already ended rather
     /// than one still being lost. Reset per cycle; only ever read by the cycle log.
     /// </summary>
@@ -511,7 +524,11 @@ public sealed class EsportsEntryWorker(
     {
         _placed.Add(Key(tokenId, level));
         _committedSide[market.ConditionId] = tokenId;
-        if (!string.IsNullOrEmpty(orderId)) _restingOrders[orderId] = tokenId;
+        if (!string.IsNullOrEmpty(orderId))
+        {
+            _restingOrders[orderId] = tokenId;
+            _ourOrders[orderId] = (tokenId, level);
+        }
     }
 
     /// <summary>
@@ -527,11 +544,17 @@ public sealed class EsportsEntryWorker(
 
         var ok = true;
 
+        // Every token we hold any shares of. Doubles as the fill test below: a position is
+        // the only innocent reason an order can be missing from the book.
+        var held = new HashSet<string>();
+        var heldIsComplete = true;
+
         try
         {
             foreach (var p in await dataApi.GetPositionsAsync(address, ct))
             {
                 _committedSide[p.ConditionId] = p.TokenId;
+                held.Add(p.TokenId);
 
                 // Block every level on a token we already hold. A position does not say
                 // which level bought it, and re-buying after a restart is a far worse
@@ -541,6 +564,7 @@ public sealed class EsportsEntryWorker(
         }
         catch (Exception ex)
         {
+            heldIsComplete = false;
             // Crucially we do NOT clear what we already know: a failed read must never
             // look like "I hold nothing", or the bot would buy it all a second time.
             log.LogWarning(ex, "Position sync failed; keeping the previous picture");
@@ -556,11 +580,17 @@ public sealed class EsportsEntryWorker(
             {
                 if (o.Side != "BUY") continue;
                 _restingOrders[o.Id] = o.TokenId;
+                _ourOrders[o.Id] = (o.TokenId, o.Price);
                 _placed.Add(Key(o.TokenId, o.Price));
             }
 
-            log.LogInformation("Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry",
-                _restingOrders.Count, _committedSide.Count);
+            // Only safe once we know what we hold. On a failed position read "held" is a
+            // lie, and re-arming against a lie buys the same side a second time.
+            var rearmed = heldIsComplete ? ReleaseVanishedOrders(held) : 0;
+
+            log.LogInformation(
+                "Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry, {Rearmed} re-armed after an exchange cancel",
+                _restingOrders.Count, _committedSide.Count, rearmed);
         }
         catch (Exception ex)
         {
@@ -570,6 +600,42 @@ public sealed class EsportsEntryWorker(
 
         // Only advance the clock on a clean sync, so a failure retries next cycle.
         if (ok) _syncedAt = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Releases the de-duplication key of every order that left the book without filling,
+    /// so the bot is allowed to arm that level again.
+    ///
+    /// An order leaves the book for exactly two reasons: it filled, or it was cancelled.
+    /// A fill leaves a position behind, so holding the token is the test for the first -
+    /// and it is deliberately coarse: a partial fill also leaves a position, and that
+    /// token stays locked. Buying one side twice is a real loss; missing a follow-up on a
+    /// side we already own is not.
+    ///
+    /// Everything else was cancelled. Ours are removed from the map at the moment we
+    /// cancel them, so what reaches here was cancelled by the exchange - and that order
+    /// never had a chance to win, which is exactly why the level must open again.
+    /// </summary>
+    private int ReleaseVanishedOrders(IReadOnlySet<string> heldTokens)
+    {
+        var gone = _ourOrders.Where(kv => !_restingOrders.ContainsKey(kv.Key)).ToList();
+        if (gone.Count == 0) return 0;
+
+        var rearmed = 0;
+
+        foreach (var (orderId, o) in gone)
+        {
+            _ourOrders.Remove(orderId);
+            if (heldTokens.Contains(o.TokenId)) continue;
+            if (_placed.Remove(Key(o.TokenId, o.Level))) rearmed++;
+        }
+
+        if (rearmed > 0)
+            log.LogInformation(
+                "Re-armed {Rearmed} levels: the order left the book with nothing filled, so the exchange cancelled it",
+                rearmed);
+
+        return rearmed;
     }
 
     /// <summary>
@@ -629,7 +695,10 @@ public sealed class EsportsEntryWorker(
         var cancelled = await clob.CancelOrdersAsync(stale, ct);
         if (cancelled > 0)
         {
-            foreach (var id in stale) _restingOrders.Remove(id);
+            // Dropped from _ourOrders too: a cancel we chose must never look like an
+            // exchange cancel next sync, or ReleaseVanishedOrders would re-arm the very
+            // level we just decided was unsafe.
+            foreach (var id in stale) { _restingOrders.Remove(id); _ourOrders.Remove(id); }
             log.LogInformation(
                 "Cancelled {Count} resting orders: {Over} on matches that are over, {MatchPoint} on maps at {Rounds} rounds",
                 cancelled, over.Count, atMatchPoint.Count, _opt.DecidedAtRounds);
