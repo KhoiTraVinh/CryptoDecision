@@ -12,36 +12,7 @@ public sealed record EsportsMarket(
     IReadOnlyList<string> TokenIds,
     bool NegRisk,
     DateTimeOffset? EndDate,
-    decimal VolumeUsd,
-    MatchScore? Score = null,
-
-    /// <summary>
-    /// Gamma event this market belongs to. The score lives on the event rather than the
-    /// market, and the full market sweep is far too slow to drive a cancel off - so the
-    /// id is carried here to let a cheap, targeted refresh ask for just the handful of
-    /// events we actually have money resting on.
-    /// </summary>
-    string EventId = "");
-
-/// <summary>
-/// Live round score of the map being played, read from the event's <c>score</c> field
-/// (<c>"12-10|1-1|Bo3"</c>: rounds this map, maps won, format).
-///
-/// Null when the upstream feed is not reporting rounds, which it signals with the literal
-/// <c>"000-000"</c> and does for roughly a third of live CS2 matches. Null is NOT zero -
-/// "nobody has scored" and "we cannot see the score" have to stay distinguishable, because
-/// one of them is safe to act on and the other is not.
-/// </summary>
-public sealed record MatchScore(int RoundsA, int RoundsB)
-{
-    public int Leader => Math.Max(RoundsA, RoundsB);
-
-    /// <summary>
-    /// Rounds are only meaningful up to the regulation win. Past it the map is in overtime,
-    /// where the numbers keep climbing and "12" stops meaning match point.
-    /// </summary>
-    public bool InOvertime(int regulation) => Leader > regulation;
-}
+    decimal VolumeUsd);
 
 /// <summary>One side of the book, best price first.</summary>
 public sealed record BookLevel(decimal Price, decimal Size);

@@ -57,29 +57,10 @@ public sealed class EsportsEntryWorker(
     private readonly Dictionary<string, string> _restingOrders = [];
 
     /// <summary>
-    /// orderId to the exact level it was placed at, for every order this process placed or
-    /// adopted from the exchange.
-    ///
-    /// Exists because an order can leave the book WITHOUT filling: Polymarket cancels
-    /// resting orders on its own. Measured 2026-11-17 - a 1c bid on Team Spirit vs Aurora,
-    /// placed at 14:38Z on a match that had not started, was gone by 16:27Z with zero
-    /// shares filled and no cancel of ours. <see cref="_placed"/> is add-only, so without
-    /// this map that token stays locked out of re-entry until the process restarts, and
-    /// the match it was waiting for is missed entirely.
-    /// </summary>
-    private readonly Dictionary<string, (string TokenId, decimal Level)> _ourOrders = [];
-
-    /// <summary>
     /// Sides seen under the arming floor this cycle — a map that has already ended rather
     /// than one still being lost. Reset per cycle; only ever read by the cycle log.
     /// </summary>
     private int _skippedBelowBand;
-
-    /// <summary>Markets skipped this cycle because the map is at match point. Reset per cycle.</summary>
-    private int _skippedDecided;
-
-    /// <summary>When the fast score refresh last ran.</summary>
-    private DateTimeOffset _scoresAt = DateTimeOffset.MinValue;
 
 
     private IReadOnlyList<EsportsMarket> _markets = [];
@@ -263,18 +244,6 @@ public sealed class EsportsEntryWorker(
             await CancelOrdersOnFinishedMarketsAsync(ct);
         }
 
-        // Scores on their own, much faster clock. The market sweep above is two minutes
-        // because it is expensive; a CS2 round is about the same length, so a cancel that
-        // waits for it arrives after the map has ended. Only runs while something is
-        // actually resting, and asks for those events alone.
-        if (_opt.ScoreRefreshSeconds > 0 && _opt.DecidedAtRounds > 0 && _restingOrders.Count > 0
-            && now - _scoresAt > TimeSpan.FromSeconds(_opt.ScoreRefreshSeconds))
-        {
-            _scoresAt = now;
-            await RefreshScoresAsync(ct);
-            await CancelOrdersOnFinishedMarketsAsync(ct);
-        }
-
         if (now - _syncedAt > TimeSpan.FromSeconds(_opt.PositionRefreshSeconds))
             await SyncWithExchangeAsync(ct);
 
@@ -297,15 +266,9 @@ public sealed class EsportsEntryWorker(
         var tooLate = 0;
         var alreadyDone = 0;
         _skippedBelowBand = 0;
-        _skippedDecided = 0;
 
         foreach (var market in open)
         {
-            // Decided on the scoreboard, whatever the book says. Checked before anything
-            // else so a map at match point cannot arm, cannot place, and does not even
-            // count toward "nearest ask" - it is not a market we are in any more.
-            if (_opt.IsDecided(market)) { _skippedDecided++; continue; }
-
             // How close the market is to arming. Without this a quiet bot and a broken
             // one print the same line, and most cycles are quiet by design.
             foreach (var t in market.TokenIds)
@@ -347,11 +310,9 @@ public sealed class EsportsEntryWorker(
 
         log.LogInformation(
             "Cycle: {Markets} in play, {Open} watched, {Armed} inside the band {Arm} -> {Placed} placed " +
-            "({TooLate} already below the level, {Done} done earlier, {Gapped} under the floor, " +
-            "{Decided} at match point). " +
+            "({TooLate} already below the level, {Done} done earlier, {Gapped} under the floor). " +
             "{Resting} resting, ${Committed} today. Lowest ask {Nearest} on {Where}",
             _markets.Count, open.Count, armed, _opt.ArmSummary(), placed, tooLate, alreadyDone, _skippedBelowBand,
-            _skippedDecided,
             _restingOrders.Count, _committedToday,
             nearest < 1m ? nearest.ToString("0.###") : "none",
             nearest < 1m ? nearestOn : "-");
@@ -524,11 +485,7 @@ public sealed class EsportsEntryWorker(
     {
         _placed.Add(Key(tokenId, level));
         _committedSide[market.ConditionId] = tokenId;
-        if (!string.IsNullOrEmpty(orderId))
-        {
-            _restingOrders[orderId] = tokenId;
-            _ourOrders[orderId] = (tokenId, level);
-        }
+        if (!string.IsNullOrEmpty(orderId)) _restingOrders[orderId] = tokenId;
     }
 
     /// <summary>
@@ -544,17 +501,11 @@ public sealed class EsportsEntryWorker(
 
         var ok = true;
 
-        // Every token we hold any shares of. Doubles as the fill test below: a position is
-        // the only innocent reason an order can be missing from the book.
-        var held = new HashSet<string>();
-        var heldIsComplete = true;
-
         try
         {
             foreach (var p in await dataApi.GetPositionsAsync(address, ct))
             {
                 _committedSide[p.ConditionId] = p.TokenId;
-                held.Add(p.TokenId);
 
                 // Block every level on a token we already hold. A position does not say
                 // which level bought it, and re-buying after a restart is a far worse
@@ -564,7 +515,6 @@ public sealed class EsportsEntryWorker(
         }
         catch (Exception ex)
         {
-            heldIsComplete = false;
             // Crucially we do NOT clear what we already know: a failed read must never
             // look like "I hold nothing", or the bot would buy it all a second time.
             log.LogWarning(ex, "Position sync failed; keeping the previous picture");
@@ -580,17 +530,11 @@ public sealed class EsportsEntryWorker(
             {
                 if (o.Side != "BUY") continue;
                 _restingOrders[o.Id] = o.TokenId;
-                _ourOrders[o.Id] = (o.TokenId, o.Price);
                 _placed.Add(Key(o.TokenId, o.Price));
             }
 
-            // Only safe once we know what we hold. On a failed position read "held" is a
-            // lie, and re-arming against a lie buys the same side a second time.
-            var rearmed = heldIsComplete ? ReleaseVanishedOrders(held) : 0;
-
-            log.LogInformation(
-                "Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry, {Rearmed} re-armed after an exchange cancel",
-                _restingOrders.Count, _committedSide.Count, rearmed);
+            log.LogInformation("Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry",
+                _restingOrders.Count, _committedSide.Count);
         }
         catch (Exception ex)
         {
@@ -603,105 +547,23 @@ public sealed class EsportsEntryWorker(
     }
 
     /// <summary>
-    /// Releases the de-duplication key of every order that left the book without filling,
-    /// so the bot is allowed to arm that level again.
-    ///
-    /// An order leaves the book for exactly two reasons: it filled, or it was cancelled.
-    /// A fill leaves a position behind, so holding the token is the test for the first -
-    /// and it is deliberately coarse: a partial fill also leaves a position, and that
-    /// token stays locked. Buying one side twice is a real loss; missing a follow-up on a
-    /// side we already own is not.
-    ///
-    /// Everything else was cancelled. Ours are removed from the map at the moment we
-    /// cancel them, so what reaches here was cancelled by the exchange - and that order
-    /// never had a chance to win, which is exactly why the level must open again.
-    /// </summary>
-    private int ReleaseVanishedOrders(IReadOnlySet<string> heldTokens)
-    {
-        var gone = _ourOrders.Where(kv => !_restingOrders.ContainsKey(kv.Key)).ToList();
-        if (gone.Count == 0) return 0;
-
-        var rearmed = 0;
-
-        foreach (var (orderId, o) in gone)
-        {
-            _ourOrders.Remove(orderId);
-            if (heldTokens.Contains(o.TokenId)) continue;
-            if (_placed.Remove(Key(o.TokenId, o.Level))) rearmed++;
-        }
-
-        if (rearmed > 0)
-            log.LogInformation(
-                "Re-armed {Rearmed} levels: the order left the book with nothing filled, so the exchange cancelled it",
-                rearmed);
-
-        return rearmed;
-    }
-
-    /// <summary>
     /// Cancels anything resting on a token that is no longer in the eligible market set.
     /// A resting 1c bid on a finished match is a live order on a game whose result is
     /// already known to everyone watching it.
     /// </summary>
-    /// <summary>
-    /// Re-reads the round score for the events we have orders resting on and writes it
-    /// back onto the cached markets.
-    ///
-    /// Scoped to resting orders on purpose. Everything else can wait for the sweep: a
-    /// market we have no money on cannot cost anything by being one scan stale, and
-    /// widening this to the whole list would put the expensive call back on the fast clock.
-    /// </summary>
-    private async Task RefreshScoresAsync(CancellationToken ct)
-    {
-        var exposed = _markets
-            .Where(m => m.TokenIds.Any(t => _restingOrders.ContainsValue(t)) && m.EventId.Length > 0)
-            .Select(m => m.EventId)
-            .Distinct()
-            .ToList();
-
-        if (exposed.Count == 0) return;
-
-        var scores = await gamma.FetchScoresAsync(exposed, ct);
-        if (scores.Count == 0) return;
-
-        // Records are immutable, so the cached list is rebuilt rather than mutated. A
-        // market whose event is missing from the answer keeps the score it already had:
-        // absence is "no answer", not "nothing scored".
-        _markets = _markets
-            .Select(m => scores.TryGetValue(m.EventId, out var s) ? m with { Score = s } : m)
-            .ToList();
-    }
-
     private async Task CancelOrdersOnFinishedMarketsAsync(CancellationToken ct)
     {
         if (_restingOrders.Count == 0 || _opt.DryRun) return;
 
         var live = _markets.SelectMany(m => m.TokenIds).ToHashSet();
-
-        // A map at match point is finished in every way that matters to a 1c bid. Leaving
-        // the order up is the whole failure: it fills at the moment the map is lost, which
-        // is the only moment the price can reach it. Refusing to place a NEW order here
-        // would do almost nothing, because by the time a side reaches the threshold the
-        // order has been resting for several minutes already.
-        var decided = _markets.Where(m => _opt.IsDecided(m)).SelectMany(m => m.TokenIds).ToHashSet();
-
-        var over = _restingOrders.Where(kv => !live.Contains(kv.Value)).Select(kv => kv.Key).ToList();
-        var atMatchPoint = _restingOrders.Where(kv => live.Contains(kv.Value) && decided.Contains(kv.Value))
-                                         .Select(kv => kv.Key).ToList();
-
-        var stale = over.Concat(atMatchPoint).Distinct().ToList();
+        var stale = _restingOrders.Where(kv => !live.Contains(kv.Value)).Select(kv => kv.Key).ToList();
         if (stale.Count == 0) return;
 
         var cancelled = await clob.CancelOrdersAsync(stale, ct);
         if (cancelled > 0)
         {
-            // Dropped from _ourOrders too: a cancel we chose must never look like an
-            // exchange cancel next sync, or ReleaseVanishedOrders would re-arm the very
-            // level we just decided was unsafe.
-            foreach (var id in stale) { _restingOrders.Remove(id); _ourOrders.Remove(id); }
-            log.LogInformation(
-                "Cancelled {Count} resting orders: {Over} on matches that are over, {MatchPoint} on maps at {Rounds} rounds",
-                cancelled, over.Count, atMatchPoint.Count, _opt.DecidedAtRounds);
+            foreach (var id in stale) _restingOrders.Remove(id);
+            log.LogInformation("Cancelled {Count} orders left on matches that are over", cancelled);
         }
     }
 
