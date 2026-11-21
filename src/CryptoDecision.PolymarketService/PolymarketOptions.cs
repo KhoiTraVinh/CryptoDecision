@@ -57,6 +57,29 @@ public sealed class PolymarketOptions
     public decimal StakeUsd { get; set; } = 0.20m;
 
     /// <summary>
+    /// Per-game override of <see cref="StakeUsd"/>, as <c>"Dota 2=5,LoL=5"</c>. A game not
+    /// named here uses <see cref="StakeUsd"/>.
+    ///
+    /// The four games do not share a win rate, and at a 1c entry the break-even rate is
+    /// exactly 1.00% because the payout is exactly 100x. Measured over November, 956
+    /// resolved entries:
+    ///
+    ///     Dota 2          500 entries   6 wins   1.20%   +$23.66
+    ///     LoL              47 entries   1 win    2.13%   +$28.20
+    ///     Counter-Strike  403 entries   2 wins   0.50%   -$72.90
+    ///     Valorant          6 entries   0 wins      -     -$1.10
+    ///
+    /// Sizing by game is the only lever that acts on that spread without touching which
+    /// markets are entered. Read the numbers as a ranking, not as a settled edge: seven
+    /// wins across Dota 2 and LoL put the true rate somewhere in 0.62%-2.62% at 95%
+    /// confidence, and break-even sits inside that range.
+    /// </summary>
+    public string StakeByGameCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="StakeByGameCsv"/>.</summary>
+    public Dictionary<string, decimal> StakeByGame { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Stake used during the overnight window instead of <see cref="StakeUsd"/>.
     /// **0 disables the schedule** and one stake applies all day.
     ///
@@ -136,27 +159,35 @@ public sealed class PolymarketOptions
     /// </summary>
     public decimal StakeFor(DateTimeOffset utcNow, string game)
     {
+        var day = StakeByGame.TryGetValue(game, out var perGame) ? perGame : StakeUsd;
+
         var scheduled = NightStakeUsd > 0 || NightStakeByGame.Count > 0;
-        if (!scheduled || NightStartHour == NightEndHour) return StakeUsd;
+        if (!scheduled || NightStartHour == NightEndHour) return day;
 
         var hour = utcNow.ToOffset(TimeSpan.FromHours(LocalUtcOffsetHours)).Hour;
         var inWindow = NightStartHour < NightEndHour
             ? hour >= NightStartHour && hour < NightEndHour
             : hour >= NightStartHour || hour < NightEndHour;
 
-        if (!inWindow) return StakeUsd;
-        if (NightStakeByGame.TryGetValue(game, out var byGame)) return byGame;
+        if (!inWindow) return day;
+        if (NightStakeByGame.TryGetValue(game, out var night)) return night;
 
         // No per-game entry and no global night stake means the window exists only for the
-        // games that named themselves. Everyone else trades the day size.
-        return NightStakeUsd > 0 ? NightStakeUsd : StakeUsd;
+        // games that named themselves. Everyone else keeps its daytime size.
+        return NightStakeUsd > 0 ? NightStakeUsd : day;
     }
 
     /// <summary>One line for the startup log, so the running schedule is never a guess.</summary>
     public string StakeSummary()
     {
+        var byGame = StakeByGame.Count == 0
+            ? ""
+            : " (" + string.Join(", ", StakeByGame
+                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => $"{kv.Key}=${kv.Value}")) + ")";
+
         if ((NightStakeUsd <= 0 && NightStakeByGame.Count == 0) || NightStartHour == NightEndHour)
-            return $"${StakeUsd} all day";
+            return $"${StakeUsd}{byGame} all day";
 
         var window = $"{NightStartHour:00}:00-{NightEndHour:00}:00 (UTC{LocalUtcOffsetHours:+#;-#;+0})";
         var overrides = NightStakeByGame.Count == 0
@@ -166,7 +197,7 @@ public sealed class PolymarketOptions
                 .Select(kv => $"{kv.Key}=${kv.Value}"));
         var baseline = NightStakeUsd > 0 ? $"${NightStakeUsd}" : $"${StakeUsd}";
 
-        return $"{baseline} in {window}{overrides}, ${StakeUsd} otherwise";
+        return $"{baseline} in {window}{overrides}, ${StakeUsd}{byGame} otherwise";
     }
 
     /// <summary>
@@ -564,6 +595,32 @@ public sealed class PolymarketOptions
             }
         }
 
+        if (StakeByGame.Count == 0 && !string.IsNullOrWhiteSpace(StakeByGameCsv))
+        {
+            foreach (var pair in StakeByGameCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = pair.LastIndexOf('=');
+                if (eq <= 0)
+                    throw new InvalidOperationException($"Polymarket:StakeByGameCsv has \"{pair}\", expected Game=usd");
+
+                var name = pair[..eq].Trim();
+                if (!decimal.TryParse(pair[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var usd))
+                    throw new InvalidOperationException($"Polymarket:StakeByGameCsv has \"{pair}\", which is not a number");
+
+                if (usd <= 0m)
+                    throw new InvalidOperationException(
+                        $"Polymarket:StakeByGameCsv has {name}={usd}; must be > 0 (omit the game to use StakeUsd)");
+
+                StakeByGame[name] = usd;
+            }
+        }
+
+        foreach (var game in StakeByGame.Keys)
+            if (Games.Length > 0 && !Games.Contains(game, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Polymarket:StakeByGameCsv names \"{game}\", which is not in Games ({string.Join(", ", Games)})");
+
         if (NightStakeByGame.Count == 0 && !string.IsNullOrWhiteSpace(NightStakeByGameCsv))
         {
             foreach (var pair in NightStakeByGameCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -651,11 +708,12 @@ public sealed class PolymarketOptions
                     $"Polymarket:NightStakeUsd ${NightStakeUsd} buys only {Math.Floor(NightStakeUsd / cheapest)} whole shares " +
                     $"at {cheapest}, under Polymarket's 5-share minimum");
 
-            foreach (var (game, usd) in NightStakeByGame)
-                if (Math.Floor(usd / cheapest) < 5m)
-                    throw new InvalidOperationException(
-                        $"Polymarket:NightStakeByGameCsv has {game}=${usd}, which buys only " +
-                        $"{Math.Floor(usd / cheapest)} whole shares at {cheapest}, under Polymarket's 5-share minimum");
+            foreach (var (csv, map) in new[] { ("StakeByGameCsv", StakeByGame), ("NightStakeByGameCsv", NightStakeByGame) })
+                foreach (var (game, usd) in map)
+                    if (Math.Floor(usd / cheapest) < 5m)
+                        throw new InvalidOperationException(
+                            $"Polymarket:{csv} has {game}=${usd}, which buys only " +
+                            $"{Math.Floor(usd / cheapest)} whole shares at {cheapest}, under Polymarket's 5-share minimum");
         }
         foreach (var p in EntryPrices)
             if (p < MinAskPrice || p >= 1m)

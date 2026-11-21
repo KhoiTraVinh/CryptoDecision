@@ -699,6 +699,9 @@ services:
       Polymarket__EntryPricesCsv:  "${POLY_ENTRY_PRICES:-}"
       Polymarket__StakeUsd:        "${POLY_STAKE_USD:-0.20}"
 
+      # Stake rieng cho tung game, vd "Dota 2=5,LoL=5". Game khong co ten dung StakeUsd.
+      Polymarket__StakeByGameCsv:  "${POLY_STAKE_BY_GAME:-}"
+
       # Stake rut gon ban dem. 0 = tat lich, dung mot muc stake ca ngay.
       # Gio la gio DIA PHUONG theo LocalUtcOffsetHours (mac dinh +7, gio VN).
       # NightEndHour nho hon NightStartHour thi cua so vat qua nua dem.
