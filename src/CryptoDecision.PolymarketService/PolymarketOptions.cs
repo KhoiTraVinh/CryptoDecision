@@ -109,29 +109,65 @@ public sealed class PolymarketOptions
     public int LocalUtcOffsetHours { get; set; } = 7;
 
     /// <summary>
-    /// The stake that applies at <paramref name="utcNow"/>.
+    /// Per-game override of <see cref="NightStakeUsd"/>, as <c>"Dota 2=0.5,LoL=0.5"</c>.
+    /// A game listed here keeps its own size inside the window; everything else falls back
+    /// to <see cref="NightStakeUsd"/>.
+    ///
+    /// Exists because the overnight evidence is not one number. The window was reduced on
+    /// a whole-book split whose sign reverses between months, and the games do not share a
+    /// book: November paid +$66.00 on Dota 2 and +$28.80 on LoL against -$32.77 on
+    /// Counter-Strike. Cutting the stake on all four spends the same caution on the two
+    /// that were earning it, so this lets the cut land only where the loss was.
+    ///
+    /// Naming matches <see cref="Games"/> exactly - the key is the resolved game name, not
+    /// the market title.
+    /// </summary>
+    public string NightStakeByGameCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="NightStakeByGameCsv"/>.</summary>
+    public Dictionary<string, decimal> NightStakeByGame { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The stake that applies to <paramref name="game"/> at <paramref name="utcNow"/>.
     ///
     /// Read at placement, so an order resting across the boundary keeps the size it was
     /// placed with. Re-sizing it would mean cancelling and re-posting, which gives up
     /// queue position at the one price level the whole strategy depends on being first at.
     /// </summary>
-    public decimal StakeFor(DateTimeOffset utcNow)
+    public decimal StakeFor(DateTimeOffset utcNow, string game)
     {
-        if (NightStakeUsd <= 0 || NightStartHour == NightEndHour) return StakeUsd;
+        var scheduled = NightStakeUsd > 0 || NightStakeByGame.Count > 0;
+        if (!scheduled || NightStartHour == NightEndHour) return StakeUsd;
 
         var hour = utcNow.ToOffset(TimeSpan.FromHours(LocalUtcOffsetHours)).Hour;
         var inWindow = NightStartHour < NightEndHour
             ? hour >= NightStartHour && hour < NightEndHour
             : hour >= NightStartHour || hour < NightEndHour;
 
-        return inWindow ? NightStakeUsd : StakeUsd;
+        if (!inWindow) return StakeUsd;
+        if (NightStakeByGame.TryGetValue(game, out var byGame)) return byGame;
+
+        // No per-game entry and no global night stake means the window exists only for the
+        // games that named themselves. Everyone else trades the day size.
+        return NightStakeUsd > 0 ? NightStakeUsd : StakeUsd;
     }
 
     /// <summary>One line for the startup log, so the running schedule is never a guess.</summary>
-    public string StakeSummary() =>
-        NightStakeUsd <= 0 || NightStartHour == NightEndHour
-            ? $"${StakeUsd} all day"
-            : $"${NightStakeUsd} from {NightStartHour:00}:00 to {NightEndHour:00}:00 (UTC{LocalUtcOffsetHours:+#;-#;+0}), ${StakeUsd} otherwise";
+    public string StakeSummary()
+    {
+        if ((NightStakeUsd <= 0 && NightStakeByGame.Count == 0) || NightStartHour == NightEndHour)
+            return $"${StakeUsd} all day";
+
+        var window = $"{NightStartHour:00}:00-{NightEndHour:00}:00 (UTC{LocalUtcOffsetHours:+#;-#;+0})";
+        var overrides = NightStakeByGame.Count == 0
+            ? ""
+            : ", except " + string.Join(", ", NightStakeByGame
+                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => $"{kv.Key}=${kv.Value}"));
+        var baseline = NightStakeUsd > 0 ? $"${NightStakeUsd}" : $"${StakeUsd}";
+
+        return $"{baseline} in {window}{overrides}, ${StakeUsd} otherwise";
+    }
 
     /// <summary>
     /// Hard ceiling on USD spent per UTC day. Counted in memory, so a restart resets it —
@@ -528,6 +564,34 @@ public sealed class PolymarketOptions
             }
         }
 
+        if (NightStakeByGame.Count == 0 && !string.IsNullOrWhiteSpace(NightStakeByGameCsv))
+        {
+            foreach (var pair in NightStakeByGameCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = pair.LastIndexOf('=');
+                if (eq <= 0)
+                    throw new InvalidOperationException($"Polymarket:NightStakeByGameCsv has \"{pair}\", expected Game=usd");
+
+                var name = pair[..eq].Trim();
+                if (!decimal.TryParse(pair[(eq + 1)..].Trim(), System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var usd))
+                    throw new InvalidOperationException($"Polymarket:NightStakeByGameCsv has \"{pair}\", which is not a number");
+
+                if (usd <= 0m)
+                    throw new InvalidOperationException(
+                        $"Polymarket:NightStakeByGameCsv has {name}={usd}; must be > 0 (omit the game to use NightStakeUsd)");
+
+                NightStakeByGame[name] = usd;
+            }
+        }
+
+        // A game named here that the scanner never produces is a setting that silently does
+        // nothing. It is always a typo - "Dota2" for "Dota 2", "League of Legends" for "LoL".
+        foreach (var game in NightStakeByGame.Keys)
+            if (Games.Length > 0 && !Games.Contains(game, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Polymarket:NightStakeByGameCsv names \"{game}\", which is not in Games ({string.Join(", ", Games)})");
+
         // A band that cannot contain anything arms nothing, silently, for every market of
         // that game - the failure mode that looks exactly like a working bot in a quiet
         // hour. Catch it here, where the numbers are visible, rather than in a week of
@@ -578,13 +642,20 @@ public sealed class PolymarketOptions
         // A night stake too small to buy the exchange minimum is not a smaller position,
         // it is silently no position at all — the window would log a skip per market and
         // look like a dead bot. Fail here instead, where the number is visible.
-        if (NightStakeUsd > 0 && EntryPrices.Length > 0)
+        if (EntryPrices.Length > 0)
         {
             var cheapest = EntryPrices.Min();
-            if (Math.Floor(NightStakeUsd / cheapest) < 5m)
+
+            if (NightStakeUsd > 0 && Math.Floor(NightStakeUsd / cheapest) < 5m)
                 throw new InvalidOperationException(
                     $"Polymarket:NightStakeUsd ${NightStakeUsd} buys only {Math.Floor(NightStakeUsd / cheapest)} whole shares " +
                     $"at {cheapest}, under Polymarket's 5-share minimum");
+
+            foreach (var (game, usd) in NightStakeByGame)
+                if (Math.Floor(usd / cheapest) < 5m)
+                    throw new InvalidOperationException(
+                        $"Polymarket:NightStakeByGameCsv has {game}=${usd}, which buys only " +
+                        $"{Math.Floor(usd / cheapest)} whole shares at {cheapest}, under Polymarket's 5-share minimum");
         }
         foreach (var p in EntryPrices)
             if (p < MinAskPrice || p >= 1m)

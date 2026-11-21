@@ -401,7 +401,7 @@ public sealed class EsportsEntryWorker(
         // not a target: $0.20 at 3c is 6 shares for $0.18.
         // Read per order, not once at startup: the overnight window changes this under a
         // process that may run for days.
-        var stake = _opt.StakeFor(DateTimeOffset.UtcNow);
+        var stake = _opt.StakeFor(DateTimeOffset.UtcNow, market.Game);
 
         var shares = Math.Floor(stake / level);
         if (shares < MinOrderShares)

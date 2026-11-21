@@ -707,6 +707,10 @@ services:
       Polymarket__NightEndHour:        "${POLY_NIGHT_END_HOUR:-6}"
       Polymarket__LocalUtcOffsetHours: "${POLY_UTC_OFFSET_HOURS:-7}"
 
+      # Stake ban dem rieng cho tung game, vd "Dota 2=0.5,LoL=0.5".
+      # Game co ten o day giu muc rieng trong cua so dem; con lai dung NightStakeUsd.
+      Polymarket__NightStakeByGameCsv: "${POLY_NIGHT_STAKE_BY_GAME:-}"
+
       Polymarket__MaxDailyUsd:     "${POLY_MAX_DAILY_USD:-15}"
       Polymarket__MinVolumeUsd:    "${POLY_MIN_VOLUME_USD:-25000}"
       Polymarket__ScanIntervalSeconds: "${POLY_SCAN_SECONDS:-5}"
