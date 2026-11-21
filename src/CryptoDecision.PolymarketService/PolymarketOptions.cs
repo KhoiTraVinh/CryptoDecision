@@ -389,6 +389,20 @@ public sealed class PolymarketOptions
     public string[] Games { get; set; } = [];
 
     /// <summary>
+    /// <see cref="Games"/> as a comma-separated string, e.g. <c>"Dota 2,LoL"</c>. Set, it
+    /// replaces <see cref="Games"/> outright rather than adding to it.
+    ///
+    /// Exists because an array binds from environment variables only as
+    /// <c>Polymarket__Games__0</c>, <c>__1</c>, and so on - a shape that cannot shrink a
+    /// list already in appsettings.json, since the leftover indices survive. Dropping a
+    /// game is exactly the operation this setting is for: Counter-Strike lost $72.90 over
+    /// 403 entries in November at a 0.50% win rate, against the 1.00% that a 1c entry
+    /// needs to break even, so turning a game off has to be a one-line .env change rather
+    /// than a rebuild.
+    /// </summary>
+    public string GamesCsv { get; set; } = "";
+
+    /// <summary>
     /// Per-game arming thresholds as "Game=price" pairs, e.g.
     /// "Counter-Strike=0.03,Valorant=0.03,LoL=0.09,Dota 2=0.09".
     ///
@@ -549,6 +563,13 @@ public sealed class PolymarketOptions
                 .ToArray();
 
         if (EntryPrices.Length == 0) EntryPrices = [0.01m];
+
+        // GamesCsv wins over Games when both are set: the array form can only come from
+        // appsettings.json, and an operator editing .env must be able to override it
+        // without editing the image. Same reason EntryPricesCsv exists.
+        if (!string.IsNullOrWhiteSpace(GamesCsv))
+            Games = GamesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         if (Games.Length == 0) Games = ["Counter-Strike", "LoL", "Dota 2", "Valorant"];
 
         if (ArmBelowAskByGame.Count == 0)
