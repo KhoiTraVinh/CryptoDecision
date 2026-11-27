@@ -403,6 +403,31 @@ public sealed class PolymarketOptions
     public string GamesCsv { get; set; } = "";
 
     /// <summary>
+    /// Games whose entry level may be armed again after the exchange cancels the order,
+    /// as <c>"Dota 2,LoL"</c>. Empty disables the whole mechanism.
+    ///
+    /// Polymarket cancels resting orders on its own - six of fifty-eight orders in one
+    /// twenty-hour window on 2026-11-27, none of them filled. <see cref="EntryPrices"/>
+    /// de-duplication is add-only, so each of those tokens was locked out of re-entry for
+    /// the life of the process: the bot sat with three armed markets and zero orders on
+    /// the book, which is a missed win rather than a saved dollar.
+    ///
+    /// Scoped by game because re-entry is only worth the risk where the entries are:
+    /// Dota 2 and LoL are the two games whose measured win rate is not below the 1.00%
+    /// that a 1c entry needs to break even, while Counter-Strike sat at 0.60% over 831
+    /// entries. Re-arming a losing game just buys the losing side twice.
+    ///
+    /// See EsportsEntryWorker.ReleaseVanishedOrders for the two guards that keep a FILL
+    /// from being mistaken for a cancel. Both exist because the first version of this
+    /// re-armed twice against a fill the position feed had not caught up with yet, and
+    /// bought the same side a second time.
+    /// </summary>
+    public string ReArmGamesCsv { get; set; } = "";
+
+    /// <summary>Parsed form of <see cref="ReArmGamesCsv"/>.</summary>
+    public HashSet<string> ReArmGames { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Per-game arming thresholds as "Game=price" pairs, e.g.
     /// "Counter-Strike=0.03,Valorant=0.03,LoL=0.09,Dota 2=0.09".
     ///
@@ -641,6 +666,15 @@ public sealed class PolymarketOptions
             if (Games.Length > 0 && !Games.Contains(game, StringComparer.OrdinalIgnoreCase))
                 throw new InvalidOperationException(
                     $"Polymarket:StakeByGameCsv names \"{game}\", which is not in Games ({string.Join(", ", Games)})");
+
+        if (ReArmGames.Count == 0 && !string.IsNullOrWhiteSpace(ReArmGamesCsv))
+            foreach (var name in ReArmGamesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                ReArmGames.Add(name);
+
+        foreach (var game in ReArmGames)
+            if (Games.Length > 0 && !Games.Contains(game, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Polymarket:ReArmGamesCsv names \"{game}\", which is not in Games ({string.Join(", ", Games)})");
 
         if (NightStakeByGame.Count == 0 && !string.IsNullOrWhiteSpace(NightStakeByGameCsv))
         {

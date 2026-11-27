@@ -720,6 +720,10 @@ services:
       # Danh sach game, vd "Dota 2,LoL". De trong = dung Games trong appsettings.json
       # (ca 4 game). Set gia tri thi THAY THE han, khong cong them.
       Polymarket__GamesCsv:        "${POLY_GAMES:-}"
+
+      # Game duoc phep dat lai lenh sau khi SAN tu huy, vd "Dota 2,LoL".
+      # De trong = tat han co che. Chi mo cho game co ti le thang khong duoi hoa von.
+      Polymarket__ReArmGamesCsv:   "${POLY_REARM_GAMES:-}"
       Polymarket__ScanIntervalSeconds: "${POLY_SCAN_SECONDS:-5}"
       # Giu true. Tach dong tien cua @greenworld theo so phe nam trong mot market:
       # 25 market om ca hai phe @1c tra ve +$3.243, con 2.139 market chi mot phe lo

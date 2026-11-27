@@ -57,6 +57,21 @@ public sealed class EsportsEntryWorker(
     private readonly Dictionary<string, string> _restingOrders = [];
 
     /// <summary>
+    /// Every order this process placed, with the level and game behind it, kept until the
+    /// order is accounted for. An order leaves the book for exactly two reasons - it
+    /// filled, or it was cancelled - and only this map can tell the difference later.
+    /// </summary>
+    private readonly Dictionary<string, (string TokenId, decimal Level, string Game)> _ourOrders = [];
+
+    /// <summary>
+    /// Orders seen absent from the book on ONE sync. A fill reaches the order book before
+    /// it reaches the position feed, so a single absent reading proves nothing; requiring
+    /// two consecutive ones puts a whole sync interval between the book and the verdict.
+    /// This is the guard whose absence bought the same side twice on 2026-11-18.
+    /// </summary>
+    private readonly HashSet<string> _missingOnce = [];
+
+    /// <summary>
     /// Sides seen under the arming floor this cycle — a map that has already ended rather
     /// than one still being lost. Reset per cycle; only ever read by the cycle log.
     /// </summary>
@@ -485,7 +500,15 @@ public sealed class EsportsEntryWorker(
     {
         _placed.Add(Key(tokenId, level));
         _committedSide[market.ConditionId] = tokenId;
-        if (!string.IsNullOrEmpty(orderId)) _restingOrders[orderId] = tokenId;
+        if (!string.IsNullOrEmpty(orderId))
+        {
+            _restingOrders[orderId] = tokenId;
+
+            // Game is captured here, at placement, rather than looked up later. By the
+            // time an order is found missing its market may have dropped out of the scan,
+            // and "which game was that" would have no answer exactly when it is needed.
+            _ourOrders[orderId] = (tokenId, level, market.Game);
+        }
     }
 
     /// <summary>
@@ -500,12 +523,46 @@ public sealed class EsportsEntryWorker(
         if (string.IsNullOrWhiteSpace(address)) return;
 
         var ok = true;
+        var ordersRead = false;
+
+        // ORDER MATTERS. The book is read first and the positions second, so the position
+        // snapshot is strictly NEWER than the book snapshot. A fill that lands between the
+        // two then shows up as a position we hold, which is what stops it being mistaken
+        // for a cancel. Reading them the other way round is what caused the double buys on
+        // 2026-11-18, twice in one afternoon.
+        try
+        {
+            var orders = await clob.GetOpenOrdersAsync(ct);
+            _restingOrders.Clear();
+
+            foreach (var o in orders)
+            {
+                if (o.Side != "BUY") continue;
+                _restingOrders[o.Id] = o.TokenId;
+                _placed.Add(Key(o.TokenId, o.Price));
+
+                // An order still on the book is not missing. Clearing the flag here is
+                // what makes "two CONSECUTIVE syncs" mean consecutive.
+                _missingOnce.Remove(o.Id);
+            }
+
+            ordersRead = true;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Open order sync failed; keeping the previous picture");
+            ok = false;
+        }
+
+        var held = new HashSet<string>();
+        var heldIsComplete = true;
 
         try
         {
             foreach (var p in await dataApi.GetPositionsAsync(address, ct))
             {
                 _committedSide[p.ConditionId] = p.TokenId;
+                held.Add(p.TokenId);
 
                 // Block every level on a token we already hold. A position does not say
                 // which level bought it, and re-buying after a restart is a far worse
@@ -518,32 +575,72 @@ public sealed class EsportsEntryWorker(
             // Crucially we do NOT clear what we already know: a failed read must never
             // look like "I hold nothing", or the bot would buy it all a second time.
             log.LogWarning(ex, "Position sync failed; keeping the previous picture");
+            heldIsComplete = false;
             ok = false;
         }
 
-        try
-        {
-            var orders = await clob.GetOpenOrdersAsync(ct);
-            _restingOrders.Clear();
+        // Both reads have to have succeeded. Re-arming against half a picture is the same
+        // double buy by a slower route.
+        var rearmed = ordersRead && heldIsComplete ? ReleaseVanishedOrders(held) : 0;
 
-            foreach (var o in orders)
-            {
-                if (o.Side != "BUY") continue;
-                _restingOrders[o.Id] = o.TokenId;
-                _placed.Add(Key(o.TokenId, o.Price));
-            }
-
-            log.LogInformation("Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry",
-                _restingOrders.Count, _committedSide.Count);
-        }
-        catch (Exception ex)
-        {
-            log.LogWarning(ex, "Open order sync failed; keeping the previous picture");
-            ok = false;
-        }
+        log.LogInformation(
+            "Exchange sync: {Resting} resting orders, {Markets} markets blocked from re-entry, {Rearmed} re-armed, {Pending} awaiting a second look",
+            _restingOrders.Count, _committedSide.Count, rearmed, _missingOnce.Count);
 
         // Only advance the clock on a clean sync, so a failure retries next cycle.
         if (ok) _syncedAt = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Opens the entry level again for orders the EXCHANGE cancelled, so a token is not
+    /// locked out of re-entry for the life of the process.
+    ///
+    /// Three guards, each paid for by a specific failure:
+    ///
+    ///   holding the token  - a fill is the other way an order leaves the book, and a fill
+    ///                        leaves a position. Deliberately coarse: a partial fill also
+    ///                        leaves one, and that level stays locked. Buying one side
+    ///                        twice costs real money; missing a follow-up on a side we
+    ///                        already own does not.
+    ///   two syncs missing  - the position feed lags the book by seconds. One absent
+    ///                        reading is not evidence.
+    ///   game on the list   - re-entry is only worth it where the entries are. See
+    ///                        PolymarketOptions.ReArmGamesCsv.
+    ///
+    /// Orders we cancel ourselves never reach here: they are dropped from the map at the
+    /// moment we issue the cancel.
+    /// </summary>
+    private int ReleaseVanishedOrders(IReadOnlySet<string> heldTokens)
+    {
+        if (_opt.ReArmGames.Count == 0) { _ourOrders.Clear(); _missingOnce.Clear(); return 0; }
+
+        var rearmed = 0;
+
+        foreach (var (orderId, o) in _ourOrders.Where(kv => !_restingOrders.ContainsKey(kv.Key)).ToList())
+        {
+            if (heldTokens.Contains(o.TokenId))
+            {
+                _ourOrders.Remove(orderId);
+                _missingOnce.Remove(orderId);
+                continue;
+            }
+
+            // First time missing: wait one more sync before believing it.
+            if (_missingOnce.Add(orderId)) continue;
+
+            _ourOrders.Remove(orderId);
+            _missingOnce.Remove(orderId);
+
+            if (!_opt.ReArmGames.Contains(o.Game)) continue;
+            if (_placed.Remove(Key(o.TokenId, o.Level))) rearmed++;
+        }
+
+        if (rearmed > 0)
+            log.LogInformation(
+                "Re-armed {Rearmed} levels the exchange cancelled without filling; {Games} may be entered again",
+                rearmed, string.Join(", ", _opt.ReArmGames));
+
+        return rearmed;
     }
 
     /// <summary>
@@ -562,7 +659,15 @@ public sealed class EsportsEntryWorker(
         var cancelled = await clob.CancelOrdersAsync(stale, ct);
         if (cancelled > 0)
         {
-            foreach (var id in stale) _restingOrders.Remove(id);
+            // Dropped from _ourOrders as well: a cancel we chose must never come back next
+            // sync looking like one the exchange made, or ReleaseVanishedOrders would
+            // re-arm the very level we just decided was not worth holding.
+            foreach (var id in stale)
+            {
+                _restingOrders.Remove(id);
+                _ourOrders.Remove(id);
+                _missingOnce.Remove(id);
+            }
             log.LogInformation("Cancelled {Count} orders left on matches that are over", cancelled);
         }
     }
